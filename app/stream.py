@@ -328,7 +328,12 @@ class StreamWorker:
                 self._last_preview_ts = now
 
     def _process_single_frame(
-        self, frame: np.ndarray, detector: ObjectDetector, cfg: RuntimeConfig, dt: float
+        self,
+        frame: np.ndarray,
+        detector: ObjectDetector,
+        cfg: RuntimeConfig,
+        dt: float,
+        publish_preview: bool = True,
     ) -> None:
         try:
             h, w = frame.shape[:2]
@@ -417,13 +422,17 @@ class StreamWorker:
                     if cfg.webhook_url.strip():
                         self._dispatch_webhook(cfg.webhook_url.strip(), rec.model_dump(), snap_path)
 
-            jpg_bytes = self._render_preview_jpeg(
-                frame=frame,
-                tracks=tracks,
-                track_statuses=step.track_statuses,
-                zones=zones,
-                counting_lines=counting_lines,
-                cfg=cfg,
+            jpg_bytes = (
+                self._render_preview_jpeg(
+                    frame=frame,
+                    tracks=tracks,
+                    track_statuses=step.track_statuses,
+                    zones=zones,
+                    counting_lines=counting_lines,
+                    cfg=cfg,
+                )
+                if publish_preview
+                else None
             )
 
             dwells = [
@@ -602,12 +611,13 @@ class StreamWorker:
             last_infer_ts = 0.0
             first_frame_seen = False
 
-            # Dedicated RTSP reader thread decodes every frame in order and keeps only the newest.
-            # The reader thread owns `cap` and releases it in its finally block to avoid racing cap.read().
+            # Dedicated RTSP/RTMP reader thread drains cap.read() at full speed so FFmpeg never buffers.
+            # A separate preview thread encodes only the newest frame strictly forward in time (no rubber-banding).
             rtsp_lock = threading.Lock()
             rtsp_state: dict[str, Any] = {"frame": None, "seq": 0, "alive": True}
             reader_stop = threading.Event()
             reader_thread: threading.Thread | None = None
+            preview_thread: threading.Thread | None = None
             if not is_file:
                 def _rtsp_reader() -> None:
                     try:
@@ -623,12 +633,36 @@ class StreamWorker:
                             with rtsp_lock:
                                 rtsp_state["frame"] = frm
                                 rtsp_state["seq"] += 1
-                            self._maybe_publish_live_preview(frm)
                     finally:
                         cap.release()
 
+                def _preview_publisher() -> None:
+                    last_p_seq = 0
+                    while (
+                        not reader_stop.is_set()
+                        and not self._stop_event.is_set()
+                        and not self._reconnect_event.is_set()
+                    ):
+                        with rtsp_lock:
+                            seq = rtsp_state["seq"]
+                            frm = rtsp_state["frame"]
+                        if frm is None or seq == last_p_seq:
+                            time.sleep(0.01)
+                            continue
+                        last_p_seq = seq
+                        with self._lock:
+                            tracks, statuses, zones, lines = self._latest_overlay
+                            pcfg = self.config
+                        jpg = self._render_preview_jpeg(frm, tracks, statuses, zones, lines, pcfg)
+                        if jpg is not None:
+                            with self._lock:
+                                self._latest_jpeg = jpg
+                        time.sleep(0.04)
+
                 reader_thread = threading.Thread(target=_rtsp_reader, name="rtsp-reader", daemon=True)
                 reader_thread.start()
+                preview_thread = threading.Thread(target=_preview_publisher, name="preview-pub", daemon=True)
+                preview_thread.start()
 
             last_seq = 0
             while not self._stop_event.is_set() and not self._reconnect_event.is_set():
@@ -671,9 +705,11 @@ class StreamWorker:
                 t0 = time.monotonic()
                 dt = t0 - last_infer_ts if last_infer_ts > 0 else interval
                 last_infer_ts = t0
-                self._process_single_frame(frame, detector, cfg, dt)
+                self._process_single_frame(frame, detector, cfg, dt, publish_preview=is_file)
 
             reader_stop.set()
+            if preview_thread is not None:
+                preview_thread.join(timeout=1.5)
             if reader_thread is not None:
                 reader_thread.join(timeout=3.0)
             else:

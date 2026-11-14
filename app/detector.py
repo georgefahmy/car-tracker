@@ -471,7 +471,10 @@ class ObjectDetector:
         elif torch.cuda.is_available():
             self.device = "cuda"
         else:
+            import os
+
             self.device = "cpu"
+            torch.set_num_threads(min(4, os.cpu_count() or 4))
 
         self.model = YOLO(model_name)
 

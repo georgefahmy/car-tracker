@@ -18,6 +18,7 @@ from app.detector import (
     LineCrossingMonitor,
     ObjectDetector,
     RedZoneMonitor,
+    TrackedDetection,
     annotate_frame,
     filter_excluded_tracks,
 )
@@ -171,6 +172,10 @@ class StreamWorker:
         self._active_people: int = 0
         self._active_dwells: list[dict[str, Any]] = []
         self._last_violation: dict[str, Any] | None = None
+        self._latest_overlay: tuple[
+            list[TrackedDetection], dict[int, dict[str, Any]], list[Any], list[Any]
+        ] = ([], {}, [], [])
+        self._last_preview_ts: float = 0.0
 
     def get_source_url(self, cfg: RuntimeConfig | None = None) -> str:
         c = cfg or self.config
@@ -259,6 +264,69 @@ class StreamWorker:
             self._detector = ObjectDetector(self.settings.yolo_model)
         return self._detector
 
+    def _render_preview_jpeg(
+        self,
+        frame: np.ndarray,
+        tracks: list[TrackedDetection],
+        track_statuses: dict[int, dict[str, Any]],
+        zones: list[Any],
+        counting_lines: list[Any],
+        cfg: RuntimeConfig,
+    ) -> bytes | None:
+        """Downscale first, then annotate at preview resolution for maximum FPS."""
+        h, w = frame.shape[:2]
+        preview = resize_for_preview(frame, cfg.preview_max_width)
+        ph, pw = preview.shape[:2]
+        sx = pw / float(max(w, 1))
+        sy = ph / float(max(h, 1))
+        if abs(sx - 1.0) > 1e-3 or abs(sy - 1.0) > 1e-3:
+            scaled_tracks = [
+                TrackedDetection(
+                    track_id=t.track_id,
+                    class_id=t.class_id,
+                    class_name=t.class_name,
+                    confidence=t.confidence,
+                    bbox_xyxy=(
+                        t.bbox_xyxy[0] * sx,
+                        t.bbox_xyxy[1] * sy,
+                        t.bbox_xyxy[2] * sx,
+                        t.bbox_xyxy[3] * sy,
+                    ),
+                    is_emergency=t.is_emergency,
+                )
+                for t in tracks
+            ]
+        else:
+            scaled_tracks = tracks
+
+        annotated_preview = annotate_frame(
+            frame=preview,
+            tracks=scaled_tracks,
+            track_statuses=track_statuses,
+            zones=zones,
+            dwell_threshold=cfg.dwell_seconds,
+            hotspot=self.hotspot,
+            show_heatmap=cfg.heatmap_enabled,
+            counting_lines=counting_lines,
+            annotation_scale=cfg.annotation_scale,
+        )
+        ok_jpg, jpg_buf = cv2.imencode(".jpg", annotated_preview, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        return jpg_buf.tobytes() if ok_jpg else None
+
+    def _maybe_publish_live_preview(self, frame: np.ndarray) -> None:
+        """Publish an intermediate camera frame overlaid with the latest tracked boxes."""
+        now = time.monotonic()
+        if (now - self._last_preview_ts) < 0.05:
+            return
+        with self._lock:
+            tracks, statuses, zones, lines = self._latest_overlay
+            cfg = self.config
+        jpg = self._render_preview_jpeg(frame, tracks, statuses, zones, lines, cfg)
+        if jpg is not None:
+            with self._lock:
+                self._latest_jpeg = jpg
+                self._last_preview_ts = now
+
     def _process_single_frame(
         self, frame: np.ndarray, detector: ObjectDetector, cfg: RuntimeConfig, dt: float
     ) -> None:
@@ -317,40 +385,46 @@ class StreamWorker:
                     total_people=step.new_total_people,
                 )
 
-            annotated_full = annotate_frame(
+            if step.new_violations:
+                annotated_full = annotate_frame(
+                    frame=frame,
+                    tracks=tracks,
+                    track_statuses=step.track_statuses,
+                    zones=zones,
+                    dwell_threshold=cfg.dwell_seconds,
+                    hotspot=self.hotspot,
+                    show_heatmap=cfg.heatmap_enabled,
+                    counting_lines=counting_lines,
+                    annotation_scale=cfg.annotation_scale,
+                )
+                for v in step.new_violations:
+                    ts_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                    fname = f"violation_{ts_slug}_t{v.track_id}.jpg"
+                    snap_path = self.snapshots_dir / fname
+                    cv2.imwrite(str(snap_path), annotated_full, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    rec = self.db.add_violation(
+                        track_id=v.track_id,
+                        zone_id=v.zone_id,
+                        zone_name=v.zone_name,
+                        vehicle_class=v.vehicle_class,
+                        started_at=v.started_at,
+                        flagged_at=v.flagged_at,
+                        dwell_seconds=v.dwell_seconds,
+                        snapshot_filename=fname,
+                    )
+                    with self._lock:
+                        self._last_violation = rec.model_dump()
+                    if cfg.webhook_url.strip():
+                        self._dispatch_webhook(cfg.webhook_url.strip(), rec.model_dump(), snap_path)
+
+            jpg_bytes = self._render_preview_jpeg(
                 frame=frame,
                 tracks=tracks,
                 track_statuses=step.track_statuses,
                 zones=zones,
-                dwell_threshold=cfg.dwell_seconds,
-                hotspot=self.hotspot,
-                show_heatmap=cfg.heatmap_enabled,
                 counting_lines=counting_lines,
-                annotation_scale=cfg.annotation_scale,
+                cfg=cfg,
             )
-
-            for v in step.new_violations:
-                ts_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                fname = f"violation_{ts_slug}_t{v.track_id}.jpg"
-                snap_path = self.snapshots_dir / fname
-                cv2.imwrite(str(snap_path), annotated_full, [cv2.IMWRITE_JPEG_QUALITY, 92])
-                rec = self.db.add_violation(
-                    track_id=v.track_id,
-                    zone_id=v.zone_id,
-                    zone_name=v.zone_name,
-                    vehicle_class=v.vehicle_class,
-                    started_at=v.started_at,
-                    flagged_at=v.flagged_at,
-                    dwell_seconds=v.dwell_seconds,
-                    snapshot_filename=fname,
-                )
-                with self._lock:
-                    self._last_violation = rec.model_dump()
-                if cfg.webhook_url.strip():
-                    self._dispatch_webhook(cfg.webhook_url.strip(), rec.model_dump(), snap_path)
-
-            preview = resize_for_preview(annotated_full, cfg.preview_max_width)
-            ok_jpg, jpg_buf = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 80])
 
             dwells = [
                 {"track_id": tid, **st}
@@ -359,8 +433,10 @@ class StreamWorker:
             ]
 
             with self._lock:
-                if ok_jpg:
-                    self._latest_jpeg = jpg_buf.tobytes()
+                self._latest_overlay = (list(tracks), dict(step.track_statuses), list(zones), list(counting_lines))
+                if jpg_bytes is not None:
+                    self._latest_jpeg = jpg_bytes
+                    self._last_preview_ts = time.monotonic()
                 self._resolution = (int(w), int(h))
                 self._measured_fps = 1.0 / max(dt, 1e-3)
                 self._active_cars = step.active_cars
@@ -547,6 +623,7 @@ class StreamWorker:
                             with rtsp_lock:
                                 rtsp_state["frame"] = frm
                                 rtsp_state["seq"] += 1
+                            self._maybe_publish_live_preview(frm)
                     finally:
                         cap.release()
 

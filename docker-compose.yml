@@ -1,0 +1,10 @@
+services:
+  car-tracker:
+    build: .
+    container_name: car-tracker
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1

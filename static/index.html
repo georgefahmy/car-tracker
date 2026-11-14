@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Car Tracker & Red-Zone Monitor</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot" id="statusDot"></span>
+      <div>
+        <h1>Car & Red-Zone Tracker</h1>
+        <p class="subtitle" id="streamInfo">Connecting to NVR...</p>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn btn-secondary" id="btnHeatmapToggle">Heatmap: OFF</button>
+      <button class="btn btn-ghost" id="btnHeatmapReset" title="Clear accumulated hotspot data">Clear Heatmap</button>
+      <button class="btn btn-ghost" id="btnResetStats" title="Reset unique & total counters">Reset Counts</button>
+      <button class="btn btn-primary" id="btnSettings">Settings</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- KPI Cards -->
+    <section class="kpi-grid">
+      <div class="kpi-card">
+        <span class="kpi-label">Vehicles (Live)</span>
+        <span class="kpi-value" id="kpiActiveCars">0</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">Unique Vehicles</span>
+        <span class="kpi-value accent-green" id="kpiUniqueCars">0</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">Total Vehicles</span>
+        <span class="kpi-value" id="kpiTotalCars">0</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">People (Live / Unique)</span>
+        <span class="kpi-value accent-blue" id="kpiPeople">0 / 0</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">Red-Zone Violations</span>
+        <span class="kpi-value accent-red" id="kpiViolations">0</span>
+      </div>
+      <div class="kpi-card">
+        <span class="kpi-label">Line Crossings (Flow)</span>
+        <span class="kpi-value accent-blue" id="kpiLineCrossings">0</span>
+      </div>
+    </section>
+
+    <!-- Main Workspace -->
+    <section class="workspace">
+      <div class="panel video-panel">
+        <div class="panel-header">
+          <h2>Live Camera Feed</h2>
+          <div class="zone-toolbar">
+            <button class="btn btn-danger" id="btnDrawZone">+ Draw Red Zone</button>
+            <button class="btn btn-secondary" id="btnDrawLine">+ Draw Traffic Line</button>
+            <button class="btn btn-secondary hidden" id="btnUndoPoint">Undo Point</button>
+            <button class="btn btn-primary hidden" id="btnFinishZone">Finish & Save</button>
+            <button class="btn btn-ghost hidden" id="btnCancelDraw">Cancel</button>
+          </div>
+        </div>
+
+        <div class="video-stage" id="videoStage">
+          <img id="videoStream" src="/api/stream/video" alt="Live Camera Stream" />
+          <canvas id="zoneCanvas"></canvas>
+          <div class="draw-hint hidden" id="drawHint">
+            Click on the video to place polygon corners around the red zone. Double-click or press "Finish & Save" when done.
+          </div>
+        </div>
+
+        <div class="zones-bar">
+          <h3>Configured Red Zones</h3>
+          <div id="zonesList" class="zones-list">
+            <span class="muted">No red zones defined yet. Click "+ Draw Red Zone" to outline one.</span>
+          </div>
+        </div>
+
+        <div class="zones-bar">
+          <h3>Configured Traffic Flow Lines</h3>
+          <div id="linesList" class="zones-list">
+            <span class="muted">No traffic lines defined yet. Click "+ Draw Traffic Line" to place a 2-point counting line.</span>
+          </div>
+        </div>
+      </div>
+
+      <aside class="side-column">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Hourly Traffic</h2>
+            <span class="muted small">Vehicles vs. People</span>
+          </div>
+          <canvas id="trafficChart" width="400" height="170"></canvas>
+        </div>
+
+        <div class="panel violations-panel">
+          <div class="panel-header">
+            <h2>Red-Zone Violations</h2>
+            <span class="muted small" id="violationCountLabel">0 logged</span>
+          </div>
+          <div id="violationsList" class="violations-list">
+            <p class="muted">No illegal parking violations recorded yet.</p>
+          </div>
+        </div>
+      </aside>
+    </section>
+  </main>
+
+  <!-- Settings Modal -->
+  <div class="modal-backdrop hidden" id="settingsModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Stream & Tracker Settings</h2>
+        <button class="btn btn-ghost" id="btnCloseSettings">&times;</button>
+      </div>
+      <form id="settingsForm" class="modal-body">
+        <div class="form-section">
+          <h3>Reolink NVR Connection</h3>
+          <div class="form-grid">
+            <label>NVR IP / Host
+              <input type="text" name="nvr_host" required />
+            </label>
+            <label>RTSP Port
+              <input type="number" name="nvr_port" min="1" max="65535" required />
+            </label>
+            <label>Channel
+              <input type="number" name="nvr_channel" min="1" max="64" required />
+            </label>
+            <label>Stream Quality
+              <select name="nvr_stream_type">
+                <option value="main">Main Stream (4K / High-Res)</option>
+                <option value="sub">Sub Stream (Low Bandwidth)</option>
+              </select>
+            </label>
+            <label>Username
+              <input type="text" name="nvr_user" />
+            </label>
+            <label>Password
+              <input type="password" name="nvr_pass" placeholder="Leave *** to keep existing" />
+            </label>
+          </div>
+          <label class="full-width">Local Test Video Path (optional — overrides RTSP when set)
+            <input type="text" name="test_video_path" placeholder="/path/to/test_traffic.mp4" />
+          </label>
+          <div class="test-row">
+            <button type="button" class="btn btn-secondary" id="btnTestStream">Test Connection</button>
+            <span id="testStreamResult" class="small muted"></span>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <h3>Computer Vision & Red-Zone Rules</h3>
+          <div class="form-grid">
+            <label>Processing FPS (1–15)
+              <input type="number" name="target_fps" step="0.5" min="0.5" max="30" required />
+            </label>
+            <label>YOLO Inference Size
+              <select name="yolo_imgsz">
+                <option value="640">640 (Fastest)</option>
+                <option value="960">960 (Balanced — 4K friendly)</option>
+                <option value="1280">1280 (Distant curbs / Small cars)</option>
+              </select>
+            </label>
+            <label>Confidence Threshold
+              <input type="number" name="confidence_threshold" step="0.05" min="0.05" max="0.95" required />
+            </label>
+            <label>Browser Preview Max Width
+              <select name="preview_max_width">
+                <option value="960">960px</option>
+                <option value="1280">1280px (720p)</option>
+                <option value="1920">1920px (1080p)</option>
+                <option value="3840">3840px (Full 4K)</option>
+              </select>
+            </label>
+            <label>Illegal Park Dwell Time (sec)
+              <input type="number" name="dwell_seconds" step="1" min="1" max="3600" required />
+            </label>
+            <label>Stationary Tolerance (0.005–0.05)
+              <input type="number" name="movement_threshold" step="0.005" min="0.001" max="0.2" required />
+            </label>
+            <label>Box & Label Size Scale (0.4–3.0)
+              <input type="number" name="annotation_scale" step="0.1" min="0.4" max="3.0" required />
+            </label>
+          </div>
+          <label class="checkbox-row">
+            <input type="checkbox" name="exempt_emergency_vehicles" />
+            <span>Exempt Emergency Vehicles (police lightbars, fire trucks, ambulances) from Red-Zone violations</span>
+          </label>
+          <div class="form-grid" style="margin-top: 10px;">
+            <label>Emergency Light Min Saturation (100–255)
+              <input type="number" name="emergency_min_saturation" min="100" max="255" required />
+            </label>
+            <label>Emergency Light Min Brightness (120–255)
+              <input type="number" name="emergency_min_value" min="120" max="255" required />
+            </label>
+            <label>Emergency Strobe Flash Swing (0.002–0.15)
+              <input type="number" name="emergency_strobe_swing" step="0.002" min="0.002" max="0.15" required />
+            </label>
+            <label>Fire Truck Red Body Ratio (0.10–0.80)
+              <input type="number" name="emergency_fire_red_ratio" step="0.05" min="0.10" max="0.80" required />
+            </label>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-ghost" id="btnCancelSettings">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save & Apply</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Snapshot Lightbox -->
+  <div class="modal-backdrop hidden" id="snapshotModal">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h2 id="snapshotTitle">Violation Snapshot</h2>
+        <button class="btn btn-ghost" id="btnCloseSnapshot">&times;</button>
+      </div>
+      <div class="modal-body">
+        <img id="snapshotFullImg" src="" alt="Violation Snapshot" class="snapshot-full" />
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import AsyncGenerator
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from app.config import RuntimeConfig, Settings, build_rtsp_url
+from app.database import CountingLineModel, Database, ViolationRecord, ZoneModel
+from app.stream import StreamWorker, test_stream_connection
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+STATIC_DIR = BASE_DIR / "static"
+
+
+class ConfigUpdatePayload(RuntimeConfig):
+    """Payload for updating runtime configuration; '***' preserves existing password."""
+
+    pass
+
+
+class StreamTestPayload(BaseModel):
+    nvr_host: str | None = None
+    nvr_port: int | None = None
+    nvr_channel: int | None = None
+    nvr_stream_type: str | None = None
+    nvr_user: str | None = None
+    nvr_pass: str | None = None
+    test_video_path: str | None = None
+
+
+def create_app(settings: Settings | None = None, start_worker: bool = True) -> FastAPI:
+    cfg_settings = settings or Settings()
+    cfg_settings.snapshots_path.mkdir(parents=True, exist_ok=True)
+
+    db = Database(cfg_settings.db_path)
+    worker = StreamWorker(cfg_settings, db)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
+        if start_worker:
+            worker.start()
+        try:
+            yield
+        finally:
+            worker.stop()
+            db.close()
+
+    app = FastAPI(title="Reolink Car & Red-Zone Tracker", lifespan=lifespan)
+    app.state.db = db
+    app.state.worker = worker
+    app.state.settings = cfg_settings
+
+    if STATIC_DIR.exists():
+        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.mount("/snapshots", StaticFiles(directory=str(cfg_settings.snapshots_path)), name="snapshots")
+
+    @app.get("/")
+    async def index() -> FileResponse:
+        return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/api/stream/video")
+    async def video_stream() -> StreamingResponse:
+        async def frame_generator() -> AsyncGenerator[bytes, None]:
+            while True:
+                jpg = worker.get_latest_jpeg()
+                if jpg:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
+                    )
+                await asyncio.sleep(0.15)
+
+        return StreamingResponse(
+            frame_generator(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+        )
+
+    @app.get("/api/stats")
+    async def get_stats() -> dict:
+        state = worker.get_live_state()
+        state["hourly_traffic"] = db.get_hourly_traffic(limit=24)
+        return state
+
+    @app.post("/api/stats/reset")
+    async def reset_stats() -> dict:
+        db.reset_stats()
+        db.reset_line_counts()
+        worker.monitor.reset()
+        worker.line_monitor.reset()
+        return {"ok": True}
+
+    @app.get("/api/zones", response_model=list[ZoneModel])
+    async def get_zones() -> list[ZoneModel]:
+        return db.get_zones()
+
+    @app.put("/api/zones", response_model=list[ZoneModel])
+    async def put_zones(zones: list[ZoneModel]) -> list[ZoneModel]:
+        return db.replace_zones(zones)
+
+    @app.get("/api/lines", response_model=list[CountingLineModel])
+    async def get_lines() -> list[CountingLineModel]:
+        return db.get_counting_lines()
+
+    @app.put("/api/lines", response_model=list[CountingLineModel])
+    async def put_lines(lines: list[CountingLineModel]) -> list[CountingLineModel]:
+        return db.replace_counting_lines(lines)
+
+    @app.get("/api/violations", response_model=list[ViolationRecord])
+    async def get_violations(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> list[ViolationRecord]:
+        return db.get_violations(limit=limit, offset=offset)
+
+    @app.delete("/api/violations/{violation_id}")
+    async def delete_violation(violation_id: int) -> dict:
+        fname = db.delete_violation(violation_id)
+        if fname is None:
+            raise HTTPException(status_code=404, detail="Violation not found")
+        snap = cfg_settings.snapshots_path / fname
+        if snap.exists():
+            snap.unlink()
+        return {"ok": True}
+
+    @app.get("/api/config")
+    async def get_config() -> dict:
+        data = worker.config.model_dump()
+        has_pass = bool(data.get("nvr_pass"))
+        data["nvr_pass"] = "***" if has_pass else ""
+        data["has_password"] = has_pass
+        return data
+
+    @app.put("/api/config")
+    async def put_config(payload: ConfigUpdatePayload) -> dict:
+        if payload.nvr_pass == "***":
+            payload.nvr_pass = worker.config.nvr_pass
+        worker.update_config(RuntimeConfig(**payload.model_dump()))
+        data = worker.config.model_dump()
+        has_pass = bool(data.get("nvr_pass"))
+        data["nvr_pass"] = "***" if has_pass else ""
+        data["has_password"] = has_pass
+        return data
+
+    @app.post("/api/stream/test")
+    async def test_stream(payload: StreamTestPayload) -> dict:
+        cur = worker.config
+        test_vid = payload.test_video_path if payload.test_video_path is not None else cur.test_video_path
+        if test_vid.strip():
+            source = test_vid.strip()
+        else:
+            raw_pass = payload.nvr_pass
+            if raw_pass in (None, "***"):
+                raw_pass = cur.nvr_pass
+            stream_type = payload.nvr_stream_type or cur.nvr_stream_type
+            if stream_type not in ("main", "sub"):
+                stream_type = "main"
+            source = build_rtsp_url(
+                host=payload.nvr_host or cur.nvr_host,
+                port=payload.nvr_port or cur.nvr_port,
+                channel=payload.nvr_channel or cur.nvr_channel,
+                stream_type=stream_type,  # type: ignore[arg-type]
+                user=payload.nvr_user if payload.nvr_user is not None else cur.nvr_user,
+                password=raw_pass,
+            )
+        return await asyncio.to_thread(test_stream_connection, source)
+
+    @app.post("/api/heatmap/toggle")
+    async def toggle_heatmap(enabled: bool | None = None) -> dict:
+        new_state = worker.toggle_heatmap(enabled)
+        return {"heatmap_enabled": new_state}
+
+    @app.post("/api/heatmap/reset")
+    async def reset_heatmap() -> dict:
+        worker.reset_heatmap()
+        return {"ok": True}
+
+    return app
+
+
+app = create_app()

@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app.config import RuntimeConfig, Settings, build_rtsp_url
+from app.config import RuntimeConfig, Settings, build_rtmp_url, build_rtsp_url
 from app.database import CountingLineModel, Database, ViolationRecord, ZoneModel
 from app.stream import StreamWorker, test_stream_connection
 
@@ -31,9 +31,14 @@ class StreamTestPayload(BaseModel):
     nvr_port: int | None = None
     nvr_channel: int | None = None
     nvr_stream_type: str | None = None
+    stream_mode: str | None = None
     nvr_user: str | None = None
     nvr_pass: str | None = None
     test_video_path: str | None = None
+
+
+class WebhookTestPayload(BaseModel):
+    webhook_url: str | None = None
 
 
 def create_app(settings: Settings | None = None, start_worker: bool = True) -> FastAPI:
@@ -87,7 +92,7 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
                         b"--frame\r\n"
                         b"Content-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
                     )
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(0.03)
 
         return StreamingResponse(
             frame_generator(),
@@ -187,15 +192,48 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
             stream_type = payload.nvr_stream_type or cur.nvr_stream_type
             if stream_type not in ("main", "sub"):
                 stream_type = "main"
-            source = build_rtsp_url(
-                host=payload.nvr_host or cur.nvr_host,
-                port=payload.nvr_port or cur.nvr_port,
-                channel=payload.nvr_channel or cur.nvr_channel,
-                stream_type=stream_type,  # type: ignore[arg-type]
-                user=payload.nvr_user if payload.nvr_user is not None else cur.nvr_user,
-                password=raw_pass,
-            )
+            stream_mode = payload.stream_mode or cur.stream_mode
+            if stream_mode == "rtmp":
+                source = build_rtmp_url(
+                    host=payload.nvr_host or cur.nvr_host,
+                    channel=payload.nvr_channel or cur.nvr_channel,
+                    stream_type=stream_type,  # type: ignore[arg-type]
+                    user=payload.nvr_user if payload.nvr_user is not None else cur.nvr_user,
+                    password=raw_pass,
+                )
+            else:
+                source = build_rtsp_url(
+                    host=payload.nvr_host or cur.nvr_host,
+                    port=payload.nvr_port or cur.nvr_port,
+                    channel=payload.nvr_channel or cur.nvr_channel,
+                    stream_type=stream_type,  # type: ignore[arg-type]
+                    user=payload.nvr_user if payload.nvr_user is not None else cur.nvr_user,
+                    password=raw_pass,
+                )
         return await asyncio.to_thread(test_stream_connection, source)
+
+    @app.post("/api/webhook/test")
+    async def test_webhook(payload: WebhookTestPayload) -> dict:
+        url = (payload.webhook_url if payload.webhook_url is not None else worker.config.webhook_url).strip()
+        if not url:
+            return {"ok": False, "error": "Enter a webhook URL first."}
+
+        def _send_test() -> dict:
+            import requests
+
+            msg = "🚨 Car Tracker Test Alert: Your red-zone violation webhook is configured and working!"
+            try:
+                if "discord.com/api/webhooks" in url:
+                    r = requests.post(url, json={"content": msg}, timeout=8)
+                else:
+                    r = requests.post(url, json={"text": msg, "content": msg, "test": True}, timeout=8)
+                if 200 <= r.status_code < 300:
+                    return {"ok": True, "status_code": r.status_code}
+                return {"ok": False, "error": f"HTTP {r.status_code}: {r.text[:160]}"}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        return await asyncio.to_thread(_send_test)
 
     @app.post("/api/heatmap/toggle")
     async def toggle_heatmap(enabled: bool | None = None) -> dict:

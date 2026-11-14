@@ -294,6 +294,11 @@ def test_line_crossing_monitor_and_api(tmp_path: Path) -> None:
         assert csv_r.status_code == 200
         assert "zone_name" in csv_r.text
 
+        # Webhook test validation
+        wh_r = client.post("/api/webhook/test", json={"webhook_url": ""})
+        assert wh_r.status_code == 200
+        assert wh_r.json()["ok"] is False
+
 
 def test_exclusion_mask_filters_tracks() -> None:
     mask = ZoneModel(

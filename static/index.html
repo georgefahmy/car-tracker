@@ -62,6 +62,7 @@
             <button class="btn btn-ghost" id="btnDrawExclusion">+ Exclusion Mask</button>
             <button class="btn btn-secondary" id="btnDrawLine">+ Draw Traffic Line</button>
             <button class="btn btn-secondary hidden" id="btnUndoPoint">Undo Point</button>
+            <button class="btn btn-secondary hidden" id="btnRenameEdit">Rename</button>
             <button class="btn btn-primary hidden" id="btnFinishZone">Finish & Save</button>
             <button class="btn btn-ghost hidden" id="btnCancelDraw">Cancel</button>
           </div>
@@ -141,6 +142,14 @@
                 <option value="sub">Sub Stream (Low Bandwidth)</option>
               </select>
             </label>
+            <label>Connection Mode
+              <select name="stream_mode">
+                <option value="auto">Auto (RTSP with HTTP Snap Fallback)</option>
+                <option value="rtsp">RTSP (Direct 4K/Sub)</option>
+                <option value="rtmp">RTMP (Sub Stream H.264, port 1935)</option>
+                <option value="http_snap">Direct HTTP Snap (Fallback)</option>
+              </select>
+            </label>
             <label>Username
               <input type="text" name="nvr_user" />
             </label>
@@ -212,6 +221,10 @@
           <label class="full-width">Alert Webhook URL (Discord, Slack, or JSON endpoint — optional)
             <input type="url" name="webhook_url" placeholder="https://discord.com/api/webhooks/..." />
           </label>
+          <div class="test-row">
+            <button type="button" class="btn btn-secondary" id="btnTestWebhook">Test Webhook</button>
+            <span id="testWebhookResult" class="small muted"></span>
+          </div>
         </div>
 
         <div class="modal-footer">

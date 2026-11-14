@@ -4,8 +4,10 @@ const ctx = zoneCanvas.getContext("2d");
 
 let savedZones = [];
 let savedLines = [];
-let drawingMode = null; // null | "zone" | "line"
+let drawingMode = null; // null | "zone" | "exclusion" | "line" | "edit"
 let draftPoints = [];
+let editingTarget = null; // null | { kind: "zone" | "line", id: string, name: string }
+let dragVertexIndex = -1;
 let heatmapEnabled = false;
 
 function syncCanvasSize() {
@@ -42,7 +44,7 @@ async function pollFrameLoop() {
     } finally {
       clearTimeout(timer);
     }
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 40));
   }
 }
 
@@ -55,6 +57,7 @@ function renderZoneCanvas() {
 
   // Draw existing zones lightly while editing
   for (const z of savedZones) {
+    if (editingTarget && editingTarget.kind === "zone" && editingTarget.id === z.id) continue;
     if (z.points.length < 3) continue;
     ctx.beginPath();
     z.points.forEach(([nx, ny], idx) => {
@@ -69,6 +72,7 @@ function renderZoneCanvas() {
 
   // Draw existing lines lightly while editing
   for (const ln of savedLines) {
+    if (editingTarget && editingTarget.kind === "line" && editingTarget.id === ln.id) continue;
     ctx.beginPath();
     ctx.moveTo(ln.p1[0] * w, ln.p1[1] * h);
     ctx.lineTo(ln.p2[0] * w, ln.p2[1] * h);
@@ -79,35 +83,58 @@ function renderZoneCanvas() {
 
   // Draw active draft polygon or line
   if (draftPoints.length > 0) {
+    const isLine = drawingMode === "line" || (drawingMode === "edit" && editingTarget?.kind === "line");
     ctx.beginPath();
     draftPoints.forEach(([nx, ny], idx) => {
       if (idx === 0) ctx.moveTo(nx * w, ny * h);
       else ctx.lineTo(nx * w, ny * h);
     });
-    ctx.strokeStyle = drawingMode === "line" ? "#38bdf8" : "#facc15";
+    if (drawingMode === "edit" && !isLine && draftPoints.length >= 3) {
+      ctx.closePath();
+      ctx.fillStyle = "rgba(250, 204, 21, 0.12)";
+      ctx.fill();
+    }
+    ctx.strokeStyle = isLine ? "#38bdf8" : "#facc15";
     ctx.lineWidth = 2.5;
     ctx.stroke();
 
-    for (const [nx, ny] of draftPoints) {
+    draftPoints.forEach(([nx, ny], idx) => {
+      const px = nx * w;
+      const py = ny * h;
       ctx.beginPath();
-      ctx.arc(nx * w, ny * h, 5, 0, Math.PI * 2);
-      ctx.fillStyle = drawingMode === "line" ? "#38bdf8" : "#ef4444";
+      ctx.arc(px, py, drawingMode === "edit" ? 7 : 5, 0, Math.PI * 2);
+      ctx.fillStyle = isLine ? "#38bdf8" : "#ef4444";
       ctx.fill();
       ctx.strokeStyle = "#fff";
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 1.8;
       ctx.stroke();
-    }
+      if (drawingMode === "edit" && isLine) {
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 11px sans-serif";
+        ctx.fillText(idx === 0 ? "A" : "B", px + 10, py - 8);
+      }
+    });
   }
 }
 
-function setDrawingMode(mode) {
+function setDrawingMode(mode, target = null) {
   drawingMode = mode;
-  draftPoints = [];
+  editingTarget = target;
+  dragVertexIndex = -1;
+  if (!target) {
+    draftPoints = [];
+  }
   const active = Boolean(mode);
+  const isEdit = mode === "edit";
   zoneCanvas.classList.toggle("drawing", active);
+  zoneCanvas.classList.toggle("editing", isEdit);
   const hint = document.getElementById("drawHint");
   hint.classList.toggle("hidden", !active);
-  if (mode === "line") {
+  if (isEdit && target?.kind === "line") {
+    hint.textContent = `Editing "${target.name}": Drag endpoint A or B to reposition, click Rename to rename, then Finish & Save.`;
+  } else if (isEdit) {
+    hint.textContent = `Editing "${target?.name || "Zone"}": Drag corners to move, click an edge to add a corner, right-click a corner to remove, then Finish & Save.`;
+  } else if (mode === "line") {
     hint.textContent = "Click 2 points on the video to place a traffic counting line (start and end).";
   } else if (mode === "exclusion") {
     hint.textContent = 'Click on the video to outline an exclusion mask (e.g. balcony/plants to ignore). Double-click or press "Finish & Save".';
@@ -117,18 +144,121 @@ function setDrawingMode(mode) {
   document.getElementById("btnDrawZone").classList.toggle("hidden", active);
   document.getElementById("btnDrawExclusion").classList.toggle("hidden", active);
   document.getElementById("btnDrawLine").classList.toggle("hidden", active);
-  document.getElementById("btnUndoPoint").classList.toggle("hidden", !active);
-  document.getElementById("btnFinishZone").classList.toggle("hidden", mode !== "zone" && mode !== "exclusion");
+  document.getElementById("btnUndoPoint").classList.toggle("hidden", !active || isEdit);
+  document.getElementById("btnRenameEdit").classList.toggle("hidden", !isEdit);
+  document.getElementById("btnFinishZone").classList.toggle("hidden", mode !== "zone" && mode !== "exclusion" && !isEdit);
   document.getElementById("btnCancelDraw").classList.toggle("hidden", !active);
   syncCanvasSize();
 }
 
-zoneCanvas.addEventListener("click", (e) => {
-  if (!drawingMode) return;
+function getNormalizedPointer(e) {
   const rect = zoneCanvas.getBoundingClientRect();
   const nx = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1);
   const ny = Math.min(Math.max((e.clientY - rect.top) / rect.height, 0), 1);
-  draftPoints.push([Number(nx.toFixed(4)), Number(ny.toFixed(4))]);
+  return {
+    nx: Number(nx.toFixed(4)),
+    ny: Number(ny.toFixed(4)),
+    px: nx * zoneCanvas.width,
+    py: ny * zoneCanvas.height,
+  };
+}
+
+function findNearestVertex(px, py, maxDist = 15) {
+  const w = zoneCanvas.width;
+  const h = zoneCanvas.height;
+  let bestIdx = -1;
+  let bestDist = maxDist;
+  draftPoints.forEach(([nx, ny], idx) => {
+    const d = Math.hypot(nx * w - px, ny * h - py);
+    if (d <= bestDist) {
+      bestDist = d;
+      bestIdx = idx;
+    }
+  });
+  return bestIdx;
+}
+
+function findNearestEdgeIndex(px, py, maxDist = 14) {
+  if (draftPoints.length < 2) return -1;
+  const w = zoneCanvas.width;
+  const h = zoneCanvas.height;
+  let bestEdge = -1;
+  let bestDist = maxDist;
+  for (let i = 0; i < draftPoints.length; i++) {
+    const j = (i + 1) % draftPoints.length;
+    const ax = draftPoints[i][0] * w;
+    const ay = draftPoints[i][1] * h;
+    const bx = draftPoints[j][0] * w;
+    const by = draftPoints[j][1] * h;
+    const dx = bx - ax;
+    const dy = by - ay;
+    const lenSq = dx * dx + dy * dy;
+    const t = lenSq > 0 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq)) : 0;
+    const d = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+    if (d <= bestDist) {
+      bestDist = d;
+      bestEdge = i;
+    }
+  }
+  return bestEdge;
+}
+
+zoneCanvas.addEventListener("pointerdown", (e) => {
+  if (drawingMode !== "edit" || e.button !== 0) return;
+  const { nx, ny, px, py } = getNormalizedPointer(e);
+  const vIdx = findNearestVertex(px, py);
+  if (vIdx >= 0) {
+    dragVertexIndex = vIdx;
+    zoneCanvas.setPointerCapture(e.pointerId);
+    return;
+  }
+  if (editingTarget?.kind === "zone") {
+    const edgeIdx = findNearestEdgeIndex(px, py);
+    if (edgeIdx >= 0) {
+      draftPoints.splice(edgeIdx + 1, 0, [nx, ny]);
+      dragVertexIndex = edgeIdx + 1;
+      zoneCanvas.setPointerCapture(e.pointerId);
+      renderZoneCanvas();
+    }
+  }
+});
+
+zoneCanvas.addEventListener("pointermove", (e) => {
+  if (drawingMode !== "edit" || dragVertexIndex < 0) return;
+  const { nx, ny } = getNormalizedPointer(e);
+  draftPoints[dragVertexIndex] = [nx, ny];
+  renderZoneCanvas();
+});
+
+zoneCanvas.addEventListener("pointerup", (e) => {
+  if (dragVertexIndex >= 0) {
+    dragVertexIndex = -1;
+    if (zoneCanvas.hasPointerCapture(e.pointerId)) {
+      zoneCanvas.releasePointerCapture(e.pointerId);
+    }
+  }
+});
+
+zoneCanvas.addEventListener("pointercancel", () => {
+  dragVertexIndex = -1;
+});
+
+zoneCanvas.addEventListener("contextmenu", (e) => {
+  if (drawingMode !== "edit" || editingTarget?.kind !== "zone") return;
+  e.preventDefault();
+  if (draftPoints.length <= 3) return;
+  const { px, py } = getNormalizedPointer(e);
+  const vIdx = findNearestVertex(px, py);
+  if (vIdx >= 0) {
+    draftPoints.splice(vIdx, 1);
+    renderZoneCanvas();
+  }
+});
+
+zoneCanvas.addEventListener("click", (e) => {
+  if (!drawingMode || drawingMode === "edit") return;
+  const { nx, ny } = getNormalizedPointer(e);
+  draftPoints.push([nx, ny]);
   renderZoneCanvas();
   if (drawingMode === "line" && draftPoints.length === 2) {
     finishLine();
@@ -148,6 +278,14 @@ document.getElementById("btnCancelDraw").addEventListener("click", () => setDraw
 document.getElementById("btnUndoPoint").addEventListener("click", () => {
   draftPoints.pop();
   renderZoneCanvas();
+});
+document.getElementById("btnRenameEdit").addEventListener("click", () => {
+  if (drawingMode !== "edit" || !editingTarget) return;
+  const nextName = prompt("Rename:", editingTarget.name);
+  if (nextName && nextName.trim()) {
+    editingTarget.name = nextName.trim();
+    setDrawingMode("edit", editingTarget);
+  }
 });
 document.getElementById("btnFinishZone").addEventListener("click", finishZone);
 
@@ -191,6 +329,16 @@ async function loadLines() {
   renderLinesList();
 }
 
+function startEditLine(ln) {
+  draftPoints = [[...ln.p1], [...ln.p2]];
+  setDrawingMode("edit", { kind: "line", id: ln.id, name: ln.name });
+}
+
+function startEditZone(z) {
+  draftPoints = z.points.map((pt) => [...pt]);
+  setDrawingMode("edit", { kind: "zone", id: z.id, name: z.name });
+}
+
 function renderLinesList() {
   const el = document.getElementById("linesList");
   if (!savedLines.length) {
@@ -204,10 +352,12 @@ function renderLinesList() {
     chip.className = "zone-chip";
     chip.innerHTML = `
       <span>${ln.enabled ? "🔵" : "⚪"} ${escapeHtml(ln.name)}: <strong>${total}</strong> (${ln.count_a_to_b || 0} / ${ln.count_b_to_a || 0})</span>
+      <button title="Edit">Edit</button>
       <button title="Toggle">${ln.enabled ? "Disable" : "Enable"}</button>
       <button title="Delete">✕</button>
     `;
-    const [toggleBtn, delBtn] = chip.querySelectorAll("button");
+    const [editBtn, toggleBtn, delBtn] = chip.querySelectorAll("button");
+    editBtn.addEventListener("click", () => startEditLine(ln));
     toggleBtn.addEventListener("click", () => {
       const next = savedLines.map((item) =>
         item.id === ln.id ? { ...item, enabled: !item.enabled } : item
@@ -222,6 +372,31 @@ function renderLinesList() {
 }
 
 async function finishZone() {
+  if (drawingMode === "edit" && editingTarget) {
+    if (editingTarget.kind === "line") {
+      if (draftPoints.length !== 2) return;
+      const updated = savedLines.map((item) =>
+        item.id === editingTarget.id
+          ? { ...item, name: editingTarget.name, p1: draftPoints[0], p2: draftPoints[1] }
+          : item
+      );
+      await saveLines(updated);
+      setDrawingMode(null);
+      return;
+    }
+    if (draftPoints.length < 3) {
+      alert("Please keep at least 3 points for a zone.");
+      return;
+    }
+    const updated = savedZones.map((item) =>
+      item.id === editingTarget.id
+        ? { ...item, name: editingTarget.name, points: draftPoints }
+        : item
+    );
+    await saveZones(updated);
+    setDrawingMode(null);
+    return;
+  }
   if (draftPoints.length < 3) {
     alert("Please place at least 3 points to form a zone.");
     return;
@@ -275,10 +450,12 @@ function renderZonesList() {
     const icon = z.zone_type === "exclusion" ? "🩶" : "🔴";
     chip.innerHTML = `
       <span>${z.enabled ? icon : "⚪"} ${escapeHtml(z.name)}</span>
+      <button title="Edit">Edit</button>
       <button title="Toggle">${z.enabled ? "Disable" : "Enable"}</button>
       <button title="Delete">✕</button>
     `;
-    const [toggleBtn, delBtn] = chip.querySelectorAll("button");
+    const [editBtn, toggleBtn, delBtn] = chip.querySelectorAll("button");
+    editBtn.addEventListener("click", () => startEditZone(z));
     toggleBtn.addEventListener("click", () => {
       const next = savedZones.map((item) =>
         item.id === z.id ? { ...item, enabled: !item.enabled } : item
@@ -314,7 +491,7 @@ async function refreshStats() {
 
     const dot = document.getElementById("statusDot");
     dot.className = "dot";
-    if (data.stream_status === "connected") dot.classList.add("connected");
+    if (data.stream_status.startsWith("connected")) dot.classList.add("connected");
     else if (data.stream_status === "error") dot.classList.add("error");
 
     const resStr = data.resolution?.width ? `${data.resolution.width}x${data.resolution.height}` : "—";
@@ -446,6 +623,7 @@ document.getElementById("btnSettings").addEventListener("click", async () => {
     else input.value = val ?? "";
   }
   document.getElementById("testStreamResult").textContent = "";
+  document.getElementById("testWebhookResult").textContent = "";
   settingsModal.classList.remove("hidden");
 });
 
@@ -472,6 +650,31 @@ document.getElementById("btnTestStream").addEventListener("click", async () => {
   }
 });
 
+document.getElementById("btnTestWebhook").addEventListener("click", async () => {
+  const out = document.getElementById("testWebhookResult");
+  const url = settingsForm.elements["webhook_url"]?.value?.trim() || "";
+  if (!url) {
+    out.textContent = "Enter a webhook URL first.";
+    out.style.color = "#f59e0b";
+    return;
+  }
+  out.textContent = "Sending test alert...";
+  out.style.color = "#8b9bb4";
+  const res = await fetch("/api/webhook/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ webhook_url: url }),
+  });
+  const data = await res.json();
+  if (data.ok) {
+    out.textContent = `Test alert sent (HTTP ${data.status_code})`;
+    out.style.color = "#22c55e";
+  } else {
+    out.textContent = data.error || "Webhook test failed";
+    out.style.color = "#ef4444";
+  }
+});
+
 settingsForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const payload = formToPayload();
@@ -492,6 +695,7 @@ function formToPayload() {
     nvr_port: Number(fd.get("nvr_port")),
     nvr_channel: Number(fd.get("nvr_channel")),
     nvr_stream_type: fd.get("nvr_stream_type"),
+    stream_mode: fd.get("stream_mode"),
     nvr_user: fd.get("nvr_user"),
     nvr_pass: fd.get("nvr_pass"),
     test_video_path: fd.get("test_video_path"),

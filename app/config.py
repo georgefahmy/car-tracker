@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     nvr_port: int = 554
     nvr_channel: int = 7
     nvr_stream_type: Literal["main", "sub"] = "main"
+    stream_mode: Literal["auto", "rtmp", "http_snap", "rtsp"] = "auto"
     nvr_user: str = "admin"
     nvr_pass: str = ""
     test_video_path: str = ""
@@ -62,6 +63,7 @@ class RuntimeConfig(BaseModel):
     nvr_port: int = Field(default=554, ge=1, le=65535)
     nvr_channel: int = Field(default=7, ge=1, le=64)
     nvr_stream_type: Literal["main", "sub"] = "main"
+    stream_mode: Literal["auto", "rtmp", "http_snap", "rtsp"] = "auto"
     nvr_user: str = "admin"
     nvr_pass: str = ""
     test_video_path: str = ""
@@ -90,6 +92,7 @@ class RuntimeConfig(BaseModel):
             nvr_port=s.nvr_port,
             nvr_channel=s.nvr_channel,
             nvr_stream_type=s.nvr_stream_type,
+            stream_mode=s.stream_mode,
             nvr_user=s.nvr_user,
             nvr_pass=s.nvr_pass,
             test_video_path=s.test_video_path,
@@ -125,8 +128,34 @@ def build_rtsp_url(
     return f"rtsp://{auth}{host}:{port}/h264Preview_{channel:02d}_{stream_type}"
 
 
+def build_rtmp_url(
+    host: str,
+    channel: int,
+    stream_type: Literal["main", "sub"],
+    user: str,
+    password: str,
+    port: int = 1935,
+) -> str:
+    """Build a Reolink NVR RTMP URL with properly escaped credentials."""
+    ch_idx = max(0, channel - 1)
+    stream_idx = 0 if stream_type == "main" else 1
+    safe_user = quote(user, safe="")
+    safe_pass = quote(password, safe="")
+    return (
+        f"rtmp://{host}:{port}/bcs/channel{ch_idx}_{stream_type}.bcs"
+        f"?channel={ch_idx}&stream={stream_idx}&user={safe_user}&password={safe_pass}"
+    )
+
+
 def mask_rtsp_url(url: str) -> str:
-    """Mask password in an RTSP URL for safe logging and UI display."""
+    """Mask password in an RTSP or RTMP URL for safe logging and UI display."""
+    if "password=" in url:
+        prefix, rest = url.split("password=", 1)
+        if "&" in rest:
+            _, suffix = rest.split("&", 1)
+            url = f"{prefix}password=***&{suffix}"
+        else:
+            url = f"{prefix}password=***"
     if "@" not in url or "://" not in url:
         return url
     scheme, rest = url.split("://", 1)

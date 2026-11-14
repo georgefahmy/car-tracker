@@ -177,6 +177,7 @@ class StreamWorker:
             list[TrackedDetection], dict[int, dict[str, Any]], list[Any], list[Any]
         ] = ([], {}, [], [])
         self._last_preview_ts: float = 0.0
+        self._snap_client: ReolinkHTTPSnapClient | None = None
 
     def get_source_url(self, cfg: RuntimeConfig | None = None) -> str:
         c = cfg or self.config
@@ -225,6 +226,7 @@ class StreamWorker:
             self.config = new_cfg
             self.db.save_config(new_cfg.model_dump())
         self.emergency_classifier.reset()
+        self._snap_client = None
         if old_source != new_source or old_mode != new_cfg.stream_mode:
             self._reconnect_event.set()
 
@@ -271,6 +273,49 @@ class StreamWorker:
             self._detector = ObjectDetector(self.settings.yolo_model)
         return self._detector
 
+    @staticmethod
+    def _scale_tracks(
+        tracks: list[TrackedDetection], src_w: int, src_h: int, dst_w: int, dst_h: int
+    ) -> list[TrackedDetection]:
+        sx = dst_w / float(max(src_w, 1))
+        sy = dst_h / float(max(src_h, 1))
+        if abs(sx - 1.0) <= 1e-3 and abs(sy - 1.0) <= 1e-3:
+            return tracks
+        return [
+            TrackedDetection(
+                track_id=t.track_id,
+                class_id=t.class_id,
+                class_name=t.class_name,
+                confidence=t.confidence,
+                bbox_xyxy=(
+                    t.bbox_xyxy[0] * sx,
+                    t.bbox_xyxy[1] * sy,
+                    t.bbox_xyxy[2] * sx,
+                    t.bbox_xyxy[3] * sy,
+                ),
+                is_emergency=t.is_emergency,
+            )
+            for t in tracks
+        ]
+
+    def _get_highres_violation_frame(
+        self, fallback_frame: np.ndarray, cfg: RuntimeConfig
+    ) -> np.ndarray:
+        """Fetch a 4K HTTP Snap frame for violation evidence when running on a lower-res stream."""
+        if fallback_frame.shape[1] >= 1920 or cfg.test_video_path.strip() or not cfg.nvr_host:
+            return fallback_frame
+        try:
+            if self._snap_client is None:
+                self._snap_client = ReolinkHTTPSnapClient(
+                    cfg.nvr_host, cfg.nvr_channel, cfg.nvr_user, cfg.nvr_pass
+                )
+            hi_res = self._snap_client.fetch_frame()
+            if hi_res is not None and hi_res.shape[1] > fallback_frame.shape[1]:
+                return hi_res
+        except Exception:
+            pass
+        return fallback_frame
+
     def _render_preview_jpeg(
         self,
         frame: np.ndarray,
@@ -284,27 +329,7 @@ class StreamWorker:
         h, w = frame.shape[:2]
         preview = resize_for_preview(frame, cfg.preview_max_width)
         ph, pw = preview.shape[:2]
-        sx = pw / float(max(w, 1))
-        sy = ph / float(max(h, 1))
-        if abs(sx - 1.0) > 1e-3 or abs(sy - 1.0) > 1e-3:
-            scaled_tracks = [
-                TrackedDetection(
-                    track_id=t.track_id,
-                    class_id=t.class_id,
-                    class_name=t.class_name,
-                    confidence=t.confidence,
-                    bbox_xyxy=(
-                        t.bbox_xyxy[0] * sx,
-                        t.bbox_xyxy[1] * sy,
-                        t.bbox_xyxy[2] * sx,
-                        t.bbox_xyxy[3] * sy,
-                    ),
-                    is_emergency=t.is_emergency,
-                )
-                for t in tracks
-            ]
-        else:
-            scaled_tracks = tracks
+        scaled_tracks = self._scale_tracks(tracks, w, h, pw, ph)
 
         annotated_preview = annotate_frame(
             frame=preview,
@@ -398,9 +423,12 @@ class StreamWorker:
                 )
 
             if step.new_violations:
+                snap_base = self._get_highres_violation_frame(frame, cfg)
+                sh, sw = snap_base.shape[:2]
+                snap_tracks = self._scale_tracks(tracks, w, h, sw, sh)
                 annotated_full = annotate_frame(
-                    frame=frame,
-                    tracks=tracks,
+                    frame=snap_base,
+                    tracks=snap_tracks,
                     track_statuses=step.track_statuses,
                     zones=zones,
                     dwell_threshold=cfg.dwell_seconds,

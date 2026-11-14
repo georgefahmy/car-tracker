@@ -507,7 +507,11 @@ async function refreshStats() {
   }
 }
 
+let lastTrafficRows = [];
+let hoveredTrafficIdx = -1;
+
 function drawTrafficChart(rows) {
+  lastTrafficRows = rows;
   const canvas = document.getElementById("trafficChart");
   const c = canvas.getContext("2d");
   const w = canvas.width;
@@ -522,31 +526,86 @@ function drawTrafficChart(rows) {
   }
 
   const maxVal = Math.max(1, ...rows.map((r) => Math.max(r.vehicles_count, r.people_count)));
-  const padL = 28, padB = 24, padT = 12, padR = 10;
+  const padL = 28, padB = 24, padT = 16, padR = 10;
   const plotW = w - padL - padR;
   const plotH = h - padT - padB;
   const groupW = plotW / rows.length;
   const barW = Math.max(4, Math.min(16, groupW * 0.35));
 
   rows.forEach((r, idx) => {
-    const x0 = padL + idx * groupW + groupW * 0.15;
+    const gx = padL + idx * groupW;
+    if (idx === hoveredTrafficIdx) {
+      c.fillStyle = "rgba(148, 163, 184, 0.14)";
+      c.fillRect(gx + 2, padT, Math.max(groupW - 4, 4), plotH);
+    }
+
+    const x0 = gx + groupW * 0.15;
     const vh = (r.vehicles_count / maxVal) * plotH;
     const ph = (r.people_count / maxVal) * plotH;
 
-    c.fillStyle = "#22c55e";
+    c.fillStyle = idx === hoveredTrafficIdx ? "#4ade80" : "#22c55e";
     c.fillRect(x0, padT + plotH - vh, barW, vh);
 
-    c.fillStyle = "#38bdf8";
+    c.fillStyle = idx === hoveredTrafficIdx ? "#7dd3fc" : "#38bdf8";
     c.fillRect(x0 + barW + 2, padT + plotH - ph, barW, ph);
 
     if (rows.length <= 12 || idx % 2 === 0) {
-      c.fillStyle = "#8b9bb4";
+      c.fillStyle = idx === hoveredTrafficIdx ? "#f8fafc" : "#8b9bb4";
       c.font = "10px sans-serif";
       const label = r.hour_bucket.slice(11) + "h";
       c.fillText(label, x0, h - 6);
     }
   });
+
+  if (hoveredTrafficIdx >= 0 && hoveredTrafficIdx < rows.length) {
+    const r = rows[hoveredTrafficIdx];
+    const hourText = r.hour_bucket.replace("T", " ") + ":00";
+    const line1 = hourText;
+    const line2 = `Vehicles: ${r.vehicles_count}   People: ${r.people_count}`;
+    c.font = "11px sans-serif";
+    const boxW = Math.max(c.measureText(line1).width, c.measureText(line2).width) + 18;
+    const boxH = 40;
+    const rawX = padL + (hoveredTrafficIdx + 0.5) * groupW - boxW / 2;
+    const boxX = Math.max(6, Math.min(w - boxW - 6, rawX));
+    const boxY = 6;
+
+    c.fillStyle = "rgba(15, 23, 42, 0.94)";
+    c.strokeStyle = "#334155";
+    c.lineWidth = 1;
+    c.beginPath();
+    c.roundRect(boxX, boxY, boxW, boxH, 6);
+    c.fill();
+    c.stroke();
+
+    c.fillStyle = "#f8fafc";
+    c.font = "bold 11px sans-serif";
+    c.fillText(line1, boxX + 9, boxY + 16);
+    c.fillStyle = "#cbd5e1";
+    c.font = "11px sans-serif";
+    c.fillText(line2, boxX + 9, boxY + 31);
+  }
 }
+
+const trafficChartEl = document.getElementById("trafficChart");
+trafficChartEl.addEventListener("mousemove", (e) => {
+  if (!lastTrafficRows.length) return;
+  const rect = trafficChartEl.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (trafficChartEl.width / Math.max(rect.width, 1));
+  const padL = 28, padR = 10;
+  const plotW = trafficChartEl.width - padL - padR;
+  const idx = Math.floor(((x - padL) / plotW) * lastTrafficRows.length);
+  const nextIdx = idx >= 0 && idx < lastTrafficRows.length ? idx : -1;
+  if (nextIdx !== hoveredTrafficIdx) {
+    hoveredTrafficIdx = nextIdx;
+    drawTrafficChart(lastTrafficRows);
+  }
+});
+trafficChartEl.addEventListener("mouseleave", () => {
+  if (hoveredTrafficIdx !== -1) {
+    hoveredTrafficIdx = -1;
+    drawTrafficChart(lastTrafficRows);
+  }
+});
 
 async function refreshViolations() {
   try {

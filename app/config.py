@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     emergency_fire_red_ratio: float = 0.35
     annotation_scale: float = 1.0
     webhook_url: str = ""
+    daily_report_enabled: bool = True
+    daily_report_time: str = "23:55"
 
     host: str = "0.0.0.0"
     port: int = 8000
@@ -83,6 +85,8 @@ class RuntimeConfig(BaseModel):
     emergency_fire_red_ratio: float = Field(default=0.35, ge=0.10, le=0.80)
     annotation_scale: float = Field(default=1.0, ge=0.4, le=3.0)
     webhook_url: str = ""
+    daily_report_enabled: bool = True
+    daily_report_time: str = "23:55"
     heatmap_enabled: bool = False
 
     @classmethod
@@ -110,6 +114,8 @@ class RuntimeConfig(BaseModel):
             emergency_fire_red_ratio=s.emergency_fire_red_ratio,
             annotation_scale=s.annotation_scale,
             webhook_url=s.webhook_url,
+            daily_report_enabled=s.daily_report_enabled,
+            daily_report_time=s.daily_report_time,
         )
 
 

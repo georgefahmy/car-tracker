@@ -221,8 +221,18 @@
           <label class="full-width">Alert Webhook URL (Discord, Slack, or JSON endpoint — optional)
             <input type="url" name="webhook_url" placeholder="https://discord.com/api/webhooks/..." />
           </label>
+          <div class="form-grid" style="margin-top: 10px;">
+            <label class="checkbox-row">
+              <input type="checkbox" name="daily_report_enabled" />
+              <span>Send End-of-Day Summary Report</span>
+            </label>
+            <label>Daily Report Time (24h)
+              <input type="time" name="daily_report_time" />
+            </label>
+          </div>
           <div class="test-row">
             <button type="button" class="btn btn-secondary" id="btnTestWebhook">Test Webhook</button>
+            <button type="button" class="btn btn-secondary" id="btnSendDailyReport">Send Daily Report Now</button>
             <span id="testWebhookResult" class="small muted"></span>
           </div>
         </div>

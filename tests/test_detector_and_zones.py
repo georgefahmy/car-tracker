@@ -314,3 +314,25 @@ def test_exclusion_mask_filters_tracks() -> None:
     assert [t.track_id for t in kept] == [1]
 
 
+def test_daily_report_summary_and_endpoint(tmp_path: Path) -> None:
+    from app.database import Database
+    from app.stream import StreamWorker
+
+    settings = Settings(data_dir=str(tmp_path / "data"))
+    app = create_app(settings=settings, start_worker=False)
+    with TestClient(app) as client:
+        db: Database = app.state.db
+        db.increment_stats(unique_cars=4, total_cars=7, unique_people=2, total_people=3)
+        summary = db.get_daily_summary()
+        assert summary["vehicles_today"] == 7
+        assert summary["people_today"] == 3
+        msg = StreamWorker.build_daily_report_message(summary)
+        assert "Daily Car Tracker Report" in msg
+        assert "**Vehicles Today:** 7" in msg
+
+        # Empty webhook returns ok=False cleanly
+        r = client.post("/api/report/daily/send", json={"webhook_url": ""})
+        assert r.status_code == 200
+        assert r.json()["ok"] is False
+
+

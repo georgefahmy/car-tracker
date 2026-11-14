@@ -235,6 +235,11 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
 
         return await asyncio.to_thread(_send_test)
 
+    @app.post("/api/report/daily/send")
+    async def send_daily_report_now(payload: WebhookTestPayload | None = None) -> dict:
+        url = payload.webhook_url if payload and payload.webhook_url is not None else None
+        return await asyncio.to_thread(worker.send_daily_report, url)
+
     @app.post("/api/heatmap/toggle")
     async def toggle_heatmap(enabled: bool | None = None) -> dict:
         new_state = worker.toggle_heatmap(enabled)

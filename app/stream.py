@@ -156,6 +156,7 @@ class StreamWorker:
         self._stop_event = threading.Event()
         self._reconnect_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._report_thread: threading.Thread | None = None
 
         self._detector: ObjectDetector | None = None
         self.monitor = RedZoneMonitor()
@@ -204,11 +205,17 @@ class StreamWorker:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run_loop, name="stream-worker", daemon=True)
         self._thread.start()
+        self._report_thread = threading.Thread(
+            target=self._daily_report_loop, name="daily-report", daemon=True
+        )
+        self._report_thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=5.0)
+        if self._report_thread:
+            self._report_thread.join(timeout=2.0)
 
     def update_config(self, new_cfg: RuntimeConfig) -> None:
         old_source = self.get_source_url(self.config)
@@ -543,6 +550,74 @@ class StreamWorker:
                 pass
 
         threading.Thread(target=_send, daemon=True).start()
+
+    @staticmethod
+    def build_daily_report_message(summary: dict[str, Any]) -> str:
+        lines_out = [
+            f"📊 **Daily Car Tracker Report — {summary['date']}**",
+            f"• **Vehicles Today:** {summary['vehicles_today']}",
+            f"• **People Today:** {summary['people_today']}",
+        ]
+        peak = summary.get("peak_hour")
+        if peak:
+            hour_label = str(peak["hour_bucket"]).split("T")[-1]
+            lines_out.append(f"• **Peak Hour:** {hour_label}:00 ({peak['vehicles_count']} vehicles)")
+        lines_out.append(f"• **Red-Zone Violations Today:** {summary['violations_today']}")
+        counting_lines = summary.get("counting_lines") or []
+        if counting_lines:
+            lines_out.append("• **Traffic Flow Lines (total A→B / B→A):**")
+            for ln in counting_lines:
+                a_b = int(ln.get("count_a_to_b", 0))
+                b_a = int(ln.get("count_b_to_a", 0))
+                lines_out.append(f"  - {ln['name']}: **{a_b + b_a}** ({a_b} / {b_a})")
+        cum = summary.get("cumulative_stats") or {}
+        lines_out.append(
+            f"• **All-Time Totals:** {cum.get('unique_cars', 0)} unique vehicles, "
+            f"{cum.get('unique_people', 0)} unique people"
+        )
+        return "\n".join(lines_out)
+
+    def send_daily_report(
+        self, webhook_url: str | None = None, date_str: str | None = None
+    ) -> dict[str, Any]:
+        import requests
+
+        url = (webhook_url if webhook_url is not None else self.config.webhook_url).strip()
+        if not url:
+            return {"ok": False, "error": "Webhook URL is empty."}
+
+        summary = self.db.get_daily_summary(date_str=date_str)
+        msg = self.build_daily_report_message(summary)
+        payload = (
+            {"content": msg}
+            if "discord.com/api/webhooks" in url
+            else {"text": msg, "content": msg, "daily_report": summary}
+        )
+        try:
+            resp = requests.post(url, json=payload, timeout=10)
+            if 200 <= resp.status_code < 300:
+                return {"ok": True, "status_code": resp.status_code, "summary": summary}
+            return {"ok": False, "error": f"HTTP {resp.status_code}: {resp.text[:160]}"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def _daily_report_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                cfg = self.config
+                if cfg.daily_report_enabled and cfg.webhook_url.strip():
+                    now_local = datetime.now()
+                    today_str = now_local.strftime("%Y-%m-%d")
+                    now_hhmm = now_local.strftime("%H:%M")
+                    target_hhmm = (cfg.daily_report_time or "23:55").strip()
+                    last_sent = self.db.get_meta("last_daily_report_date")
+                    if now_hhmm >= target_hhmm and last_sent != today_str:
+                        res = self.send_daily_report(webhook_url=cfg.webhook_url, date_str=today_str)
+                        if res.get("ok"):
+                            self.db.set_meta("last_daily_report_date", today_str)
+            except Exception:
+                pass
+            self._stop_event.wait(timeout=30.0)
 
     def _render_placeholder(self, message: str) -> bytes:
         canvas = np.zeros((540, 960, 3), dtype=np.uint8)

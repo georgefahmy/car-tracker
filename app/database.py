@@ -108,6 +108,11 @@ class Database:
                     config_json TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS meta_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS counting_lines (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -402,3 +407,68 @@ class Database:
                 (json.dumps(config_dict),),
             )
             self._conn.commit()
+
+    def get_meta(self, key: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM meta_state WHERE key = ?", (key,)).fetchone()
+        return str(row["value"]) if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO meta_state (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key, value),
+            )
+            self._conn.commit()
+
+    def get_daily_summary(self, date_str: str | None = None) -> dict[str, Any]:
+        """Aggregate traffic, peak hour, line crossings, and violations for a local YYYY-MM-DD date."""
+        target_date = date_str or datetime.now().strftime("%Y-%m-%d")
+        with self._lock:
+            hour_rows = self._conn.execute(
+                """
+                SELECT hour_bucket, vehicles_count, people_count
+                FROM hourly_traffic
+                WHERE hour_bucket LIKE ?
+                ORDER BY hour_bucket ASC
+                """,
+                (f"{target_date}T%",),
+            ).fetchall()
+            violation_rows = self._conn.execute(
+                """
+                SELECT zone_name, vehicle_class, flagged_at, dwell_seconds
+                FROM violations
+                ORDER BY id DESC
+                LIMIT 500
+                """
+            ).fetchall()
+        hours = [dict(r) for r in hour_rows]
+        vehicles_today = sum(int(r["vehicles_count"]) for r in hours)
+        people_today = sum(int(r["people_count"]) for r in hours)
+        peak_hour = max(hours, key=lambda r: int(r["vehicles_count"]), default=None)
+
+        violations_today: list[dict[str, Any]] = []
+        for vr in violation_rows:
+            try:
+                dt = datetime.fromisoformat(str(vr["flagged_at"]))
+                local_date = dt.astimezone().strftime("%Y-%m-%d") if dt.tzinfo else dt.strftime("%Y-%m-%d")
+            except ValueError:
+                local_date = str(vr["flagged_at"])[:10]
+            if local_date == target_date:
+                violations_today.append(dict(vr))
+
+        stats = self.get_stats_state()
+        lines = [ln.model_dump() for ln in self.get_counting_lines()]
+        return {
+            "date": target_date,
+            "vehicles_today": vehicles_today,
+            "people_today": people_today,
+            "peak_hour": peak_hour,
+            "violations_today": len(violations_today),
+            "violations_list": violations_today[:10],
+            "counting_lines": lines,
+            "cumulative_stats": stats,
+        }

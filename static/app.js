@@ -675,6 +675,31 @@ document.getElementById("btnTestWebhook").addEventListener("click", async () => 
   }
 });
 
+document.getElementById("btnSendDailyReport").addEventListener("click", async () => {
+  const out = document.getElementById("testWebhookResult");
+  const url = settingsForm.elements["webhook_url"]?.value?.trim() || "";
+  if (!url) {
+    out.textContent = "Enter a webhook URL first.";
+    out.style.color = "#f59e0b";
+    return;
+  }
+  out.textContent = "Sending daily report...";
+  out.style.color = "#8b9bb4";
+  const res = await fetch("/api/report/daily/send", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ webhook_url: url }),
+  });
+  const data = await res.json();
+  if (data.ok) {
+    out.textContent = `Daily report sent (HTTP ${data.status_code})`;
+    out.style.color = "#22c55e";
+  } else {
+    out.textContent = data.error || "Failed to send daily report";
+    out.style.color = "#ef4444";
+  }
+});
+
 settingsForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const payload = formToPayload();

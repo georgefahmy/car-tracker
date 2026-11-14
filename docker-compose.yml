@@ -8,3 +8,4 @@ services:
       - ./data:/app/data
     environment:
       - PYTHONUNBUFFERED=1
+      - TZ=America/Los_Angeles

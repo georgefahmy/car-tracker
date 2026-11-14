@@ -325,9 +325,18 @@ class StreamWorker:
         counting_lines: list[Any],
         cfg: RuntimeConfig,
     ) -> bytes | None:
-        """Downscale first, then annotate at preview resolution for maximum FPS."""
+        """Scale frame to target preview resolution first, then annotate for crisp boxes/labels."""
         h, w = frame.shape[:2]
-        preview = resize_for_preview(frame, cfg.preview_max_width)
+        target_w = min(max(cfg.preview_max_width, 1280), 1920) if cfg.preview_max_width > 0 else w
+        if w > cfg.preview_max_width > 0:
+            preview = resize_for_preview(frame, cfg.preview_max_width)
+        elif 0 < w < target_w:
+            scale = target_w / float(w)
+            preview = cv2.resize(
+                frame, (target_w, max(1, int(h * scale))), interpolation=cv2.INTER_LINEAR
+            )
+        else:
+            preview = frame
         ph, pw = preview.shape[:2]
         scaled_tracks = self._scale_tracks(tracks, w, h, pw, ph)
 

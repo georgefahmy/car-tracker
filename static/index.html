@@ -59,6 +59,7 @@
           <h2>Live Camera Feed</h2>
           <div class="zone-toolbar">
             <button class="btn btn-danger" id="btnDrawZone">+ Draw Red Zone</button>
+            <button class="btn btn-ghost" id="btnDrawExclusion">+ Exclusion Mask</button>
             <button class="btn btn-secondary" id="btnDrawLine">+ Draw Traffic Line</button>
             <button class="btn btn-secondary hidden" id="btnUndoPoint">Undo Point</button>
             <button class="btn btn-primary hidden" id="btnFinishZone">Finish & Save</button>
@@ -67,7 +68,7 @@
         </div>
 
         <div class="video-stage" id="videoStage">
-          <img id="videoStream" src="/api/stream/video" alt="Live Camera Stream" />
+          <img id="videoStream" alt="Live Camera Stream" />
           <canvas id="zoneCanvas"></canvas>
           <div class="draw-hint hidden" id="drawHint">
             Click on the video to place polygon corners around the red zone. Double-click or press "Finish & Save" when done.
@@ -101,7 +102,10 @@
         <div class="panel violations-panel">
           <div class="panel-header">
             <h2>Red-Zone Violations</h2>
-            <span class="muted small" id="violationCountLabel">0 logged</span>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span class="muted small" id="violationCountLabel">0 logged</span>
+              <a class="btn btn-ghost" href="/api/violations/export.csv" download="violations.csv" style="text-decoration:none;padding:4px 8px;font-size:0.78rem;">Export CSV</a>
+            </div>
           </div>
           <div id="violationsList" class="violations-list">
             <p class="muted">No illegal parking violations recorded yet.</p>
@@ -205,6 +209,9 @@
               <input type="number" name="emergency_fire_red_ratio" step="0.05" min="0.10" max="0.80" required />
             </label>
           </div>
+          <label class="full-width">Alert Webhook URL (Discord, Slack, or JSON endpoint — optional)
+            <input type="url" name="webhook_url" placeholder="https://discord.com/api/webhooks/..." />
+          </label>
         </div>
 
         <div class="modal-footer">

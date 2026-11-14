@@ -227,6 +227,25 @@ class EmergencyVehicleClassifier:
         return False
 
 
+def filter_excluded_tracks(
+    tracks: list[TrackedDetection],
+    frame_w: int,
+    frame_h: int,
+    zones: list[ZoneModel],
+) -> list[TrackedDetection]:
+    """Remove detections whose bottom-center falls inside any enabled exclusion mask."""
+    exclusions = [z for z in zones if z.enabled and z.zone_type == "exclusion" and len(z.points) >= 3]
+    if not exclusions:
+        return tracks
+    kept: list[TrackedDetection] = []
+    for det in tracks:
+        nx, ny = det.bottom_center_norm(frame_w, frame_h)
+        if any(point_in_normalized_polygon(nx, ny, ex.points) for ex in exclusions):
+            continue
+        kept.append(det)
+    return kept
+
+
 class RedZoneMonitor:
     """Counts unique/total vehicles & people and flags illegal red-zone parking."""
 
@@ -257,7 +276,9 @@ class RedZoneMonitor:
         exempt_emergency_vehicles: bool = True,
     ) -> MonitorStepResult:
         res = MonitorStepResult()
-        enabled_zones = [z for z in zones if z.enabled and len(z.points) >= 3]
+        enabled_zones = [
+            z for z in zones if z.enabled and z.zone_type == "red_zone" and len(z.points) >= 3
+        ]
         active_pairs: set[tuple[int, str]] = set()
 
         for det in tracks:
@@ -528,17 +549,18 @@ def annotate_frame(
     if show_heatmap and hotspot is not None:
         out = hotspot.render_overlay(out, alpha=0.45)
 
-    # Draw red-zone polygons
+    # Draw red-zone & exclusion-mask polygons
     overlay = out.copy()
     for zone in zones:
         if not zone.enabled or len(zone.points) < 3:
             continue
         pts = np.array([[int(p[0] * w), int(p[1] * h)] for p in zone.points], dtype=np.int32)
-        bgr = _hex_to_bgr(zone.color)
+        bgr = (180, 163, 148) if zone.zone_type == "exclusion" else _hex_to_bgr(zone.color)
         cv2.fillPoly(overlay, [pts], bgr)
         cv2.polylines(out, [pts], isClosed=True, color=bgr, thickness=box_thick)
         label_pt = (int(pts[0][0]), max(int(24 * scale), int(pts[0][1]) - pad_y))
-        cv2.putText(out, zone.name, label_pt, cv2.FONT_HERSHEY_SIMPLEX, font_scale, bgr, text_thick, cv2.LINE_AA)
+        z_label = f"MASK: {zone.name}" if zone.zone_type == "exclusion" else zone.name
+        cv2.putText(out, z_label, label_pt, cv2.FONT_HERSHEY_SIMPLEX, font_scale, bgr, text_thick, cv2.LINE_AA)
 
     out = cv2.addWeighted(overlay, 0.18, out, 0.82, 0)
 

@@ -14,6 +14,7 @@ from app.detector import (
     LineCrossingMonitor,
     RedZoneMonitor,
     TrackedDetection,
+    filter_excluded_tracks,
     point_in_normalized_polygon,
 )
 from app.main import create_app
@@ -287,5 +288,24 @@ def test_line_crossing_monitor_and_api(tmp_path: Path) -> None:
         lines_r = client.get("/api/lines").json()
         assert len(lines_r) == 1
         assert lines_r[0]["name"] == "Main Road"
+
+        # CSV export endpoint
+        csv_r = client.get("/api/violations/export.csv")
+        assert csv_r.status_code == 200
+        assert "zone_name" in csv_r.text
+
+
+def test_exclusion_mask_filters_tracks() -> None:
+    mask = ZoneModel(
+        id="m1",
+        name="Balcony",
+        points=[[0.0, 0.7], [1.0, 0.7], [1.0, 1.0], [0.0, 1.0]],
+        enabled=True,
+        zone_type="exclusion",
+    )
+    street_car = _make_car(1, cx=0.5, y2=0.4)
+    balcony_car = _make_car(2, cx=0.5, y2=0.85)
+    kept = filter_excluded_tracks([street_car, balcony_car], 1000, 1000, [mask])
+    assert [t.track_id for t in kept] == [1]
 
 

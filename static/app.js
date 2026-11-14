@@ -20,6 +20,32 @@ function syncCanvasSize() {
 window.addEventListener("resize", syncCanvasSize);
 videoEl.addEventListener("load", syncCanvasSize);
 
+let currentObjectUrl = null;
+async function pollFrameLoop() {
+  while (true) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    try {
+      const res = await fetch(`/api/stream/frame.jpg?t=${Date.now()}`, {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (res.ok) {
+        const blob = await res.blob();
+        const nextUrl = URL.createObjectURL(blob);
+        if (currentObjectUrl) URL.revokeObjectURL(currentObjectUrl);
+        currentObjectUrl = nextUrl;
+        videoEl.src = nextUrl;
+      }
+    } catch (_) {
+      // Transient timeout or server restart; retry cleanly
+    } finally {
+      clearTimeout(timer);
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
 function renderZoneCanvas() {
   const w = zoneCanvas.width;
   const h = zoneCanvas.height;
@@ -83,13 +109,16 @@ function setDrawingMode(mode) {
   hint.classList.toggle("hidden", !active);
   if (mode === "line") {
     hint.textContent = "Click 2 points on the video to place a traffic counting line (start and end).";
+  } else if (mode === "exclusion") {
+    hint.textContent = 'Click on the video to outline an exclusion mask (e.g. balcony/plants to ignore). Double-click or press "Finish & Save".';
   } else {
     hint.textContent = 'Click on the video to place polygon corners around the red zone. Double-click or press "Finish & Save" when done.';
   }
   document.getElementById("btnDrawZone").classList.toggle("hidden", active);
+  document.getElementById("btnDrawExclusion").classList.toggle("hidden", active);
   document.getElementById("btnDrawLine").classList.toggle("hidden", active);
   document.getElementById("btnUndoPoint").classList.toggle("hidden", !active);
-  document.getElementById("btnFinishZone").classList.toggle("hidden", mode !== "zone");
+  document.getElementById("btnFinishZone").classList.toggle("hidden", mode !== "zone" && mode !== "exclusion");
   document.getElementById("btnCancelDraw").classList.toggle("hidden", !active);
   syncCanvasSize();
 }
@@ -107,12 +136,13 @@ zoneCanvas.addEventListener("click", (e) => {
 });
 
 zoneCanvas.addEventListener("dblclick", () => {
-  if (drawingMode === "zone" && draftPoints.length >= 3) {
+  if ((drawingMode === "zone" || drawingMode === "exclusion") && draftPoints.length >= 3) {
     finishZone();
   }
 });
 
 document.getElementById("btnDrawZone").addEventListener("click", () => setDrawingMode("zone"));
+document.getElementById("btnDrawExclusion").addEventListener("click", () => setDrawingMode("exclusion"));
 document.getElementById("btnDrawLine").addEventListener("click", () => setDrawingMode("line"));
 document.getElementById("btnCancelDraw").addEventListener("click", () => setDrawingMode(null));
 document.getElementById("btnUndoPoint").addEventListener("click", () => {
@@ -196,7 +226,9 @@ async function finishZone() {
     alert("Please place at least 3 points to form a zone.");
     return;
   }
-  const name = prompt("Name this red zone:", `Red Zone ${savedZones.length + 1}`);
+  const isExclusion = drawingMode === "exclusion";
+  const defaultName = isExclusion ? `Exclusion Mask ${savedZones.length + 1}` : `Red Zone ${savedZones.length + 1}`;
+  const name = prompt(isExclusion ? "Name this exclusion mask:" : "Name this red zone:", defaultName);
   if (!name) return;
 
   const updated = [
@@ -206,11 +238,12 @@ async function finishZone() {
       name: name.trim(),
       points: draftPoints,
       enabled: true,
-      color: "#ef4444",
+      color: isExclusion ? "#94a3b8" : "#ef4444",
+      zone_type: isExclusion ? "exclusion" : "red_zone",
     },
   ];
   await saveZones(updated);
-  setDrawingMode(false);
+  setDrawingMode(null);
 }
 
 async function saveZones(zones) {
@@ -239,8 +272,9 @@ function renderZonesList() {
   for (const z of savedZones) {
     const chip = document.createElement("div");
     chip.className = "zone-chip";
+    const icon = z.zone_type === "exclusion" ? "🩶" : "🔴";
     chip.innerHTML = `
-      <span>${z.enabled ? "🔴" : "⚪"} ${escapeHtml(z.name)}</span>
+      <span>${z.enabled ? icon : "⚪"} ${escapeHtml(z.name)}</span>
       <button title="Toggle">${z.enabled ? "Disable" : "Enable"}</button>
       <button title="Delete">✕</button>
     `;
@@ -473,6 +507,7 @@ function formToPayload() {
     emergency_min_value: Number(fd.get("emergency_min_value")),
     emergency_strobe_swing: Number(fd.get("emergency_strobe_swing")),
     emergency_fire_red_ratio: Number(fd.get("emergency_fire_red_ratio")),
+    webhook_url: fd.get("webhook_url") || "",
   };
 }
 
@@ -488,5 +523,6 @@ loadZones();
 loadLines();
 refreshStats();
 refreshViolations();
+pollFrameLoop();
 setInterval(refreshStats, 1500);
 setInterval(refreshViolations, 5000);

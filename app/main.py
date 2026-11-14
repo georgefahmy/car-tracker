@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -64,6 +66,17 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
     async def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
 
+    @app.get("/api/stream/frame.jpg")
+    async def video_frame() -> Response:
+        jpg = worker.get_latest_jpeg()
+        if not jpg:
+            raise HTTPException(status_code=503, detail="No frame available yet")
+        return Response(
+            content=jpg,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+
     @app.get("/api/stream/video")
     async def video_stream() -> StreamingResponse:
         async def frame_generator() -> AsyncGenerator[bytes, None]:
@@ -117,6 +130,20 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
         offset: int = Query(default=0, ge=0),
     ) -> list[ViolationRecord]:
         return db.get_violations(limit=limit, offset=offset)
+
+    @app.get("/api/violations/export.csv")
+    async def export_violations_csv() -> Response:
+        rows = db.get_violations(limit=5000, offset=0)
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["id", "flagged_at", "started_at", "dwell_seconds", "zone_name", "vehicle_class", "track_id", "snapshot_filename"])
+        for r in rows:
+            writer.writerow([r.id, r.flagged_at, r.started_at, r.dwell_seconds, r.zone_name, r.vehicle_class, r.track_id, r.snapshot_filename])
+        return Response(
+            content=buf.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=violations.csv"},
+        )
 
     @app.delete("/api/violations/{violation_id}")
     async def delete_violation(violation_id: int) -> dict:

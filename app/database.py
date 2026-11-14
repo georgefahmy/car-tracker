@@ -5,7 +5,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,7 @@ class ZoneModel(BaseModel):
     points: list[list[float]] = Field(min_length=3)
     enabled: bool = True
     color: str = "#ef4444"
+    zone_type: Literal["red_zone", "exclusion"] = "red_zone"
 
 
 class CountingLineModel(BaseModel):
@@ -69,7 +70,8 @@ class Database:
                     name TEXT NOT NULL,
                     points_json TEXT NOT NULL,
                     enabled INTEGER NOT NULL DEFAULT 1,
-                    color TEXT NOT NULL DEFAULT '#ef4444'
+                    color TEXT NOT NULL DEFAULT '#ef4444',
+                    zone_type TEXT NOT NULL DEFAULT 'red_zone'
                 );
 
                 CREATE TABLE IF NOT EXISTS violations (
@@ -118,6 +120,10 @@ class Database:
                 );
                 """
             )
+            cur.execute("PRAGMA table_info(zones)")
+            cols = {row[1] for row in cur.fetchall()}
+            if "zone_type" not in cols:
+                cur.execute("ALTER TABLE zones ADD COLUMN zone_type TEXT NOT NULL DEFAULT 'red_zone'")
             self._conn.commit()
 
     def close(self) -> None:
@@ -128,7 +134,9 @@ class Database:
 
     def get_zones(self) -> list[ZoneModel]:
         with self._lock:
-            rows = self._conn.execute("SELECT id, name, points_json, enabled, color FROM zones").fetchall()
+            rows = self._conn.execute(
+                "SELECT id, name, points_json, enabled, color, zone_type FROM zones"
+            ).fetchall()
         return [
             ZoneModel(
                 id=r["id"],
@@ -136,6 +144,7 @@ class Database:
                 points=json.loads(r["points_json"]),
                 enabled=bool(r["enabled"]),
                 color=r["color"],
+                zone_type=r["zone_type"] if r["zone_type"] in ("red_zone", "exclusion") else "red_zone",
             )
             for r in rows
         ]
@@ -146,8 +155,8 @@ class Database:
             cur.execute("DELETE FROM zones")
             for z in zones:
                 cur.execute(
-                    "INSERT INTO zones (id, name, points_json, enabled, color) VALUES (?, ?, ?, ?, ?)",
-                    (z.id, z.name, json.dumps(z.points), int(z.enabled), z.color),
+                    "INSERT INTO zones (id, name, points_json, enabled, color, zone_type) VALUES (?, ?, ?, ?, ?, ?)",
+                    (z.id, z.name, json.dumps(z.points), int(z.enabled), z.color, z.zone_type),
                 )
             self._conn.commit()
         return zones

@@ -19,6 +19,7 @@ from app.detector import (
     ObjectDetector,
     RedZoneMonitor,
     annotate_frame,
+    filter_excluded_tracks,
 )
 
 # Force RTSP over TCP to prevent H.264/H.265 packet-loss smearing over WiFi
@@ -184,6 +185,30 @@ class StreamWorker:
             self._stream_status = status
             self._last_error = error
 
+    def _dispatch_webhook(self, url: str, record: dict[str, Any], snap_path: Path) -> None:
+        def _send() -> None:
+            try:
+                import requests
+
+                msg = (
+                    f"🚨 Red-Zone Violation: {record['vehicle_class'].upper()} #{record['track_id']} "
+                    f"in {record['zone_name']} (dwell: {record['dwell_seconds']:.0f}s)"
+                )
+                if "discord.com/api/webhooks" in url:
+                    with open(snap_path, "rb") as f:
+                        requests.post(
+                            url,
+                            data={"content": msg},
+                            files={"file": (snap_path.name, f, "image/jpeg")},
+                            timeout=8,
+                        )
+                else:
+                    requests.post(url, json={"text": msg, "content": msg, "violation": record}, timeout=8)
+            except Exception:
+                pass
+
+        threading.Thread(target=_send, daemon=True).start()
+
     def _render_placeholder(self, message: str) -> bytes:
         canvas = np.zeros((540, 960, 3), dtype=np.uint8)
         canvas[:] = (24, 24, 32)
@@ -219,6 +244,8 @@ class StreamWorker:
                 continue
 
             self._set_status("connecting", "")
+            with self._lock:
+                self._latest_jpeg = self._render_placeholder(f"Connecting to {mask_rtsp_url(source)}...")
             cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
             if not cap.isOpened():
                 cap.release()
@@ -229,10 +256,30 @@ class StreamWorker:
                 backoff = min(backoff * 2.0, 15.0)
                 continue
 
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             backoff = 1.0
-            self._set_status("connected", "")
             last_infer_ts = 0.0
+            first_frame_seen = False
 
+            # Dedicated RTSP reader thread decodes every frame in order and keeps only the newest
+            rtsp_lock = threading.Lock()
+            rtsp_state: dict[str, Any] = {"frame": None, "seq": 0, "alive": True}
+            reader_thread: threading.Thread | None = None
+            if not is_file:
+                def _rtsp_reader() -> None:
+                    while not self._stop_event.is_set() and not self._reconnect_event.is_set():
+                        ok_r, frm = cap.read()
+                        if not ok_r or frm is None:
+                            rtsp_state["alive"] = False
+                            break
+                        with rtsp_lock:
+                            rtsp_state["frame"] = frm
+                            rtsp_state["seq"] += 1
+
+                reader_thread = threading.Thread(target=_rtsp_reader, name="rtsp-reader", daemon=True)
+                reader_thread.start()
+
+            last_seq = 0
             while not self._stop_event.is_set() and not self._reconnect_event.is_set():
                 cfg = self.config
                 interval = 1.0 / max(cfg.target_fps, 0.5)
@@ -251,17 +298,24 @@ class StreamWorker:
                         time.sleep(min(sleep_time, 0.25))
                         continue
                 else:
-                    # Drain RTSP buffer via grab() so we always process the newest frame
-                    grabbed = cap.grab()
-                    if not grabbed:
+                    if not rtsp_state["alive"]:
                         self._set_status("reconnecting", "Stream interrupted, reconnecting...")
                         break
                     now = time.monotonic()
                     if (now - last_infer_ts) < interval:
+                        time.sleep(0.03)
                         continue
-                    ok, frame = cap.retrieve()
-                    if not ok or frame is None:
+                    with rtsp_lock:
+                        seq = rtsp_state["seq"]
+                        frame = rtsp_state["frame"]
+                    if frame is None or seq == last_seq:
+                        time.sleep(0.05)
                         continue
+                    last_seq = seq
+
+                if not first_frame_seen:
+                    first_frame_seen = True
+                    self._set_status("connected", "")
 
                 t0 = time.monotonic()
                 dt = t0 - last_infer_ts if last_infer_ts > 0 else interval
@@ -274,6 +328,7 @@ class StreamWorker:
                     tracks = detector.detect_and_track(
                         frame, imgsz=cfg.yolo_imgsz, conf=cfg.confidence_threshold
                     )
+                    tracks = filter_excluded_tracks(tracks, w, h, zones)
                     if cfg.exempt_emergency_vehicles:
                         self.emergency_classifier.update_detections(
                             frame,
@@ -351,6 +406,8 @@ class StreamWorker:
                         )
                         with self._lock:
                             self._last_violation = rec.model_dump()
+                        if cfg.webhook_url.strip():
+                            self._dispatch_webhook(cfg.webhook_url.strip(), rec.model_dump(), snap_path)
 
                     preview = resize_for_preview(annotated_full, cfg.preview_max_width)
                     ok_jpg, jpg_buf = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 80])

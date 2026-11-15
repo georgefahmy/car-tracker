@@ -431,5 +431,10 @@ def test_two_line_speed_estimation() -> None:
     assert summary["samples_count"] == 1
     assert summary["last_speed_mph"] == speeds[7]
 
+    # Holding the vehicle stationary for >= 3s clears its live speed badge while keeping summary history
+    lm.process_tracks([_make_car(7, 0.9, 0.5)], 1000, 1000, [ln1, ln2], now_ts=5.5, calib=calib)
+    assert 7 not in lm.get_track_speeds()
+    assert lm.get_speed_summary()["samples_count"] == 1
+
 
 

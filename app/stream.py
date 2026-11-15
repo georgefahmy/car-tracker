@@ -459,6 +459,7 @@ class StreamWorker:
                 lines=counting_lines,
                 now_ts=now_ts,
                 calib=calib,
+                movement_threshold=cfg.movement_threshold,
             )
             track_speeds = self.line_monitor.get_track_speeds()
             for tid, mph in track_speeds.items():

@@ -431,6 +431,8 @@ class LineCrossingMonitor:
         self._crossed_pairs: set[tuple[int, str]] = set()
         self._first_crossing: dict[int, tuple[str, str, float, tuple[float, float]]] = {}
         self._track_speeds_mph: dict[int, float] = {}
+        self._speed_anchor: dict[int, tuple[float, float]] = {}
+        self._stationary_since: dict[int, float] = {}
         self._recent_speeds: deque[dict[str, Any]] = deque(maxlen=25)
         self._calibrated: bool = False
 
@@ -441,6 +443,8 @@ class LineCrossingMonitor:
         self._crossed_pairs.clear()
         self._first_crossing.clear()
         self._track_speeds_mph.clear()
+        self._speed_anchor.clear()
+        self._stationary_since.clear()
         self._recent_speeds.clear()
 
     def get_track_speeds(self) -> dict[int, float]:
@@ -466,6 +470,8 @@ class LineCrossingMonitor:
         lines: list[CountingLineModel],
         now_ts: float,
         calib: GroundCalibrationModel | None = None,
+        movement_threshold: float = 0.015,
+        stationary_clear_seconds: float = 3.0,
     ) -> dict[str, tuple[int, int]]:
         """Return {line_id: (new_a_to_b, new_b_to_a)} and estimate two-line speed when calibrated."""
         enabled_lines = [ln for ln in lines if ln.enabled]
@@ -520,6 +526,8 @@ class LineCrossingMonitor:
                             if 0.5 <= mph <= 120.0:
                                 mph_rounded = round(mph, 1)
                                 self._track_speeds_mph[tid] = mph_rounded
+                                self._speed_anchor[tid] = curr
+                                self._stationary_since[tid] = now_ts
                                 self._recent_speeds.append(
                                     {
                                         "track_id": tid,
@@ -532,6 +540,16 @@ class LineCrossingMonitor:
                                     }
                                 )
 
+            if tid in self._track_speeds_mph:
+                anchor = self._speed_anchor.get(tid, curr)
+                if math.hypot(curr[0] - anchor[0], curr[1] - anchor[1]) > movement_threshold:
+                    self._speed_anchor[tid] = curr
+                    self._stationary_since[tid] = now_ts
+                elif (now_ts - self._stationary_since.get(tid, now_ts)) >= stationary_clear_seconds:
+                    self._track_speeds_mph.pop(tid, None)
+                    self._speed_anchor.pop(tid, None)
+                    self._stationary_since.pop(tid, None)
+
         stale_tids = [tid for tid, ts in self._last_seen_ts.items() if (now_ts - ts) > 60.0]
         for tid in stale_tids:
             self._last_seen_ts.pop(tid, None)
@@ -539,6 +557,8 @@ class LineCrossingMonitor:
             self._prev_ts.pop(tid, None)
             self._first_crossing.pop(tid, None)
             self._track_speeds_mph.pop(tid, None)
+            self._speed_anchor.pop(tid, None)
+            self._stationary_since.pop(tid, None)
             self._crossed_pairs = {pair for pair in self._crossed_pairs if pair[0] != tid}
 
         return increments

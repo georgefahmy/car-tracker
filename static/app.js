@@ -583,8 +583,14 @@ async function refreshStats() {
     else if (data.stream_status === "error") dot.classList.add("error");
 
     const resStr = data.resolution?.width ? `${data.resolution.width}x${data.resolution.height}` : "—";
+    const sys = data.system || {};
+    const sysParts = [];
+    if (sys.cpu_percent != null) sysParts.push(`CPU ${sys.cpu_percent}%`);
+    if (sys.memory_percent != null) sysParts.push(`RAM ${sys.memory_percent}%`);
+    if (sys.cpu_temp_c != null) sysParts.push(`${sys.cpu_temp_c}°C`);
+    const sysStr = sysParts.length ? ` • ${sysParts.join(" • ")}` : "";
     document.getElementById("streamInfo").textContent =
-      `${data.stream_status.toUpperCase()} • ${resStr} • ${data.fps} FPS • ${data.source}`;
+      `${data.stream_status.toUpperCase()} • ${resStr} • ${data.fps} FPS${sysStr} • ${data.source}`;
 
     heatmapEnabled = Boolean(data.heatmap_enabled);
     document.getElementById("btnHeatmapToggle").textContent = `Heatmap: ${heatmapEnabled ? "ON" : "OFF"}`;

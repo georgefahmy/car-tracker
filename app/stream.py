@@ -10,6 +10,11 @@ from typing import Any
 import cv2
 import numpy as np
 
+try:
+    import psutil
+except ImportError:  # pragma: no cover
+    psutil = None
+
 from app.config import RuntimeConfig, Settings, build_rtmp_url, build_rtsp_url, mask_rtsp_url
 from app.database import Database
 from app.detector import (
@@ -250,8 +255,40 @@ class StreamWorker:
         with self._lock:
             return None if self._latest_raw_frame is None else self._latest_raw_frame.copy()
 
+    @staticmethod
+    def _get_system_metrics() -> dict[str, Any]:
+        """Collect host CPU, memory, process RAM, and Raspberry Pi CPU temperature."""
+        cpu_percent: float | None = None
+        memory_percent: float | None = None
+        app_ram_mb: float | None = None
+        cpu_temp_c: float | None = None
+
+        if psutil is not None:
+            try:
+                cpu_percent = round(float(psutil.cpu_percent(interval=None)), 1)
+                memory_percent = round(float(psutil.virtual_memory().percent), 1)
+                app_ram_mb = round(psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024), 1)
+            except Exception:
+                pass
+
+        thermal_path = Path("/sys/class/thermal/thermal_zone0/temp")
+        if thermal_path.exists():
+            try:
+                raw_temp = thermal_path.read_text(encoding="utf-8").strip()
+                cpu_temp_c = round(int(raw_temp) / 1000.0, 1)
+            except Exception:
+                pass
+
+        return {
+            "cpu_percent": cpu_percent,
+            "memory_percent": memory_percent,
+            "app_ram_mb": app_ram_mb,
+            "cpu_temp_c": cpu_temp_c,
+        }
+
     def get_live_state(self) -> dict[str, Any]:
         stats = self.db.get_stats_state()
+        system_metrics = self._get_system_metrics()
         with self._lock:
             return {
                 "stream_status": self._stream_status,
@@ -270,6 +307,7 @@ class StreamWorker:
                 "active_dwells": list(self._active_dwells),
                 "heatmap_enabled": self.config.heatmap_enabled,
                 "last_violation": self._last_violation,
+                "system": system_metrics,
             }
 
     def _ensure_detector(self) -> ObjectDetector:

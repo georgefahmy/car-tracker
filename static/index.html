@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Car Tracker & Red-Zone Monitor</title>
-  <link rel="stylesheet" href="static/styles.css?v=17" />
+  <link rel="stylesheet" href="static/styles.css?v=18" />
 </head>
 <body>
   <header class="topbar">
@@ -155,231 +155,412 @@
     </section>
   </main>
 
-  <!-- Settings Modal -->
-  <div class="modal-backdrop hidden" id="settingsModal">
-    <div class="modal">
-      <div class="modal-header">
-        <h2>Stream & Tracker Settings</h2>
-        <button class="btn btn-ghost" id="btnCloseSettings" aria-label="Close">&times;</button>
-      </div>
-      <form id="settingsForm" class="modal-body">
-        <div class="form-section">
-          <h3>Reolink NVR Connection</h3>
-          <div class="form-grid">
-            <label>NVR IP / Host
-              <input type="text" name="nvr_host" autocorrect="off" autocapitalize="none" spellcheck="false" required />
-            </label>
-            <label>RTSP Port
-              <input type="number" name="nvr_port" min="1" max="65535" required />
-            </label>
-            <label>Channel
-              <input type="number" name="nvr_channel" min="1" max="64" required />
-            </label>
-            <label>Stream Quality
-              <select name="nvr_stream_type">
-                <option value="main">Main Stream (4K / High-Res)</option>
-                <option value="sub">Sub Stream (Low Bandwidth)</option>
-              </select>
-            </label>
-            <label>Connection Mode
-              <select name="stream_mode">
-                <option value="auto">Auto (RTSP with HTTP Snap Fallback)</option>
-                <option value="rtsp">RTSP (Direct 4K/Sub)</option>
-                <option value="rtmp">RTMP (Sub Stream H.264, port 1935)</option>
-                <option value="http_snap">Direct HTTP Snap (Fallback)</option>
-              </select>
-            </label>
-            <label>Username
-              <input type="text" name="nvr_user" autocorrect="off" autocapitalize="none" spellcheck="false" />
-            </label>
-            <label>Password
-              <input type="password" name="nvr_pass" placeholder="Leave *** to keep existing" />
-            </label>
-          </div>
-          <label class="full-width">Local Test Video Path (optional — overrides RTSP when set)
-            <input type="text" name="test_video_path" autocorrect="off" autocapitalize="none" spellcheck="false" placeholder="/path/to/test_traffic.mp4" />
-          </label>
-          <div class="test-row">
-            <button type="button" class="btn btn-secondary" id="btnTestStream">Test Connection</button>
-            <span id="testStreamResult" class="small muted" role="status"></span>
-          </div>
-        </div>
-
-        <div class="form-section">
-          <h3>Computer Vision & Red-Zone Rules</h3>
-          <p class="small muted runtime-hint" id="cvRuntimeHint"></p>
-          <div class="form-grid">
-            <label>Detection Model
-              <select name="yolo_model">
-                <option value="yolov8n.pt">YOLOv8n (Fast baseline)</option>
-                <option value="yolo11n.pt">YOLO11n (Fast + accurate)</option>
-                <option value="yolo26n.pt">YOLO26n (NMS-free CPU optimized)</option>
-                <option value="yolo26s.pt">YOLO26s (NMS-free high accuracy)</option>
-                <option value="yolo11s.pt">YOLO11s (High accuracy — x86 ONNX/iGPU)</option>
-                <option value="yolov8s.pt">YOLOv8s (High accuracy)</option>
-                <option value="dfine_n.onnx">D-FINE Nano (Transformer NMS-free — ONNX)</option>
-                <option value="dfine_s.onnx">D-FINE Small (Transformer high accuracy — ONNX)</option>
-              </select>
-            </label>
-            <label>Inference Backend
-              <select name="inference_backend">
-                <option value="auto">Auto (PyTorch CPU — Safe Default)</option>
-                <option value="onnx">ONNX Runtime (Fast x86 CPU — Low Idle)</option>
-                <option value="openvino_gpu">OpenVINO Intel iGPU (/dev/dri Hardware)</option>
-                <option value="openvino">OpenVINO CPU (High CPU Spin)</option>
-                <option value="pytorch">PyTorch CPU</option>
-              </select>
-            </label>
-            <label>Processing FPS (1–15)
-              <input type="number" name="target_fps" step="0.5" min="0.5" max="30" required />
-            </label>
-            <label>Max Inference Size (Auto Aspect)
-              <select name="yolo_imgsz">
-                <option value="640">640 (Fastest — auto stream aspect)</option>
-                <option value="960">960 (Balanced — auto stream aspect)</option>
-                <option value="1280">1280 (Distant curbs / 4K detail)</option>
-              </select>
-            </label>
-            <label>Confidence Threshold
-              <input type="number" name="confidence_threshold" step="0.05" min="0.05" max="0.95" required />
-            </label>
-            <label>Browser Preview Max Width
-              <select name="preview_max_width">
-                <option value="960">960px</option>
-                <option value="1280">1280px (720p)</option>
-                <option value="1920">1920px (1080p)</option>
-                <option value="3840">3840px (Full 4K)</option>
-              </select>
-            </label>
-            <label>Illegal Park Dwell Time (sec)
-              <input type="number" name="dwell_seconds" step="1" min="1" max="3600" required />
-            </label>
-            <label>Stationary Tolerance (0.005–0.05)
-              <input type="number" name="movement_threshold" step="0.005" min="0.001" max="0.2" required />
-            </label>
-            <label>Box & Label Size Scale (0.4–3.0)
-              <input type="number" name="annotation_scale" step="0.1" min="0.4" max="3.0" required />
-            </label>
-            <label>Speed Capture Limit (mph)
-              <input type="number" name="speed_limit_mph" step="1" min="1" max="150" required />
-            </label>
-          </div>
-          <label class="checkbox-row">
-            <input type="checkbox" name="motion_gate_enabled" />
-            <span>Smart Motion Gate — throttle neural-net inference on static scenes (~0.5 FPS idle check, instant full FPS on motion)</span>
-          </label>
-          <label class="checkbox-row">
-            <input type="checkbox" name="speed_capture_enabled" />
-            <span>Capture high-res snapshot (and webhook alert) when a vehicle exceeds the Speed Limit</span>
-          </label>
-          <label class="checkbox-row">
-            <input type="checkbox" name="alpr_enabled" />
-            <span>Read license plates automatically on Red-Zone & Speeding snapshots (on-demand ALPR)</span>
-          </label>
-          <label class="checkbox-row">
-            <input type="checkbox" name="exempt_emergency_vehicles" />
-            <span>Exempt Emergency Vehicles (police lightbars, fire trucks, ambulances) from Red-Zone violations</span>
-          </label>
-          <div class="form-grid" style="margin-top: 10px;">
-            <label>Emergency Light Min Saturation (100–255)
-              <input type="number" name="emergency_min_saturation" min="100" max="255" required />
-            </label>
-            <label>Emergency Light Min Brightness (120–255)
-              <input type="number" name="emergency_min_value" min="120" max="255" required />
-            </label>
-            <label>Emergency Strobe Flash Swing (0.002–0.15)
-              <input type="number" name="emergency_strobe_swing" step="0.002" min="0.002" max="0.15" required />
-            </label>
-            <label>Fire Truck Red Body Ratio (0.10–0.80)
-              <input type="number" name="emergency_fire_red_ratio" step="0.05" min="0.10" max="0.80" required />
-            </label>
-          </div>
-          <label class="full-width">Alert Webhook URL (Discord, Slack, or JSON endpoint — optional)
-            <input type="url" name="webhook_url" autocorrect="off" autocapitalize="none" spellcheck="false" placeholder="https://discord.com/api/webhooks/..." />
-          </label>
-          <div class="form-grid" style="margin-top: 10px;">
-            <label class="checkbox-row">
-              <input type="checkbox" name="daily_report_enabled" />
-              <span>Send End-of-Day Summary Report</span>
-            </label>
-            <label>Daily Report Time (24h)
-              <input type="time" name="daily_report_time" />
-            </label>
-          </div>
-          <div class="test-row">
-            <button type="button" class="btn btn-secondary" id="btnTestWebhook">Test Webhook</button>
-            <button type="button" class="btn btn-secondary" id="btnSendDailyReport">Send Daily Report Now</button>
-            <span id="testWebhookResult" class="small muted" role="status"></span>
-          </div>
-        </div>
-
-        <div class="form-section">
-          <h3>Home Assistant Integration</h3>
-          <label class="checkbox-row">
-            <input type="checkbox" name="ha_enabled" />
-            <span>Publish live sensors, binary occupancy & violation events to Home Assistant</span>
-          </label>
-          <p class="small muted" id="haSupervisorHint" style="margin: 8px 0 6px;"></p>
-          <div class="form-grid">
-            <label>Home Assistant URL (optional outside HAOS)
-              <input type="url" name="ha_url" autocorrect="off" autocapitalize="none" spellcheck="false" placeholder="http://homeassistant.local:8123 (blank on HAOS)" />
-            </label>
-            <label>Long-Lived Access Token (optional outside HAOS)
-              <input type="password" name="ha_token" placeholder="Auto on HAOS (or *** to keep saved)" />
-            </label>
-          </div>
-          <div class="test-row">
-            <button type="button" class="btn btn-secondary" id="btnTestHa">Sync & Test HA Entities</button>
-            <span id="testHaResult" class="small muted" role="status"></span>
-          </div>
-        </div>
-
-        <div class="modal-footer">
-          <button type="button" class="btn btn-ghost" id="btnCancelSettings">Cancel</button>
-          <button type="submit" class="btn btn-primary">Save & Apply</button>
-        </div>
-      </form>
+  <!-- Settings Dialog -->
+  <dialog class="modal modal-settings" id="settingsModal" aria-labelledby="settingsModalTitle" closedby="any">
+    <div class="modal-header">
+      <h2 id="settingsModalTitle">Stream &amp; Tracker Settings</h2>
+      <button type="button" class="btn btn-ghost" id="btnCloseSettings" aria-label="Close" autofocus>&times;</button>
     </div>
-  </div>
+    <form id="settingsForm" class="settings-form-shell">
+      <div class="modal-body settings-body">
+        <div class="settings-columns">
+          <div class="settings-col">
+            <section class="settings-card" aria-labelledby="secNvrTitle">
+              <h3 id="secNvrTitle">Reolink NVR Connection</h3>
+              <div class="form-grid form-grid-host">
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-nvr_host">NVR IP / Host</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-nvr_host" popovertarget="tip-nvr_host" popovertargetaction="show" aria-label="More about NVR IP / Host">?</button>
+                    <div id="tip-nvr_host" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Local IPv4 address or hostname of your Reolink NVR or camera (e.g. 192.168.68.51). Do not include http:// or port numbers.</div></div>
+                  </div>
+                  <input id="cfg-nvr_host" type="text" name="nvr_host" autocorrect="off" autocapitalize="none" spellcheck="false" required />
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-nvr_port">RTSP Port</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-nvr_port" popovertarget="tip-nvr_port" popovertargetaction="show" aria-label="More about RTSP Port">?</button>
+                    <div id="tip-nvr_port" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">TCP port used for RTSP streaming (Reolink default is 554). RTMP automatically uses port 1935 and HTTP Snap uses port 80/443.</div></div>
+                  </div>
+                  <input id="cfg-nvr_port" type="number" name="nvr_port" min="1" max="65535" required />
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-nvr_channel">Channel</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-nvr_channel" popovertarget="tip-nvr_channel" popovertargetaction="show" aria-label="More about Channel">?</button>
+                    <div id="tip-nvr_channel" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">1-based camera channel number on your Reolink NVR (1–64). Standalone IP cameras typically use channel 1.</div></div>
+                  </div>
+                  <input id="cfg-nvr_channel" type="number" name="nvr_channel" min="1" max="64" required />
+                </div>
+              </div>
+              <div class="form-grid form-grid-2">
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-stream_mode">Connection Mode</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-stream_mode" popovertarget="tip-stream_mode" popovertargetaction="show" aria-label="More about Connection Mode">?</button>
+                    <div id="tip-stream_mode" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Auto tries RTSP first and falls back to HTTP Snap. RTMP (port 1935) is recommended for H.264 Sub Streams when 4K RTSP drops packets.</div></div>
+                  </div>
+                  <select id="cfg-stream_mode" name="stream_mode">
+                    <option value="auto">Auto (RTSP with HTTP Snap Fallback)</option>
+                    <option value="rtsp">RTSP (Direct 4K/Sub)</option>
+                    <option value="rtmp">RTMP (Sub Stream H.264, port 1935)</option>
+                    <option value="http_snap">Direct HTTP Snap (Fallback)</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-nvr_stream_type">Stream Quality</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-nvr_stream_type" popovertarget="tip-nvr_stream_type" popovertargetaction="show" aria-label="More about Stream Quality">?</button>
+                    <div id="tip-nvr_stream_type" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Main Stream delivers full 4K/5MP detail for distant curbs and license plates; Sub Stream (640x360) minimizes bandwidth and CPU load.</div></div>
+                  </div>
+                  <select id="cfg-nvr_stream_type" name="nvr_stream_type">
+                    <option value="main">Main Stream (4K / High-Res)</option>
+                    <option value="sub">Sub Stream (Low Bandwidth)</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-nvr_user">Username</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-nvr_user" popovertarget="tip-nvr_user" popovertargetaction="show" aria-label="More about Username">?</button>
+                    <div id="tip-nvr_user" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Camera or NVR login username (such as admin or a dedicated read-only viewer account).</div></div>
+                  </div>
+                  <input id="cfg-nvr_user" type="text" name="nvr_user" autocomplete="username" autocorrect="off" autocapitalize="none" spellcheck="false" />
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-nvr_pass">Password</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-nvr_pass" popovertarget="tip-nvr_pass" popovertargetaction="show" aria-label="More about Password">?</button>
+                    <div id="tip-nvr_pass" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Password for the NVR account. Leave as *** to keep your saved password unchanged.</div></div>
+                  </div>
+                  <input id="cfg-nvr_pass" type="password" name="nvr_pass" autocomplete="current-password" placeholder="Leave *** to keep existing" />
+                </div>
+              </div>
+              <div class="field">
+                <div class="field-label-row">
+                  <label for="cfg-test_video_path">Local Test Video Path</label>
+                  <button type="button" class="help-tip-btn" interestfor="tip-test_video_path" popovertarget="tip-test_video_path" popovertargetaction="show" aria-label="More about Local Test Video Path">?</button>
+                  <div id="tip-test_video_path" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Optional path to a local .mp4 file inside the container for offline testing. Overrides live NVR streaming while set.</div></div>
+                </div>
+                <input id="cfg-test_video_path" type="text" name="test_video_path" autocorrect="off" autocapitalize="none" spellcheck="false" placeholder="/path/to/test_traffic.mp4 (optional)" />
+              </div>
+              <div class="test-row">
+                <button type="button" class="btn btn-secondary" id="btnTestStream">Test Connection</button>
+                <span id="testStreamResult" class="small muted" role="status"></span>
+              </div>
+            </section>
+
+            <section class="settings-card" aria-labelledby="secCvTitle">
+              <h3 id="secCvTitle">Detection Engine &amp; Performance</h3>
+              <p class="small muted runtime-hint" id="cvRuntimeHint"></p>
+              <div class="form-grid form-grid-2">
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-yolo_model">Detection Model</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-yolo_model" popovertarget="tip-yolo_model" popovertargetaction="show" aria-label="More about Detection Model">?</button>
+                    <div id="tip-yolo_model" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Object detector weights. YOLO26n and YOLO11n are fastest on CPU; Small (s) and D-FINE transformer models trade higher CPU usage for better accuracy on small or occluded vehicles.</div></div>
+                  </div>
+                  <select id="cfg-yolo_model" name="yolo_model">
+                    <option value="yolov8n.pt">YOLOv8n (Fast baseline)</option>
+                    <option value="yolo11n.pt">YOLO11n (Fast + accurate)</option>
+                    <option value="yolo26n.pt">YOLO26n (NMS-free CPU optimized)</option>
+                    <option value="yolo26s.pt">YOLO26s (NMS-free high accuracy)</option>
+                    <option value="yolo11s.pt">YOLO11s (High accuracy — x86 ONNX/iGPU)</option>
+                    <option value="yolov8s.pt">YOLOv8s (High accuracy)</option>
+                    <option value="dfine_n.onnx">D-FINE Nano (Transformer NMS-free — ONNX)</option>
+                    <option value="dfine_s.onnx">D-FINE Small (Transformer high accuracy — ONNX)</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-inference_backend">Inference Backend</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-inference_backend" popovertarget="tip-inference_backend" popovertargetaction="show" aria-label="More about Inference Backend">?</button>
+                    <div id="tip-inference_backend" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Execution runtime for inference. ONNX Runtime and OpenVINO Intel iGPU (/dev/dri) reduce x86 CPU usage; Auto uses PyTorch CPU (or Apple MPS / CUDA when available).</div></div>
+                  </div>
+                  <select id="cfg-inference_backend" name="inference_backend">
+                    <option value="auto">Auto (PyTorch CPU — Safe Default)</option>
+                    <option value="onnx">ONNX Runtime (Fast x86 CPU — Low Idle)</option>
+                    <option value="openvino_gpu">OpenVINO Intel iGPU (/dev/dri Hardware)</option>
+                    <option value="openvino">OpenVINO CPU (High CPU Spin)</option>
+                    <option value="pytorch">PyTorch CPU</option>
+                  </select>
+                </div>
+              </div>
+              <div class="form-grid form-grid-3">
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-yolo_imgsz">Max Inference Size</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-yolo_imgsz" popovertarget="tip-yolo_imgsz" popovertargetaction="show" aria-label="More about Max Inference Size">?</button>
+                    <div id="tip-yolo_imgsz" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Longest-edge resolution cap for YOLO inference, automatically matched to your stream's aspect ratio without upscaling Sub Streams (D-FINE runs at fixed 640x640).</div></div>
+                  </div>
+                  <select id="cfg-yolo_imgsz" name="yolo_imgsz">
+                    <option value="640">640 (Fastest — auto stream aspect)</option>
+                    <option value="960">960 (Balanced — auto stream aspect)</option>
+                    <option value="1280">1280 (Distant curbs / 4K detail)</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-target_fps">Processing FPS (0.5–30)</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-target_fps" popovertarget="tip-target_fps" popovertargetaction="show" aria-label="More about Processing FPS">?</button>
+                    <div id="tip-target_fps" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Maximum frames per second analyzed during active motion. 3–7 FPS tracks street traffic smoothly while keeping CPU temperatures low.</div></div>
+                  </div>
+                  <input id="cfg-target_fps" type="number" name="target_fps" step="0.5" min="0.5" max="30" required />
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-confidence_threshold">Confidence (0.05–0.95)</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-confidence_threshold" popovertarget="tip-confidence_threshold" popovertargetaction="show" aria-label="More about Confidence Threshold">?</button>
+                    <div id="tip-confidence_threshold" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Minimum detection score required to track and count an object. Increase (0.35–0.45) to reduce false positives; lower (0.20–0.25) for dark or distant views.</div></div>
+                  </div>
+                  <input id="cfg-confidence_threshold" type="number" name="confidence_threshold" step="0.05" min="0.05" max="0.95" required />
+                </div>
+              </div>
+              <div class="form-grid form-grid-2">
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-preview_max_width">Preview Max Width</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-preview_max_width" popovertarget="tip-preview_max_width" popovertargetaction="show" aria-label="More about Browser Preview Max Width">?</button>
+                    <div id="tip-preview_max_width" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Maximum pixel width of the live annotated JPEG feed in the browser. Lowering saves network bandwidth without affecting AI detection or full-res snapshots.</div></div>
+                  </div>
+                  <select id="cfg-preview_max_width" name="preview_max_width">
+                    <option value="960">960px</option>
+                    <option value="1280">1280px (720p)</option>
+                    <option value="1920">1920px (1080p)</option>
+                    <option value="3840">3840px (Full 4K)</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-annotation_scale">Box &amp; Label Scale (0.4–3.0)</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-annotation_scale" popovertarget="tip-annotation_scale" popovertargetaction="show" aria-label="More about Box and Label Scale">?</button>
+                    <div id="tip-annotation_scale" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Visual size multiplier for bounding boxes and text labels drawn on the live preview and saved violation snapshots.</div></div>
+                  </div>
+                  <input id="cfg-annotation_scale" type="number" name="annotation_scale" step="0.1" min="0.4" max="3.0" required />
+                </div>
+              </div>
+              <div class="toggle-tile">
+                <div class="toggle-head">
+                  <input id="cfg-motion_gate_enabled" type="checkbox" name="motion_gate_enabled" />
+                  <label for="cfg-motion_gate_enabled">Smart Motion Gate</label>
+                  <button type="button" class="help-tip-btn" interestfor="tip-motion_gate_enabled" popovertarget="tip-motion_gate_enabled" popovertargetaction="show" aria-label="More about Smart Motion Gate">?</button>
+                  <div id="tip-motion_gate_enabled" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Uses fast OpenCV pixel-diff checks (ignoring Exclusion Masks) to throttle neural-net inference to ~0.5 FPS when the street is static, waking instantly to full FPS on motion while keeping active Red-Zone timers ticking.</div></div>
+                </div>
+                <span class="toggle-sub">~0.5 FPS idle check on static scenes, instant full FPS on motion</span>
+              </div>
+            </section>
+          </div>
+
+          <div class="settings-col">
+            <section class="settings-card" aria-labelledby="secRulesTitle">
+              <h3 id="secRulesTitle">Red-Zone, Speeding &amp; Emergency Rules</h3>
+              <div class="form-grid form-grid-3">
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-dwell_seconds">Park Dwell Time (sec)</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-dwell_seconds" popovertarget="tip-dwell_seconds" popovertargetaction="show" aria-label="More about Illegal Park Dwell Time">?</button>
+                    <div id="tip-dwell_seconds" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Seconds a vehicle must stay stationary inside a Red Zone before logging an illegal parking violation, snapshot, and alert (total parked duration keeps counting afterward).</div></div>
+                  </div>
+                  <input id="cfg-dwell_seconds" type="number" name="dwell_seconds" step="1" min="1" max="3600" required />
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-movement_threshold">Stationary Tolerance</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-movement_threshold" popovertarget="tip-movement_threshold" popovertargetaction="show" aria-label="More about Stationary Tolerance">?</button>
+                    <div id="tip-movement_threshold" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Normalized frame fraction (0.001–0.2) a parked vehicle's anchor may jitter without resetting its dwell timer. Default 0.015 (~1.5% of frame) absorbs minor box wobble.</div></div>
+                  </div>
+                  <input id="cfg-movement_threshold" type="number" name="movement_threshold" step="0.005" min="0.001" max="0.2" required />
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-speed_limit_mph">Speed Limit (mph)</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-speed_limit_mph" popovertarget="tip-speed_limit_mph" popovertargetaction="show" aria-label="More about Speed Limit">?</button>
+                    <div id="tip-speed_limit_mph" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Speed threshold in mph between two enabled Traffic Flow Lines (requires 3D Ground Grid calibration) that triggers a speeding violation.</div></div>
+                  </div>
+                  <input id="cfg-speed_limit_mph" type="number" name="speed_limit_mph" step="1" min="1" max="150" required />
+                </div>
+              </div>
+              <div class="toggle-grid">
+                <div class="toggle-tile">
+                  <div class="toggle-head">
+                    <input id="cfg-speed_capture_enabled" type="checkbox" name="speed_capture_enabled" />
+                    <label for="cfg-speed_capture_enabled">Speeding Snapshots &amp; Alerts</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-speed_capture_enabled" popovertarget="tip-speed_capture_enabled" popovertargetaction="show" aria-label="More about Speeding Snapshots and Alerts">?</button>
+                    <div id="tip-speed_capture_enabled" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Captures a high-resolution annotated snapshot, logs a violation, and sends optional webhook/HA events whenever a vehicle exceeds the Speed Limit.</div></div>
+                  </div>
+                  <span class="toggle-sub">Save high-res photo &amp; alert above Speed Limit</span>
+                </div>
+                <div class="toggle-tile">
+                  <div class="toggle-head">
+                    <input id="cfg-alpr_enabled" type="checkbox" name="alpr_enabled" />
+                    <label for="cfg-alpr_enabled">License Plate OCR (ALPR)</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-alpr_enabled" popovertarget="tip-alpr_enabled" popovertargetaction="show" aria-label="More about License Plate OCR">?</button>
+                    <div id="tip-alpr_enabled" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Runs local RapidOCR license plate recognition on demand when a Red-Zone or Speeding snapshot is saved (0% continuous stream CPU cost).</div></div>
+                  </div>
+                  <span class="toggle-sub">Read plates on Red-Zone &amp; Speeding photos</span>
+                </div>
+              </div>
+              <div class="emergency-group">
+                <div class="toggle-tile">
+                  <div class="toggle-head">
+                    <input id="cfg-exempt_emergency_vehicles" type="checkbox" name="exempt_emergency_vehicles" />
+                    <label for="cfg-exempt_emergency_vehicles">Exempt Emergency Vehicles</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-exempt_emergency_vehicles" popovertarget="tip-exempt_emergency_vehicles" popovertargetaction="show" aria-label="More about Exempt Emergency Vehicles">?</button>
+                    <div id="tip-exempt_emergency_vehicles" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Skips Red-Zone violation alerts when roof emergency lightbars, flashing strobes, or fire-engine red bodies are detected using the thresholds below.</div></div>
+                  </div>
+                  <span class="toggle-sub">Ignore police lightbars, fire trucks &amp; ambulances in Red Zones</span>
+                </div>
+                <div class="emergency-subgrid">
+                  <div class="field">
+                    <div class="field-label-row">
+                      <label for="cfg-emergency_min_saturation">Light Min Saturation (100–255)</label>
+                      <button type="button" class="help-tip-btn" interestfor="tip-emergency_min_saturation" popovertarget="tip-emergency_min_saturation" popovertargetaction="show" aria-label="More about Emergency Light Min Saturation">?</button>
+                      <div id="tip-emergency_min_saturation" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Minimum HSV color saturation (100–255) for vivid red/blue roof lightbars. Higher values prevent sun glare or reflections from matching.</div></div>
+                    </div>
+                    <input id="cfg-emergency_min_saturation" type="number" name="emergency_min_saturation" min="100" max="255" required />
+                  </div>
+                  <div class="field">
+                    <div class="field-label-row">
+                      <label for="cfg-emergency_min_value">Light Min Brightness (120–255)</label>
+                      <button type="button" class="help-tip-btn" interestfor="tip-emergency_min_value" popovertarget="tip-emergency_min_value" popovertargetaction="show" aria-label="More about Emergency Light Min Brightness">?</button>
+                      <div id="tip-emergency_min_value" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Minimum HSV brightness (120–255) for active emergency beacons so dark red or blue paint is not mistaken for lit strobes.</div></div>
+                    </div>
+                    <input id="cfg-emergency_min_value" type="number" name="emergency_min_value" min="120" max="255" required />
+                  </div>
+                  <div class="field">
+                    <div class="field-label-row">
+                      <label for="cfg-emergency_strobe_swing">Strobe Flash Swing (0.002–0.15)</label>
+                      <button type="button" class="help-tip-btn" interestfor="tip-emergency_strobe_swing" popovertarget="tip-emergency_strobe_swing" popovertargetaction="show" aria-label="More about Emergency Strobe Flash Swing">?</button>
+                      <div id="tip-emergency_strobe_swing" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Minimum frame-to-frame bright-pixel ratio change (0.002–0.15) in the upper vehicle region required to detect flashing strobe lights.</div></div>
+                    </div>
+                    <input id="cfg-emergency_strobe_swing" type="number" name="emergency_strobe_swing" step="0.002" min="0.002" max="0.15" required />
+                  </div>
+                  <div class="field">
+                    <div class="field-label-row">
+                      <label for="cfg-emergency_fire_red_ratio">Fire Truck Red Ratio (0.10–0.80)</label>
+                      <button type="button" class="help-tip-btn" interestfor="tip-emergency_fire_red_ratio" popovertarget="tip-emergency_fire_red_ratio" popovertargetaction="show" aria-label="More about Fire Truck Red Body Ratio">?</button>
+                      <div id="tip-emergency_fire_red_ratio" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Minimum fraction of vivid red body pixels (0.10–0.80) on a truck or bus to classify it as a fire engine even without active strobes.</div></div>
+                    </div>
+                    <input id="cfg-emergency_fire_red_ratio" type="number" name="emergency_fire_red_ratio" step="0.05" min="0.10" max="0.80" required />
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-card" aria-labelledby="secAlertsTitle">
+              <h3 id="secAlertsTitle">Alerts &amp; Daily Summary</h3>
+              <div class="field">
+                <div class="field-label-row">
+                  <label for="cfg-webhook_url">Alert Webhook URL</label>
+                  <button type="button" class="help-tip-btn" interestfor="tip-webhook_url" popovertarget="tip-webhook_url" popovertargetaction="show" aria-label="More about Alert Webhook URL">?</button>
+                  <div id="tip-webhook_url" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Optional Discord, Slack, or custom JSON webhook URL for instant Red-Zone &amp; Speeding alerts (with image attachments on Discord) and daily summary reports.</div></div>
+                </div>
+                <input id="cfg-webhook_url" type="url" name="webhook_url" autocorrect="off" autocapitalize="none" spellcheck="false" placeholder="https://discord.com/api/webhooks/... (optional)" />
+              </div>
+              <div class="form-grid report-grid">
+                <div class="toggle-tile">
+                  <div class="toggle-head">
+                    <input id="cfg-daily_report_enabled" type="checkbox" name="daily_report_enabled" />
+                    <label for="cfg-daily_report_enabled">Send End-of-Day Summary</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-daily_report_enabled" popovertarget="tip-daily_report_enabled" popovertargetaction="show" aria-label="More about End-of-Day Summary Report">?</button>
+                    <div id="tip-daily_report_enabled" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Posts an automated daily traffic and violation summary to your Alert Webhook URL at the scheduled time, then resets daily counters for the next day.</div></div>
+                  </div>
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-daily_report_time">Daily Report Time (24h)</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-daily_report_time" popovertarget="tip-daily_report_time" popovertargetaction="show" aria-label="More about Daily Report Time">?</button>
+                    <div id="tip-daily_report_time" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Local 24-hour clock time (e.g. 23:55) when the automated End-of-Day Summary Report is sent and daily counters reset.</div></div>
+                  </div>
+                  <input id="cfg-daily_report_time" type="time" name="daily_report_time" />
+                </div>
+              </div>
+              <div class="test-row">
+                <button type="button" class="btn btn-secondary" id="btnTestWebhook">Test Webhook</button>
+                <button type="button" class="btn btn-secondary" id="btnSendDailyReport">Send Daily Report Now</button>
+                <span id="testWebhookResult" class="small muted" role="status"></span>
+              </div>
+            </section>
+
+            <section class="settings-card" aria-labelledby="secHaTitle">
+              <h3 id="secHaTitle">Home Assistant Integration</h3>
+              <div class="toggle-tile">
+                <div class="toggle-head">
+                  <input id="cfg-ha_enabled" type="checkbox" name="ha_enabled" />
+                  <label for="cfg-ha_enabled">Publish to Home Assistant</label>
+                  <button type="button" class="help-tip-btn" interestfor="tip-ha_enabled" popovertarget="tip-ha_enabled" popovertargetaction="show" aria-label="More about Home Assistant Integration">?</button>
+                  <div id="tip-ha_enabled" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Registers a unified 'Car Tracker' device in Home Assistant with 8 live sensors/binary sensors and fires car_tracker_violation and car_tracker_speeding events.</div></div>
+                </div>
+                <span class="toggle-sub">Sync 'Car Tracker' device sensors, occupancy &amp; violation events</span>
+              </div>
+              <p class="small muted ha-hint" id="haSupervisorHint"></p>
+              <div class="form-grid form-grid-2">
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-ha_url">Home Assistant URL</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-ha_url" popovertarget="tip-ha_url" popovertargetaction="show" aria-label="More about Home Assistant URL">?</button>
+                    <div id="tip-ha_url" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Base URL of Home Assistant (e.g. http://homeassistant.local:8123) when running standalone outside HAOS. Leave blank on Home Assistant OS.</div></div>
+                  </div>
+                  <input id="cfg-ha_url" type="url" name="ha_url" autocorrect="off" autocapitalize="none" spellcheck="false" placeholder="http://homeassistant.local:8123 (blank on HAOS)" />
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-ha_token">Long-Lived Access Token</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-ha_token" popovertarget="tip-ha_token" popovertargetaction="show" aria-label="More about Long-Lived Access Token">?</button>
+                    <div id="tip-ha_token" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Home Assistant Long-Lived Access Token for standalone installs outside HAOS. Leave blank on HAOS (auto-detected) or *** to keep saved.</div></div>
+                  </div>
+                  <input id="cfg-ha_token" type="password" name="ha_token" autocomplete="off" placeholder="Auto on HAOS (or *** to keep saved)" />
+                </div>
+              </div>
+              <div class="test-row">
+                <button type="button" class="btn btn-secondary" id="btnTestHa">Sync &amp; Test HA Entities</button>
+                <span id="testHaResult" class="small muted" role="status"></span>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn btn-ghost" id="btnCancelSettings">Cancel</button>
+        <button type="submit" class="btn btn-primary">Save &amp; Apply</button>
+      </div>
+    </form>
+  </dialog>
 
   <!-- Snapshot Lightbox -->
-  <div class="modal-backdrop hidden" id="snapshotModal">
-    <div class="modal modal-wide">
-      <div class="modal-header">
-        <h2 id="snapshotTitle">Violation Snapshot</h2>
-        <button class="btn btn-ghost" id="btnCloseSnapshot" aria-label="Close">&times;</button>
+  <dialog class="modal modal-wide" id="snapshotModal" aria-labelledby="snapshotTitle" closedby="any">
+    <div class="modal-header">
+      <h2 id="snapshotTitle">Violation Snapshot</h2>
+      <button type="button" class="btn btn-ghost" id="btnCloseSnapshot" aria-label="Close" autofocus>&times;</button>
+    </div>
+    <div class="modal-body">
+      <img id="snapshotFullImg" src="" alt="Violation Snapshot" class="snapshot-full" />
+    </div>
+  </dialog>
+
+  <!-- Bird's-Eye View Dialog -->
+  <dialog class="modal modal-wide" id="birdseyeModal" aria-labelledby="birdseyeModalTitle" closedby="any">
+    <div class="modal-header">
+      <h2 id="birdseyeModalTitle">3D Ground Plane — Bird's-Eye View</h2>
+      <button type="button" class="btn btn-ghost" id="btnCloseBirdseye" aria-label="Close" autofocus>&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="test-row" style="margin-bottom: 10px; flex-wrap: wrap;">
+        <button type="button" class="btn btn-danger" id="btnBevDrawZone">+ Draw Red Zone on Map</button>
+        <button type="button" class="btn btn-primary hidden" id="btnBevSaveZone">Save Map Zone</button>
+        <button type="button" class="btn btn-ghost hidden" id="btnBevCancelZone">Cancel</button>
+        <button type="button" class="btn btn-secondary" id="btnBevRefresh">Refresh Image</button>
+        <button type="button" class="btn btn-secondary" id="btnBevRecalibrate">Recalibrate 4 Points</button>
+        <button type="button" class="btn btn-ghost" id="btnBevClear">Clear Calibration</button>
+        <span id="bevHint" class="small muted"></span>
       </div>
-      <div class="modal-body">
-        <img id="snapshotFullImg" src="" alt="Violation Snapshot" class="snapshot-full" />
+      <div class="video-stage" style="position: relative;">
+        <img id="birdseyeImg" src="" alt="Bird's-Eye View" style="width: 100%; display: block;" />
+        <canvas id="birdseyeCanvas" style="position: absolute; inset: 0; width: 100%; height: 100%;"></canvas>
       </div>
     </div>
-  </div>
+  </dialog>
 
-  <!-- Bird's-Eye View Modal -->
-  <div class="modal-backdrop hidden" id="birdseyeModal">
-    <div class="modal modal-wide">
-      <div class="modal-header">
-        <h2>3D Ground Plane — Bird's-Eye View</h2>
-        <button class="btn btn-ghost" id="btnCloseBirdseye" aria-label="Close">&times;</button>
-      </div>
-      <div class="modal-body">
-        <div class="test-row" style="margin-bottom: 10px; flex-wrap: wrap;">
-          <button type="button" class="btn btn-danger" id="btnBevDrawZone">+ Draw Red Zone on Map</button>
-          <button type="button" class="btn btn-primary hidden" id="btnBevSaveZone">Save Map Zone</button>
-          <button type="button" class="btn btn-ghost hidden" id="btnBevCancelZone">Cancel</button>
-          <button type="button" class="btn btn-secondary" id="btnBevRefresh">Refresh Image</button>
-          <button type="button" class="btn btn-secondary" id="btnBevRecalibrate">Recalibrate 4 Points</button>
-          <button type="button" class="btn btn-ghost" id="btnBevClear">Clear Calibration</button>
-          <span id="bevHint" class="small muted"></span>
-        </div>
-        <div class="video-stage" style="position: relative;">
-          <img id="birdseyeImg" src="" alt="Bird's-Eye View" style="width: 100%; display: block;" />
-          <canvas id="birdseyeCanvas" style="position: absolute; inset: 0; width: 100%; height: 100%;"></canvas>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <script src="static/app.js?v=17"></script>
+  <script src="static/app.js?v=18"></script>
 </body>
 </html>

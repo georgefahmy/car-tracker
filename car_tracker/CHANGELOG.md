@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.20
+- **Escape Dismissal & Native Dialogs**: Migrated the Settings, Violation Snapshot, and Bird's-Eye View popups to native `<dialog closedby="any">` modals so any popup (dialogs, Zones dropdown, active tooltips, and active canvas drawing) can be dismissed with the `Escape` key or backdrop click, while ensuring `Escape` dismisses an open tooltip before closing Settings.
+- **Wide Multi-Column Settings Layout**: Expanded the Settings modal (`min(1140px, 100dvw - 32px)`), pinned the header and footer (`Cancel` / `Save & Apply`) so actions stay visible without scrolling, and organized all 32 settings into 5 grouped cards across a 2-column desktop layout that collapses cleanly on smaller screens.
+- **Per-Setting Tooltips**: Added accessible `?` toggletips (`popover="hint"` + `interestfor` + hover/focus/tap fallbacks) on every setting explaining what it controls, valid ranges, and recommended values.
+
 ## 1.0.19
 - **YOLO26 & D-FINE Model Options**: Added `yolo26n.pt`, `yolo26s.pt` (end-to-end NMS-free YOLO via Ultralytics 8.4), `dfine_n.onnx`, and `dfine_s.onnx` (HuggingFace `onnx-community` D-FINE transformers with standalone ByteTrack + `TrackStabilizer`) in Settings and `ObjectDetector`, supporting live hot-reloading and ONNX Runtime / OpenVINO execution.
 - **Stream-Matched Rectangular Input Sizing**: Automatically computes `(in_h, in_w)` matching the camera's stream aspect ratio without upscaling low-resolution sub-streams (e.g. `640x360` sub-stream runs at `640x384` instead of `960x960`), caches rectangular ONNX/OpenVINO exports by `(in_h, in_w)`, and surfaces the active `WxH` inference geometry in the UI.

@@ -1146,7 +1146,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.19"
+    assert expected_ver == "1.0.20"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1690,6 +1690,142 @@ def test_motion_gate_throttles_static_and_preserves_red_zone_dwell(tmp_path: Pat
     assert live["active_dwells"][0]["dwell_seconds"] == 36.0
     assert db.get_violations(limit=10)[0].dwell_seconds == 36.0
     assert snap_path.read_bytes() != bytes_30s
+
+
+def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
+    import re
+    from html.parser import HTMLParser
+
+    class _DOMCollector(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dialogs: dict[str, dict[str, str | None]] = {}
+            self.labels_for: list[str] = []
+            self.buttons_inside_label: list[str] = []
+            self.controls_by_name: dict[str, dict[str, str | None]] = {}
+            self.tip_buttons_by_for: dict[str, dict[str, str | None]] = {}
+            self.tooltips: dict[str, str] = {}
+            self.has_modal_backdrop = False
+            self.links: list[str] = []
+            self.scripts: list[str] = []
+            self._in_label = False
+            self._active_tip_id: str | None = None
+            self._tip_depth = 0
+            self._tip_parts: list[str] = []
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            attr = dict(attrs)
+            cls_tokens = set((attr.get("class") or "").split())
+            if "modal-backdrop" in cls_tokens:
+                self.has_modal_backdrop = True
+            if tag == "dialog" and attr.get("id"):
+                self.dialogs[attr["id"]] = attr
+            if tag == "link" and attr.get("href"):
+                self.links.append(attr["href"])
+            if tag == "script" and attr.get("src"):
+                self.scripts.append(attr["src"])
+            if tag == "label":
+                self._in_label = True
+                if attr.get("for"):
+                    self.labels_for.append(attr["for"])
+            if tag == "button":
+                if self._in_label:
+                    self.buttons_inside_label.append(attr.get("id") or attr.get("interestfor") or "btn")
+                if "help-tip-btn" in cls_tokens and attr.get("interestfor"):
+                    self.tip_buttons_by_for[attr["interestfor"]] = attr
+            if tag in {"input", "select"} and attr.get("name") and attr["name"] != "violation_filter":
+                self.controls_by_name[attr["name"]] = attr
+            if tag == "div" and attr.get("popover") == "hint" and attr.get("id"):
+                self._active_tip_id = attr["id"]
+                self._tip_depth = 1
+                self._tip_parts = []
+            elif tag == "div" and self._active_tip_id is not None:
+                self._tip_depth += 1
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag == "label":
+                self._in_label = False
+            if tag == "div" and self._active_tip_id is not None:
+                self._tip_depth -= 1
+                if self._tip_depth == 0:
+                    text = re.sub(r"\s+", " ", "".join(self._tip_parts)).strip()
+                    self.tooltips[self._active_tip_id] = text
+                    self._active_tip_id = None
+
+        def handle_data(self, data: str) -> None:
+            if self._active_tip_id is not None:
+                self._tip_parts.append(data)
+
+    settings = Settings(data_dir=str(tmp_path / "ui_data"))
+    app = create_app(settings=settings, start_worker=False)
+    with TestClient(app) as client:
+        resp = client.get("/")
+        assert resp.status_code == 200
+        html = resp.text
+
+    collector = _DOMCollector()
+    collector.feed(html)
+
+    assert collector.has_modal_backdrop is False
+    for dialog_id in ("settingsModal", "snapshotModal", "birdseyeModal"):
+        assert dialog_id in collector.dialogs
+        attrs = collector.dialogs[dialog_id]
+        assert attrs.get("closedby") == "any"
+        assert attrs.get("aria-labelledby")
+        assert "role" not in attrs
+        assert "aria-modal" not in attrs
+
+    assert "static/styles.css?v=18" in collector.links
+    assert "static/app.js?v=18" in collector.scripts
+    assert collector.buttons_inside_label == []
+
+    expected_settings = [
+        "nvr_host",
+        "nvr_port",
+        "nvr_channel",
+        "nvr_stream_type",
+        "stream_mode",
+        "nvr_user",
+        "nvr_pass",
+        "test_video_path",
+        "yolo_model",
+        "inference_backend",
+        "yolo_imgsz",
+        "target_fps",
+        "confidence_threshold",
+        "preview_max_width",
+        "annotation_scale",
+        "motion_gate_enabled",
+        "dwell_seconds",
+        "movement_threshold",
+        "speed_limit_mph",
+        "speed_capture_enabled",
+        "alpr_enabled",
+        "exempt_emergency_vehicles",
+        "emergency_min_saturation",
+        "emergency_min_value",
+        "emergency_strobe_swing",
+        "emergency_fire_red_ratio",
+        "webhook_url",
+        "daily_report_enabled",
+        "daily_report_time",
+        "ha_enabled",
+        "ha_url",
+        "ha_token",
+    ]
+    assert set(expected_settings) == set(collector.controls_by_name.keys())
+    for field in expected_settings:
+        ctrl = collector.controls_by_name[field]
+        expected_id = f"cfg-{field}"
+        tip_id = f"tip-{field}"
+        assert ctrl.get("id") == expected_id
+        assert expected_id in collector.labels_for
+        assert tip_id in collector.tip_buttons_by_for
+        tip_btn = collector.tip_buttons_by_for[tip_id]
+        assert tip_btn.get("popovertarget") == tip_id
+        assert tip_btn.get("popovertargetaction") == "show"
+        assert tip_btn.get("aria-label")
+        assert len(collector.tooltips.get(tip_id, "")) >= 30
 
 
 

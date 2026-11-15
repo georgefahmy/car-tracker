@@ -5,7 +5,15 @@ const btnZonesMenu = document.getElementById("btnZonesMenu");
 const zonesDropdown = document.getElementById("zonesDropdown");
 const drawToolbar = document.getElementById("drawToolbar");
 const zonesMenuBadge = document.getElementById("zonesMenuBadge");
+const settingsModal = document.getElementById("settingsModal");
+const settingsForm = document.getElementById("settingsForm");
+const snapshotModal = document.getElementById("snapshotModal");
+const birdseyeModal = document.getElementById("birdseyeModal");
 const supportsPopover = Object.hasOwn(HTMLElement.prototype, "popover");
+const supportsAnchorPositioning =
+  typeof CSS !== "undefined" &&
+  typeof CSS.supports === "function" &&
+  CSS.supports("position-area: block-start");
 
 let savedZones = [];
 let savedLines = [];
@@ -18,6 +26,415 @@ let heatmapEnabled = false;
 let groundCalib = null;
 let groundToImgMatrix = null;
 let latestLiveStats = null;
+
+function isModalOpen(dialog) {
+  return Boolean(dialog && (dialog.open || dialog.hasAttribute("open")));
+}
+
+function openModalDialog(dialog) {
+  if (!dialog) return;
+  closeZonesMenu({ restoreFocus: false });
+  if (!isModalOpen(dialog)) {
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+    } else {
+      dialog.setAttribute("open", "");
+    }
+  }
+}
+
+function closeModalDialog(dialog) {
+  if (!dialog) return;
+  if (isModalOpen(dialog)) {
+    if (typeof dialog.close === "function") {
+      dialog.close();
+    } else {
+      dialog.removeAttribute("open");
+    }
+  }
+}
+
+// Fallback light-dismiss for dialog[closedby="any"] in browsers lacking native closedBy (e.g. Safari)
+if (typeof HTMLDialogElement !== "undefined" && !("closedBy" in HTMLDialogElement.prototype)) {
+  const outsideDialog = (e, dialog) => {
+    if (e.target instanceof Element && e.target.closest(".setting-tooltip")) return false;
+    const r = dialog.getBoundingClientRect();
+    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+  };
+  for (const dialog of document.querySelectorAll('dialog[closedby="any"]')) {
+    let pressedOutside = false;
+    dialog.addEventListener("pointerdown", (e) => {
+      pressedOutside = isModalOpen(dialog) && outsideDialog(e, dialog);
+    });
+    dialog.addEventListener("pointerup", (e) => {
+      if (pressedOutside && isModalOpen(dialog) && outsideDialog(e, dialog)) {
+        closeModalDialog(dialog);
+      }
+      pressedOutside = false;
+    });
+    dialog.addEventListener("pointercancel", () => {
+      pressedOutside = false;
+    });
+  }
+}
+
+// Accessible setting tooltips / toggletips (popover="hint" + interestfor + cross-browser fallbacks)
+const managedTooltipTriggers = new Set();
+let activeTipTrigger = null;
+let activeOpenTip = null;
+let lastTooltipClosedAt = 0;
+let suppressDialogCancelThisTick = false;
+
+function isSettingTooltipOpen(tip) {
+  if (!tip) return false;
+  if (supportsPopover) {
+    return tip.matches(":popover-open");
+  }
+  return tip.classList.contains("is-open");
+}
+
+function positionSettingTooltipFallback(trigger, tip) {
+  if (!trigger || !tip || supportsAnchorPositioning) return;
+  const tRect = trigger.getBoundingClientRect();
+  const tipRect = tip.getBoundingClientRect();
+  const tipW = tipRect.width || Math.min(310, window.innerWidth - 24);
+  const tipH = tipRect.height || 88;
+  const margin = 12;
+  const left = Math.max(
+    margin,
+    Math.min(tRect.left + tRect.width / 2 - tipW / 2, window.innerWidth - tipW - margin)
+  );
+  const fitsAbove = tRect.top - tipH - 8 >= margin;
+  const top = fitsAbove
+    ? tRect.top - tipH - 8
+    : Math.min(window.innerHeight - tipH - margin, tRect.bottom + 8);
+  tip.style.left = `${Math.round(left)}px`;
+  tip.style.top = `${Math.round(Math.max(margin, top))}px`;
+}
+
+function clearActiveTipAnchor() {
+  if (activeTipTrigger) {
+    activeTipTrigger.style.removeProperty("anchor-name");
+  }
+  if (activeOpenTip) {
+    activeOpenTip.style.removeProperty("position-anchor");
+  }
+  activeTipTrigger = null;
+  activeOpenTip = null;
+}
+
+function hideSettingTooltip(tip) {
+  if (!tip || !isSettingTooltipOpen(tip)) return false;
+  if (supportsPopover) {
+    try {
+      tip.hidePopover();
+    } catch (_) {}
+  } else {
+    tip.classList.remove("is-open");
+    const btn = document.querySelector(`button[interestfor="${CSS.escape(tip.id)}"]`);
+    if (btn && managedTooltipTriggers.has(btn)) {
+      btn.setAttribute("aria-expanded", "false");
+    }
+    if (activeOpenTip === tip) {
+      clearActiveTipAnchor();
+    }
+    lastTooltipClosedAt = performance.now();
+  }
+  return true;
+}
+
+function hideAnyOpenSettingTooltip(exceptTip = null) {
+  let closed = false;
+  for (const tip of document.querySelectorAll(".setting-tooltip")) {
+    if (tip !== exceptTip && hideSettingTooltip(tip)) {
+      closed = true;
+    }
+  }
+  return closed;
+}
+
+function showSettingTooltip(tip, trigger) {
+  if (!tip || !trigger) return;
+  if (isSettingTooltipOpen(tip)) return;
+  hideAnyOpenSettingTooltip(tip);
+  if (supportsPopover) {
+    try {
+      tip.showPopover({ source: trigger });
+    } catch (_) {
+      try {
+        tip.showPopover();
+      } catch (_2) {}
+    }
+  } else {
+    clearActiveTipAnchor();
+    activeTipTrigger = trigger;
+    activeOpenTip = tip;
+    tip.classList.add("is-open");
+    if (managedTooltipTriggers.has(trigger)) {
+      trigger.setAttribute("aria-expanded", "true");
+    }
+    positionSettingTooltipFallback(trigger, tip);
+  }
+}
+
+function repositionOpenSettingTooltip() {
+  if (!activeOpenTip || !activeTipTrigger || !isSettingTooltipOpen(activeOpenTip)) return;
+  const scrollBody = settingsModal?.querySelector(".settings-body");
+  if (scrollBody) {
+    const bRect = scrollBody.getBoundingClientRect();
+    const tRect = activeTipTrigger.getBoundingClientRect();
+    if (tRect.bottom < bRect.top || tRect.top > bRect.bottom) {
+      hideSettingTooltip(activeOpenTip);
+      return;
+    }
+  }
+  positionSettingTooltipFallback(activeTipTrigger, activeOpenTip);
+}
+
+function syncTooltipAccessibility(root = document) {
+  const getAccessibleName = (el) => {
+    const labelledBy = el.getAttribute("aria-labelledby");
+    if (labelledBy) {
+      const text = labelledBy
+        .split(/\s+/)
+        .map((id) => document.getElementById(id)?.textContent || "")
+        .join(" ")
+        .trim();
+      if (text) return text;
+    }
+    const ariaLabel = el.getAttribute("aria-label");
+    if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
+    const textContent = Array.from(el.childNodes)
+      .map((node) => (node.nodeType === 1 && node.tagName === "IMG" ? node.getAttribute("alt") || "" : node.textContent || ""))
+      .join(" ")
+      .trim();
+    return textContent || el.getAttribute("title") || "";
+  };
+
+  for (const trigger of root.querySelectorAll("[interestfor]")) {
+    const targetId = trigger.getAttribute("interestfor");
+    const target = targetId ? document.getElementById(targetId) : null;
+    if (!target || target.getAttribute("popover") !== "hint") continue;
+    const hintText = (target.textContent || "").replace(/\s+/g, " ").trim();
+    const triggerName = getAccessibleName(trigger).replace(/\s+/g, " ").trim();
+    if (hintText && hintText === triggerName) continue;
+    if (!target.hasAttribute("role")) {
+      target.setAttribute("role", "tooltip");
+    }
+    if (!triggerName) {
+      if (!trigger.hasAttribute("aria-labelledby")) {
+        trigger.setAttribute("aria-labelledby", targetId);
+      }
+      continue;
+    }
+    const activationTarget = trigger.getAttribute("popovertarget") || trigger.getAttribute("commandfor");
+    if (activationTarget === targetId) {
+      if (!trigger.hasAttribute("aria-expanded")) {
+        trigger.setAttribute("aria-expanded", String(isSettingTooltipOpen(target)));
+        managedTooltipTriggers.add(trigger);
+      }
+    } else if (!trigger.hasAttribute("aria-describedby")) {
+      trigger.setAttribute("aria-describedby", targetId);
+    }
+  }
+}
+
+function initSettingTooltips() {
+  syncTooltipAccessibility(document);
+
+  const hintProbe = document.createElement("div");
+  if (supportsPopover) {
+    hintProbe.popover = "hint";
+  }
+  const supportsHintPopover = supportsPopover && hintProbe.popover === "hint";
+
+  if (supportsPopover) {
+    document.addEventListener(
+      "beforetoggle",
+      (e) => {
+        const target = e.target;
+        if (!(target instanceof HTMLElement) || !target.classList.contains("setting-tooltip")) return;
+        if (e.newState !== "open") return;
+        hideAnyOpenSettingTooltip(target);
+        if (!supportsHintPopover) {
+          // Switch hint -> auto right before open on Safari/Firefox so Esc & light-dismiss work natively
+          target.popover = "auto";
+        }
+        const trigger = document.querySelector(`button[interestfor="${CSS.escape(target.id)}"]`);
+        if (trigger) {
+          clearActiveTipAnchor();
+          activeTipTrigger = trigger;
+          activeOpenTip = target;
+          if (supportsAnchorPositioning) {
+            trigger.style.setProperty("anchor-name", "--active-setting-tip");
+            target.style.setProperty("position-anchor", "--active-setting-tip");
+          }
+        }
+      },
+      true
+    );
+
+    document.addEventListener(
+      "toggle",
+      (e) => {
+        const target = e.target;
+        if (!(target instanceof HTMLElement) || !target.classList.contains("setting-tooltip")) return;
+        const isOpen = e.newState === "open";
+        for (const btn of document.querySelectorAll(`button[interestfor="${CSS.escape(target.id)}"]`)) {
+          if (managedTooltipTriggers.has(btn)) {
+            btn.setAttribute("aria-expanded", String(isOpen));
+          }
+        }
+        if (isOpen) {
+          positionSettingTooltipFallback(activeTipTrigger, target);
+        } else {
+          if (activeOpenTip === target) {
+            clearActiveTipAnchor();
+          }
+          lastTooltipClosedAt = performance.now();
+          suppressDialogCancelThisTick = true;
+          queueMicrotask(() => {
+            suppressDialogCancelThisTick = false;
+          });
+        }
+      },
+      true
+    );
+  }
+
+  // Esc inside Settings closes an active tooltip first instead of dismissing the entire modal
+  settingsModal?.addEventListener("cancel", (e) => {
+    if (
+      hideAnyOpenSettingTooltip() ||
+      suppressDialogCancelThisTick ||
+      performance.now() - lastTooltipClosedAt < 80
+    ) {
+      e.preventDefault();
+    }
+  });
+  settingsModal?.addEventListener("close", () => {
+    hideAnyOpenSettingTooltip();
+  });
+  settingsModal?.querySelector(".settings-body")?.addEventListener("scroll", repositionOpenSettingTooltip, {
+    passive: true,
+  });
+
+  // Hover + keyboard focus fallback when native interestfor is unavailable
+  if (!("interestForElement" in HTMLButtonElement.prototype)) {
+    const fallbackAbort = new AbortController();
+    const { signal } = fallbackAbort;
+    let hoverOpenTimer = null;
+    let hoverCloseTimer = null;
+    let pointerInsideTip = false;
+
+    const clearTimers = () => {
+      clearTimeout(hoverOpenTimer);
+      clearTimeout(hoverCloseTimer);
+    };
+
+    const scheduleClose = (tip) => {
+      clearTimeout(hoverCloseTimer);
+      hoverCloseTimer = setTimeout(() => {
+        const trigger = document.querySelector(`button[interestfor="${CSS.escape(tip.id)}"]`);
+        if (pointerInsideTip || (trigger && document.activeElement === trigger)) return;
+        hideSettingTooltip(tip);
+      }, 140);
+    };
+
+    for (const trigger of document.querySelectorAll(".help-tip-btn[interestfor]")) {
+      const tipId = trigger.getAttribute("interestfor");
+      const tip = tipId ? document.getElementById(tipId) : null;
+      if (!tip) continue;
+
+      trigger.addEventListener(
+        "pointerenter",
+        () => {
+          clearTimers();
+          hoverOpenTimer = setTimeout(() => showSettingTooltip(tip, trigger), 180);
+        },
+        { signal }
+      );
+      trigger.addEventListener(
+        "pointerleave",
+        () => {
+          clearTimeout(hoverOpenTimer);
+          scheduleClose(tip);
+        },
+        { signal }
+      );
+      trigger.addEventListener(
+        "focusin",
+        () => {
+          clearTimers();
+          showSettingTooltip(tip, trigger);
+        },
+        { signal }
+      );
+      trigger.addEventListener(
+        "focusout",
+        () => {
+          scheduleClose(tip);
+        },
+        { signal }
+      );
+      if (!supportsPopover) {
+        trigger.addEventListener(
+          "click",
+          (e) => {
+            e.preventDefault();
+            showSettingTooltip(tip, trigger);
+          },
+          { signal }
+        );
+      }
+    }
+
+    for (const tip of document.querySelectorAll(".setting-tooltip")) {
+      tip.addEventListener(
+        "pointerenter",
+        () => {
+          pointerInsideTip = true;
+          clearTimeout(hoverCloseTimer);
+        },
+        { signal }
+      );
+      tip.addEventListener(
+        "pointerleave",
+        () => {
+          pointerInsideTip = false;
+          scheduleClose(tip);
+        },
+        { signal }
+      );
+    }
+
+    if (!supportsPopover) {
+      document.addEventListener(
+        "pointerdown",
+        (e) => {
+          if (
+            activeOpenTip &&
+            !activeOpenTip.contains(e.target) &&
+            !activeTipTrigger?.contains(e.target)
+          ) {
+            hideAnyOpenSettingTooltip();
+          }
+        },
+        { signal }
+      );
+    }
+
+    import("https://unpkg.com/interestfor@latest")
+      .then(() => {
+        fallbackAbort.abort();
+      })
+      .catch(() => {
+        // Offline / Home Assistant air-gapped LAN keeps built-in hover & focus handler active
+      });
+  }
+}
+
+initSettingTooltips();
 
 function updateZonesMenuBadge() {
   if (zonesMenuBadge) {
@@ -121,6 +538,7 @@ window.addEventListener("resize", () => {
   if (isZonesMenuOpen()) {
     positionZonesDropdownFallback();
   }
+  repositionOpenSettingTooltip();
 });
 window.addEventListener(
   "scroll",
@@ -880,7 +1298,7 @@ async function refreshStats() {
     const sourceLabel = formatSourceSummary(data);
     document.getElementById("streamInfo").textContent =
       `${data.stream_status.toUpperCase()} • ${resStr} • ${data.fps} FPS${modelStr}${backendStr}${modelNoteStr}${sysStr}${sourceLabel ? ` • ${sourceLabel}` : ""}`;
-    if (settingsModal && !settingsModal.classList.contains("hidden")) {
+    if (isModalOpen(settingsModal)) {
       updateCvRuntimeHint();
     }
 
@@ -1100,12 +1518,12 @@ function renderViolationsList() {
       openSnapshotViolationId = v.id;
       document.getElementById("snapshotTitle").textContent = formatSnapshotTitle(v);
       document.getElementById("snapshotFullImg").src = violationImageUrl(v);
-      document.getElementById("snapshotModal").classList.remove("hidden");
+      openModalDialog(snapshotModal);
     });
     card.querySelector("button").addEventListener("click", async () => {
       if (openSnapshotViolationId === v.id) {
         openSnapshotViolationId = null;
-        document.getElementById("snapshotModal")?.classList.add("hidden");
+        closeModalDialog(snapshotModal);
       }
       await fetch(`api/violations/${v.id}`, { method: "DELETE" });
       refreshViolations();
@@ -1129,8 +1547,7 @@ async function refreshViolations() {
     lastViolationItems = items;
     renderViolationsList();
 
-    const modal = document.getElementById("snapshotModal");
-    if (openSnapshotViolationId !== null && modal && !modal.classList.contains("hidden")) {
+    if (openSnapshotViolationId !== null && isModalOpen(snapshotModal)) {
       const openItem = items.find((v) => v.id === openSnapshotViolationId);
       if (openItem) {
         document.getElementById("snapshotTitle").textContent = formatSnapshotTitle(openItem);
@@ -1164,10 +1581,7 @@ document.getElementById("btnResetStats").addEventListener("click", async () => {
   refreshStats();
 });
 
-// Settings modal
-const settingsModal = document.getElementById("settingsModal");
-const settingsForm = document.getElementById("settingsForm");
-
+// Settings & Snapshot dialogs
 document.getElementById("btnSettings").addEventListener("click", async () => {
   const res = await fetch("api/config");
   const cfg = await res.json();
@@ -1188,14 +1602,14 @@ document.getElementById("btnSettings").addEventListener("click", async () => {
   const haOut = document.getElementById("testHaResult");
   if (haOut) haOut.textContent = "";
   updateCvRuntimeHint();
-  settingsModal.classList.remove("hidden");
+  openModalDialog(settingsModal);
 });
 
-document.getElementById("btnCloseSettings").addEventListener("click", () => settingsModal.classList.add("hidden"));
-document.getElementById("btnCancelSettings").addEventListener("click", () => settingsModal.classList.add("hidden"));
-document.getElementById("btnCloseSnapshot").addEventListener("click", () => {
+document.getElementById("btnCloseSettings").addEventListener("click", () => closeModalDialog(settingsModal));
+document.getElementById("btnCancelSettings").addEventListener("click", () => closeModalDialog(settingsModal));
+document.getElementById("btnCloseSnapshot").addEventListener("click", () => closeModalDialog(snapshotModal));
+snapshotModal?.addEventListener("close", () => {
   openSnapshotViolationId = null;
-  document.getElementById("snapshotModal").classList.add("hidden");
 });
 
 document.getElementById("btnTestStream").addEventListener("click", async () => {
@@ -1317,7 +1731,7 @@ settingsForm.addEventListener("submit", async (e) => {
       } catch (_) {}
       throw new Error(detail);
     }
-    settingsModal.classList.add("hidden");
+    closeModalDialog(settingsModal);
     refreshStats();
   } catch (err) {
     alert(`Failed to save settings: ${err.message || err}`);
@@ -1436,7 +1850,6 @@ document.getElementById("btnToggleGrid").addEventListener("click", async () => {
   updateCalibrationUI();
 });
 
-const birdseyeModal = document.getElementById("birdseyeModal");
 const birdseyeImg = document.getElementById("birdseyeImg");
 const birdseyeCanvas = document.getElementById("birdseyeCanvas");
 const bevCtx = birdseyeCanvas.getContext("2d");
@@ -1511,12 +1924,12 @@ birdseyeCanvas.addEventListener("click", (e) => {
 document.getElementById("btnBirdseye").addEventListener("click", () => {
   closeZonesMenu({ restoreFocus: false });
   setBevDrawing(false);
+  openModalDialog(birdseyeModal);
   refreshBirdseyeImage();
-  birdseyeModal.classList.remove("hidden");
 });
-document.getElementById("btnCloseBirdseye").addEventListener("click", () => {
+document.getElementById("btnCloseBirdseye").addEventListener("click", () => closeModalDialog(birdseyeModal));
+birdseyeModal?.addEventListener("close", () => {
   setBevDrawing(false);
-  birdseyeModal.classList.add("hidden");
 });
 document.getElementById("btnBevRefresh").addEventListener("click", refreshBirdseyeImage);
 document.getElementById("btnBevDrawZone").addEventListener("click", () => setBevDrawing(true));
@@ -1558,7 +1971,7 @@ document.getElementById("btnBevSaveZone").addEventListener("click", async () => 
 
 document.getElementById("btnBevRecalibrate").addEventListener("click", () => {
   setBevDrawing(false);
-  birdseyeModal.classList.add("hidden");
+  closeModalDialog(birdseyeModal);
   setDrawingMode("calibrate");
 });
 
@@ -1567,8 +1980,27 @@ document.getElementById("btnBevClear").addEventListener("click", async () => {
   groundCalib = null;
   groundToImgMatrix = null;
   setBevDrawing(false);
-  birdseyeModal.classList.add("hidden");
+  closeModalDialog(birdseyeModal);
   updateCalibrationUI();
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (!supportsPopover && hideAnyOpenSettingTooltip()) {
+    e.preventDefault();
+    return;
+  }
+  if (
+    !e.defaultPrevented &&
+    !isModalOpen(settingsModal) &&
+    !isModalOpen(snapshotModal) &&
+    !isModalOpen(birdseyeModal) &&
+    !isZonesMenuOpen() &&
+    drawingMode
+  ) {
+    e.preventDefault();
+    setDrawingMode(null);
+  }
 });
 
 function escapeHtml(str) {

@@ -34,6 +34,16 @@ class CountingLineModel(BaseModel):
     count_b_to_a: int = 0
 
 
+class GroundCalibrationModel(BaseModel):
+    """4-point ground-plane homography calibration in normalized [0..1] image coords."""
+
+    points: list[list[float]] = Field(min_length=4, max_length=4)
+    width_ft: float = Field(default=20.0, gt=0.5, le=500.0)
+    length_ft: float = Field(default=10.0, gt=0.5, le=500.0)
+    grid_step_ft: float = Field(default=5.0, gt=0.5, le=100.0)
+    show_grid: bool = True
+
+
 class ViolationRecord(BaseModel):
     """Stored illegal red-zone parking violation."""
 
@@ -422,6 +432,24 @@ class Database:
                 """,
                 (key, value),
             )
+            self._conn.commit()
+
+    def get_ground_calibration(self) -> GroundCalibrationModel | None:
+        raw = self.get_meta("ground_calibration")
+        if not raw:
+            return None
+        try:
+            return GroundCalibrationModel(**json.loads(raw))
+        except Exception:
+            return None
+
+    def save_ground_calibration(self, calib: GroundCalibrationModel) -> GroundCalibrationModel:
+        self.set_meta("ground_calibration", calib.model_dump_json())
+        return calib
+
+    def delete_ground_calibration(self) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM meta_state WHERE key = 'ground_calibration'")
             self._conn.commit()
 
     def get_daily_summary(self, date_str: str | None = None) -> dict[str, Any]:

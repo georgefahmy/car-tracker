@@ -165,6 +165,7 @@ class StreamWorker:
         self.emergency_classifier = EmergencyVehicleClassifier()
 
         self._latest_jpeg: bytes | None = None
+        self._latest_raw_frame: np.ndarray | None = None
         self._stream_status: str = "initializing"
         self._last_error: str = ""
         self._resolution: tuple[int, int] = (0, 0)
@@ -244,6 +245,10 @@ class StreamWorker:
     def get_latest_jpeg(self) -> bytes | None:
         with self._lock:
             return self._latest_jpeg
+
+    def get_latest_raw_frame(self) -> np.ndarray | None:
+        with self._lock:
+            return None if self._latest_raw_frame is None else self._latest_raw_frame.copy()
 
     def get_live_state(self) -> dict[str, Any]:
         stats = self.db.get_stats_state()
@@ -486,6 +491,7 @@ class StreamWorker:
             ]
 
             with self._lock:
+                self._latest_raw_frame = frame
                 self._latest_overlay = (list(tracks), dict(step.track_statuses), list(zones), list(counting_lines))
                 if jpg_bytes is not None:
                     self._latest_jpeg = jpg_bytes

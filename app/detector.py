@@ -8,7 +8,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from app.database import CountingLineModel, ZoneModel
+from app.database import CountingLineModel, GroundCalibrationModel, ZoneModel
 
 VEHICLE_CLASSES: dict[int, str] = {
     2: "car",
@@ -623,3 +623,136 @@ def annotate_frame(
             cv2.circle(out, (cx, y2), dot_r, color, -1)
 
     return out
+
+
+def compute_ground_transforms(
+    calib: GroundCalibrationModel, out_w: int = 800, out_h: int = 600
+) -> dict[str, Any]:
+    """Compute 3x3 homography matrices between normalized camera coords, ground (ft), and BEV."""
+    src_norm = np.array(calib.points, dtype=np.float32)
+    w_ft = float(calib.width_ft)
+    l_ft = float(calib.length_ft)
+    dst_ft = np.array([[0.0, 0.0], [w_ft, 0.0], [w_ft, l_ft], [0.0, l_ft]], dtype=np.float32)
+
+    img_norm_to_ground = cv2.getPerspectiveTransform(src_norm, dst_ft)
+    ground_to_img_norm = cv2.getPerspectiveTransform(dst_ft, src_norm)
+
+    # Place calibrated rectangle centered in BEV canvas with room around it for street context
+    px_per_ft = min((out_w * 0.42) / max(w_ft, 1e-3), (out_h * 0.42) / max(l_ft, 1e-3))
+    ox = (out_w - w_ft * px_per_ft) * 0.5
+    oy = (out_h - l_ft * px_per_ft) * 0.5
+    bev_norm_rect = np.array(
+        [
+            [ox / out_w, oy / out_h],
+            [(ox + w_ft * px_per_ft) / out_w, oy / out_h],
+            [(ox + w_ft * px_per_ft) / out_w, (oy + l_ft * px_per_ft) / out_h],
+            [ox / out_w, (oy + l_ft * px_per_ft) / out_h],
+        ],
+        dtype=np.float32,
+    )
+    img_norm_to_bev_norm = cv2.getPerspectiveTransform(src_norm, bev_norm_rect)
+    bev_norm_to_img_norm = cv2.getPerspectiveTransform(bev_norm_rect, src_norm)
+
+    return {
+        "img_norm_to_ground": img_norm_to_ground,
+        "ground_to_img_norm": ground_to_img_norm,
+        "img_norm_to_bev_norm": img_norm_to_bev_norm,
+        "bev_norm_to_img_norm": bev_norm_to_img_norm,
+        "px_per_ft": px_per_ft,
+        "origin_px": (ox, oy),
+        "out_w": out_w,
+        "out_h": out_h,
+    }
+
+
+def project_points(pts: list[list[float]], matrix: np.ndarray) -> list[list[float]]:
+    """Project a list of [x, y] points through a 3x3 perspective matrix."""
+    if not pts:
+        return []
+    arr = np.array([pts], dtype=np.float32)
+    warped = cv2.perspectiveTransform(arr, matrix)[0]
+    return [[round(float(x), 4), round(float(y), 4)] for x, y in warped]
+
+
+def render_birdseye_jpeg(
+    frame: np.ndarray,
+    calib: GroundCalibrationModel,
+    zones: list[ZoneModel],
+    lines: list[CountingLineModel],
+    out_w: int = 800,
+    out_h: int = 600,
+) -> bytes | None:
+    """Warp the camera frame into a top-down bird's-eye view with grid, zones, and lines."""
+    h, w = frame.shape[:2]
+    tf = compute_ground_transforms(calib, out_w=out_w, out_h=out_h)
+
+    scale_in = np.diag([1.0 / max(w, 1), 1.0 / max(h, 1), 1.0])
+    scale_out = np.diag([float(out_w), float(out_h), 1.0])
+    h_px = scale_out @ tf["img_norm_to_bev_norm"] @ scale_in
+
+    bev = cv2.warpPerspective(
+        frame,
+        h_px,
+        (out_w, out_h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(15, 23, 42),
+    )
+
+    # Draw ground grid lines in feet
+    px_per_ft = tf["px_per_ft"]
+    ox, oy = tf["origin_px"]
+    step_ft = max(float(calib.grid_step_ft), 1.0)
+    step_px = step_ft * px_per_ft
+    if step_px >= 8.0:
+        x = ox % step_px
+        while x < out_w:
+            cv2.line(bev, (int(round(x)), 0), (int(round(x)), out_h), (71, 85, 105), 1)
+            x += step_px
+        y = oy % step_px
+        while y < out_h:
+            cv2.line(bev, (0, int(round(y))), (out_w, int(round(y))), (71, 85, 105), 1)
+            y += step_px
+
+    # Draw calibrated reference rectangle
+    rect_pts = np.array(
+        [
+            [int(ox), int(oy)],
+            [int(ox + calib.width_ft * px_per_ft), int(oy)],
+            [int(ox + calib.width_ft * px_per_ft), int(oy + calib.length_ft * px_per_ft)],
+            [int(ox), int(oy + calib.length_ft * px_per_ft)],
+        ],
+        dtype=np.int32,
+    )
+    cv2.polylines(bev, [rect_pts], isClosed=True, color=(34, 211, 238), thickness=2)
+
+    # Project existing zones onto top-down map
+    for z in zones:
+        if not z.enabled or len(z.points) < 3:
+            continue
+        bev_norm = project_points(z.points, tf["img_norm_to_bev_norm"])
+        pts = np.array([[int(p[0] * out_w), int(p[1] * out_h)] for p in bev_norm], dtype=np.int32)
+        bgr = (180, 163, 148) if z.zone_type == "exclusion" else _hex_to_bgr(z.color)
+        cv2.polylines(bev, [pts], isClosed=True, color=bgr, thickness=2)
+
+    # Project existing traffic lines onto top-down map
+    for ln in lines:
+        if not ln.enabled:
+            continue
+        bev_norm = project_points([ln.p1, ln.p2], tf["img_norm_to_bev_norm"])
+        p1 = (int(bev_norm[0][0] * out_w), int(bev_norm[0][1] * out_h))
+        p2 = (int(bev_norm[1][0] * out_w), int(bev_norm[1][1] * out_h))
+        cv2.line(bev, p1, p2, (248, 189, 56), 2)
+
+    cv2.putText(
+        bev,
+        f"Bird's-Eye View (Grid: {step_ft:g} ft | Ref: {calib.width_ft:g}x{calib.length_ft:g} ft)",
+        (12, 24),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (226, 232, 240),
+        1,
+        cv2.LINE_AA,
+    )
+    ok, buf = cv2.imencode(".jpg", bev, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return buf.tobytes() if ok else None

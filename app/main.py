@@ -13,7 +13,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.config import RuntimeConfig, Settings, build_rtmp_url, build_rtsp_url
-from app.database import CountingLineModel, Database, ViolationRecord, ZoneModel
+from app.database import CountingLineModel, Database, GroundCalibrationModel, ViolationRecord, ZoneModel
+from app.detector import compute_ground_transforms, project_points, render_birdseye_jpeg
 from app.stream import StreamWorker, test_stream_connection
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -39,6 +40,10 @@ class StreamTestPayload(BaseModel):
 
 class WebhookTestPayload(BaseModel):
     webhook_url: str | None = None
+
+
+class BevProjectPayload(BaseModel):
+    points: list[list[float]] = []
 
 
 def create_app(settings: Settings | None = None, start_worker: bool = True) -> FastAPI:
@@ -249,6 +254,58 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
     async def reset_heatmap() -> dict:
         worker.reset_heatmap()
         return {"ok": True}
+
+    def _calibration_response(calib: GroundCalibrationModel | None) -> dict:
+        if calib is None:
+            return {"calibration": None, "ground_to_img_norm": None, "bev_norm_to_img_norm": None}
+        tf = compute_ground_transforms(calib)
+        return {
+            "calibration": calib.model_dump(),
+            "ground_to_img_norm": tf["ground_to_img_norm"].tolist(),
+            "bev_norm_to_img_norm": tf["bev_norm_to_img_norm"].tolist(),
+        }
+
+    @app.get("/api/calibration")
+    async def get_calibration() -> dict:
+        return _calibration_response(db.get_ground_calibration())
+
+    @app.put("/api/calibration")
+    async def put_calibration(payload: GroundCalibrationModel) -> dict:
+        saved = db.save_ground_calibration(payload)
+        return _calibration_response(saved)
+
+    @app.delete("/api/calibration")
+    async def delete_calibration() -> dict:
+        db.delete_ground_calibration()
+        return {"ok": True}
+
+    @app.get("/api/calibration/birdseye.jpg")
+    async def get_birdseye_image() -> Response:
+        calib = db.get_ground_calibration()
+        if calib is None:
+            raise HTTPException(status_code=404, detail="Ground calibration not configured")
+        frame = worker.get_latest_raw_frame()
+        if frame is None:
+            raise HTTPException(status_code=503, detail="No camera frame available yet")
+        jpg = await asyncio.to_thread(
+            render_birdseye_jpeg, frame, calib, db.get_zones(), db.get_counting_lines()
+        )
+        if not jpg:
+            raise HTTPException(status_code=500, detail="Failed to render bird's-eye view")
+        return Response(
+            content=jpg,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+
+    @app.post("/api/calibration/project")
+    async def project_bev_points(payload: BevProjectPayload) -> dict:
+        calib = db.get_ground_calibration()
+        if calib is None:
+            raise HTTPException(status_code=404, detail="Ground calibration not configured")
+        tf = compute_ground_transforms(calib)
+        cam_pts = project_points(payload.points, tf["bev_norm_to_img_norm"])
+        return {"points": cam_pts}
 
     return app
 

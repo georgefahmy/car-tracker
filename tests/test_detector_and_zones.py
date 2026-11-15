@@ -336,3 +336,37 @@ def test_daily_report_summary_and_endpoint(tmp_path: Path) -> None:
         assert r.json()["ok"] is False
 
 
+def test_ground_calibration_and_birdseye(tmp_path: Path) -> None:
+    from app.database import GroundCalibrationModel
+    from app.detector import render_birdseye_jpeg
+
+    settings = Settings(data_dir=str(tmp_path / "data"))
+    app = create_app(settings=settings, start_worker=False)
+    with TestClient(app) as client:
+        assert client.get("/api/calibration").json()["calibration"] is None
+
+        calib = {
+            "points": [[0.3, 0.4], [0.6, 0.4], [0.7, 0.8], [0.2, 0.8]],
+            "width_ft": 20.0,
+            "length_ft": 10.0,
+            "grid_step_ft": 5.0,
+            "show_grid": True,
+        }
+        put_r = client.put("/api/calibration", json=calib)
+        assert put_r.status_code == 200
+        body = put_r.json()
+        assert body["calibration"]["width_ft"] == 20.0
+        assert len(body["ground_to_img_norm"]) == 3
+
+        proj_r = client.post("/api/calibration/project", json={"points": [[0.5, 0.5]]})
+        assert proj_r.status_code == 200
+        assert len(proj_r.json()["points"]) == 1
+
+        frame = np.zeros((360, 640, 3), dtype=np.uint8)
+        jpg = render_birdseye_jpeg(frame, GroundCalibrationModel(**calib), [], [])
+        assert jpg is not None and jpg[:2] == b"\xff\xd8"
+
+        assert client.delete("/api/calibration").status_code == 200
+        assert client.get("/api/calibration").json()["calibration"] is None
+
+

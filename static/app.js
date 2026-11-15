@@ -4,11 +4,13 @@ const ctx = zoneCanvas.getContext("2d");
 
 let savedZones = [];
 let savedLines = [];
-let drawingMode = null; // null | "zone" | "exclusion" | "line" | "edit"
+let drawingMode = null; // null | "zone" | "exclusion" | "line" | "edit" | "calibrate"
 let draftPoints = [];
 let editingTarget = null; // null | { kind: "zone" | "line", id: string, name: string }
 let dragVertexIndex = -1;
 let heatmapEnabled = false;
+let groundCalib = null;
+let groundToImgMatrix = null;
 
 function syncCanvasSize() {
   const rect = videoEl.getBoundingClientRect();
@@ -48,10 +50,90 @@ async function pollFrameLoop() {
   }
 }
 
+function projectGroundToCanvas(xFt, yFt, w, h) {
+  if (!groundToImgMatrix) return null;
+  const m = groundToImgMatrix;
+  const denom = m[2][0] * xFt + m[2][1] * yFt + m[2][2];
+  if (Math.abs(denom) < 1e-6 || denom <= 0) return null;
+  const nx = (m[0][0] * xFt + m[0][1] * yFt + m[0][2]) / denom;
+  const ny = (m[1][0] * xFt + m[1][1] * yFt + m[1][2]) / denom;
+  if (!Number.isFinite(nx) || !Number.isFinite(ny)) return null;
+  return [nx * w, ny * h];
+}
+
+function drawPerspectiveGroundGrid(w, h) {
+  if (!groundCalib || !groundToImgMatrix) return;
+  const wFt = groundCalib.width_ft;
+  const lFt = groundCalib.length_ft;
+  const step = Math.max(groundCalib.grid_step_ft || 5, 1);
+  const minX = -wFt * 2;
+  const maxX = wFt * 3;
+  const minY = -lFt * 2;
+  const maxY = lFt * 4;
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(34, 211, 238, 0.35)";
+  ctx.lineWidth = 1;
+  for (let x = minX; x <= maxX + 1e-3; x += step) {
+    ctx.beginPath();
+    let started = false;
+    for (let y = minY; y <= maxY + 1e-3; y += step * 0.5) {
+      const pt = projectGroundToCanvas(x, y, w, h);
+      if (!pt || pt[0] < -w || pt[0] > w * 2 || pt[1] < -h || pt[1] > h * 2) {
+        started = false;
+        continue;
+      }
+      if (!started) {
+        ctx.moveTo(pt[0], pt[1]);
+        started = true;
+      } else {
+        ctx.lineTo(pt[0], pt[1]);
+      }
+    }
+    ctx.stroke();
+  }
+  for (let y = minY; y <= maxY + 1e-3; y += step) {
+    ctx.beginPath();
+    let started = false;
+    for (let x = minX; x <= maxX + 1e-3; x += step * 0.5) {
+      const pt = projectGroundToCanvas(x, y, w, h);
+      if (!pt || pt[0] < -w || pt[0] > w * 2 || pt[1] < -h || pt[1] > h * 2) {
+        started = false;
+        continue;
+      }
+      if (!started) {
+        ctx.moveTo(pt[0], pt[1]);
+        started = true;
+      } else {
+        ctx.lineTo(pt[0], pt[1]);
+      }
+    }
+    ctx.stroke();
+  }
+
+  // Highlight calibrated reference rectangle
+  if (groundCalib.points?.length === 4) {
+    ctx.beginPath();
+    groundCalib.points.forEach(([nx, ny], idx) => {
+      if (idx === 0) ctx.moveTo(nx * w, ny * h);
+      else ctx.lineTo(nx * w, ny * h);
+    });
+    ctx.closePath();
+    ctx.strokeStyle = "rgba(34, 211, 238, 0.85)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function renderZoneCanvas() {
   const w = zoneCanvas.width;
   const h = zoneCanvas.height;
   ctx.clearRect(0, 0, w, h);
+
+  if (groundCalib && (groundCalib.show_grid || drawingMode)) {
+    drawPerspectiveGroundGrid(w, h);
+  }
 
   if (!drawingMode) return;
 
@@ -134,6 +216,8 @@ function setDrawingMode(mode, target = null) {
     hint.textContent = `Editing "${target.name}": Drag endpoint A or B to reposition, click Rename to rename, then Finish & Save.`;
   } else if (isEdit) {
     hint.textContent = `Editing "${target?.name || "Zone"}": Drag corners to move, click an edge to add a corner, right-click a corner to remove, then Finish & Save.`;
+  } else if (mode === "calibrate") {
+    hint.textContent = "Click 4 ground corners of a known rectangle (Top-Left → Top-Right → Bottom-Right → Bottom-Left) to calibrate 3D perspective.";
   } else if (mode === "line") {
     hint.textContent = "Click 2 points on the video to place a traffic counting line (start and end).";
   } else if (mode === "exclusion") {
@@ -144,6 +228,7 @@ function setDrawingMode(mode, target = null) {
   document.getElementById("btnDrawZone").classList.toggle("hidden", active);
   document.getElementById("btnDrawExclusion").classList.toggle("hidden", active);
   document.getElementById("btnDrawLine").classList.toggle("hidden", active);
+  document.getElementById("btnCalibrateGround").classList.toggle("hidden", active);
   document.getElementById("btnUndoPoint").classList.toggle("hidden", !active || isEdit);
   document.getElementById("btnRenameEdit").classList.toggle("hidden", !isEdit);
   document.getElementById("btnFinishZone").classList.toggle("hidden", mode !== "zone" && mode !== "exclusion" && !isEdit);
@@ -262,6 +347,8 @@ zoneCanvas.addEventListener("click", (e) => {
   renderZoneCanvas();
   if (drawingMode === "line" && draftPoints.length === 2) {
     finishLine();
+  } else if (drawingMode === "calibrate" && draftPoints.length === 4) {
+    finishCalibration();
   }
 });
 
@@ -274,6 +361,7 @@ zoneCanvas.addEventListener("dblclick", () => {
 document.getElementById("btnDrawZone").addEventListener("click", () => setDrawingMode("zone"));
 document.getElementById("btnDrawExclusion").addEventListener("click", () => setDrawingMode("exclusion"));
 document.getElementById("btnDrawLine").addEventListener("click", () => setDrawingMode("line"));
+document.getElementById("btnCalibrateGround").addEventListener("click", () => setDrawingMode("calibrate"));
 document.getElementById("btnCancelDraw").addEventListener("click", () => setDrawingMode(null));
 document.getElementById("btnUndoPoint").addEventListener("click", () => {
   draftPoints.pop();
@@ -796,8 +884,212 @@ function formToPayload() {
     emergency_strobe_swing: Number(fd.get("emergency_strobe_swing")),
     emergency_fire_red_ratio: Number(fd.get("emergency_fire_red_ratio")),
     webhook_url: fd.get("webhook_url") || "",
+    daily_report_enabled: Boolean(settingsForm.elements["daily_report_enabled"]?.checked),
+    daily_report_time: fd.get("daily_report_time") || "23:55",
   };
 }
+
+// --- 3D Ground Calibration & Bird's-Eye View ---
+
+function updateCalibrationUI() {
+  const toggleBtn = document.getElementById("btnToggleGrid");
+  const bevBtn = document.getElementById("btnBirdseye");
+  const hasCalib = Boolean(groundCalib);
+  toggleBtn.classList.toggle("hidden", !hasCalib);
+  bevBtn.classList.toggle("hidden", !hasCalib);
+  if (hasCalib) {
+    toggleBtn.textContent = `Grid: ${groundCalib.show_grid ? "ON" : "OFF"}`;
+  }
+  syncCanvasSize();
+}
+
+async function loadCalibration() {
+  try {
+    const res = await fetch("/api/calibration");
+    const data = await res.json();
+    groundCalib = data.calibration || null;
+    groundToImgMatrix = data.ground_to_img_norm || null;
+    updateCalibrationUI();
+  } catch (_) {}
+}
+
+async function finishCalibration() {
+  if (draftPoints.length !== 4) return;
+  const wStr = prompt("Real-world width (P1 → P2) in feet:", groundCalib?.width_ft || "20");
+  if (!wStr) {
+    setDrawingMode(null);
+    return;
+  }
+  const lStr = prompt("Real-world length/depth (P1 → P4) in feet:", groundCalib?.length_ft || "10");
+  if (!lStr) {
+    setDrawingMode(null);
+    return;
+  }
+  const payload = {
+    points: draftPoints,
+    width_ft: Math.max(1, Number(wStr) || 20),
+    length_ft: Math.max(1, Number(lStr) || 10),
+    grid_step_ft: 5.0,
+    show_grid: true,
+  };
+  const res = await fetch("/api/calibration", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  groundCalib = data.calibration;
+  groundToImgMatrix = data.ground_to_img_norm;
+  setDrawingMode(null);
+  updateCalibrationUI();
+}
+
+document.getElementById("btnToggleGrid").addEventListener("click", async () => {
+  if (!groundCalib) return;
+  const updated = { ...groundCalib, show_grid: !groundCalib.show_grid };
+  const res = await fetch("/api/calibration", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updated),
+  });
+  const data = await res.json();
+  groundCalib = data.calibration;
+  groundToImgMatrix = data.ground_to_img_norm;
+  updateCalibrationUI();
+});
+
+const birdseyeModal = document.getElementById("birdseyeModal");
+const birdseyeImg = document.getElementById("birdseyeImg");
+const birdseyeCanvas = document.getElementById("birdseyeCanvas");
+const bevCtx = birdseyeCanvas.getContext("2d");
+let bevDrawing = false;
+let bevDraftPoints = [];
+
+function renderBevCanvas() {
+  const rect = birdseyeImg.getBoundingClientRect();
+  if (rect.width > 0 && rect.height > 0) {
+    birdseyeCanvas.width = rect.width;
+    birdseyeCanvas.height = rect.height;
+  }
+  const w = birdseyeCanvas.width;
+  const h = birdseyeCanvas.height;
+  bevCtx.clearRect(0, 0, w, h);
+  if (!bevDraftPoints.length) return;
+
+  bevCtx.beginPath();
+  bevDraftPoints.forEach(([nx, ny], idx) => {
+    if (idx === 0) bevCtx.moveTo(nx * w, ny * h);
+    else bevCtx.lineTo(nx * w, ny * h);
+  });
+  if (bevDraftPoints.length >= 3) {
+    bevCtx.closePath();
+    bevCtx.fillStyle = "rgba(239, 68, 68, 0.25)";
+    bevCtx.fill();
+  }
+  bevCtx.strokeStyle = "#facc15";
+  bevCtx.lineWidth = 2.5;
+  bevCtx.stroke();
+  for (const [nx, ny] of bevDraftPoints) {
+    bevCtx.beginPath();
+    bevCtx.arc(nx * w, ny * h, 5, 0, Math.PI * 2);
+    bevCtx.fillStyle = "#ef4444";
+    bevCtx.fill();
+    bevCtx.strokeStyle = "#fff";
+    bevCtx.lineWidth = 1.5;
+    bevCtx.stroke();
+  }
+}
+
+function setBevDrawing(active) {
+  bevDrawing = active;
+  bevDraftPoints = [];
+  birdseyeCanvas.style.pointerEvents = active ? "auto" : "none";
+  birdseyeCanvas.style.cursor = active ? "crosshair" : "default";
+  document.getElementById("btnBevDrawZone").classList.toggle("hidden", active);
+  document.getElementById("btnBevSaveZone").classList.toggle("hidden", !active);
+  document.getElementById("btnBevCancelZone").classList.toggle("hidden", !active);
+  document.getElementById("bevHint").textContent = active
+    ? "Click corners on the top-down map, then click Save Map Zone."
+    : "";
+  renderBevCanvas();
+}
+
+function refreshBirdseyeImage() {
+  birdseyeImg.src = `/api/calibration/birdseye.jpg?t=${Date.now()}`;
+}
+
+birdseyeImg.addEventListener("load", renderBevCanvas);
+
+birdseyeCanvas.addEventListener("click", (e) => {
+  if (!bevDrawing) return;
+  const rect = birdseyeCanvas.getBoundingClientRect();
+  const nx = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1);
+  const ny = Math.min(Math.max((e.clientY - rect.top) / rect.height, 0), 1);
+  bevDraftPoints.push([Number(nx.toFixed(4)), Number(ny.toFixed(4))]);
+  renderBevCanvas();
+});
+
+document.getElementById("btnBirdseye").addEventListener("click", () => {
+  setBevDrawing(false);
+  refreshBirdseyeImage();
+  birdseyeModal.classList.remove("hidden");
+});
+document.getElementById("btnCloseBirdseye").addEventListener("click", () => {
+  setBevDrawing(false);
+  birdseyeModal.classList.add("hidden");
+});
+document.getElementById("btnBevRefresh").addEventListener("click", refreshBirdseyeImage);
+document.getElementById("btnBevDrawZone").addEventListener("click", () => setBevDrawing(true));
+document.getElementById("btnBevCancelZone").addEventListener("click", () => setBevDrawing(false));
+
+document.getElementById("btnBevSaveZone").addEventListener("click", async () => {
+  if (bevDraftPoints.length < 3) {
+    alert("Click at least 3 corners on the top-down map.");
+    return;
+  }
+  const name = prompt("Name this Red Zone:", `Red Zone ${savedZones.length + 1}`);
+  if (!name) return;
+  const projRes = await fetch("/api/calibration/project", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ points: bevDraftPoints }),
+  });
+  const proj = await projRes.json();
+  const clamped = (proj.points || []).map(([x, y]) => [
+    Number(Math.min(Math.max(x, 0), 1).toFixed(4)),
+    Number(Math.min(Math.max(y, 0), 1).toFixed(4)),
+  ]);
+  const updated = [
+    ...savedZones,
+    {
+      id: `zone_${Date.now()}`,
+      name: name.trim(),
+      points: clamped,
+      enabled: true,
+      color: "#ef4444",
+      zone_type: "red_zone",
+    },
+  ];
+  await saveZones(updated);
+  setBevDrawing(false);
+  refreshBirdseyeImage();
+  syncCanvasSize();
+});
+
+document.getElementById("btnBevRecalibrate").addEventListener("click", () => {
+  setBevDrawing(false);
+  birdseyeModal.classList.add("hidden");
+  setDrawingMode("calibrate");
+});
+
+document.getElementById("btnBevClear").addEventListener("click", async () => {
+  await fetch("/api/calibration", { method: "DELETE" });
+  groundCalib = null;
+  groundToImgMatrix = null;
+  setBevDrawing(false);
+  birdseyeModal.classList.add("hidden");
+  updateCalibrationUI();
+});
 
 function escapeHtml(str) {
   return String(str)
@@ -809,6 +1101,7 @@ function escapeHtml(str) {
 
 loadZones();
 loadLines();
+loadCalibration();
 refreshStats();
 refreshViolations();
 pollFrameLoop();

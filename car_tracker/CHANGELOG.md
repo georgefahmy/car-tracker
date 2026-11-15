@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.7
+- Switched `Auto` inference backend back to PyTorch CPU (OpenVINO's oneTBB runtime caused 75–100% CPU spin-waiting vs ~42% on PyTorch; OpenVINO remains selectable manually in Settings).
+- Skipped preview annotation & JPEG encoding whenever no browser viewer has polled in the last 5 seconds, and capped active preview encoding to ~12 FPS instead of 25 FPS.
+
 ## 1.0.6
 - Fixed 100% CPU spin-waiting and thread contention under OpenVINO/PyTorch by setting `OMP_WAIT_POLICY=PASSIVE`, `KMP_BLOCKTIME=0`, `OMP_NUM_THREADS=4`, `MKL_NUM_THREADS=4`, and capping OpenCV/PyTorch worker threads.
 

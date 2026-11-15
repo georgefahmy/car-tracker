@@ -248,6 +248,7 @@ class StreamWorker:
             self.hotspot.reset()
 
     def get_latest_jpeg(self) -> bytes | None:
+        self._last_viewer_ts = time.monotonic()
         with self._lock:
             return self._latest_jpeg
 
@@ -821,11 +822,14 @@ class StreamWorker:
                         and not self._stop_event.is_set()
                         and not self._reconnect_event.is_set()
                     ):
+                        if (time.monotonic() - getattr(self, "_last_viewer_ts", 0.0)) > 5.0:
+                            time.sleep(0.25)
+                            continue
                         with rtsp_lock:
                             seq = rtsp_state["seq"]
                             frm = rtsp_state["frame"]
                         if frm is None or seq == last_p_seq:
-                            time.sleep(0.01)
+                            time.sleep(0.02)
                             continue
                         last_p_seq = seq
                         with self._lock:
@@ -835,7 +839,7 @@ class StreamWorker:
                         if jpg is not None:
                             with self._lock:
                                 self._latest_jpeg = jpg
-                        time.sleep(0.04)
+                        time.sleep(0.08)
 
                 reader_thread = threading.Thread(target=_rtsp_reader, name="rtsp-reader", daemon=True)
                 reader_thread.start()

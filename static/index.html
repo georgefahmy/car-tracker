@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Car Tracker & Red-Zone Monitor</title>
-  <link rel="stylesheet" href="/static/styles.css?v=6" />
+  <link rel="stylesheet" href="/static/styles.css?v=7" />
 </head>
 <body>
   <header class="topbar">
@@ -184,9 +184,9 @@
             </label>
             <label>Inference Backend
               <select name="inference_backend">
-                <option value="auto">Auto (OpenVINO on x86_64)</option>
-                <option value="openvino">OpenVINO (Intel/x86 Optimized)</option>
-                <option value="pytorch">PyTorch (Fallback)</option>
+                <option value="auto">Auto (PyTorch CPU — Low Idle CPU)</option>
+                <option value="openvino">OpenVINO (Higher CPU Spin)</option>
+                <option value="pytorch">PyTorch</option>
               </select>
             </label>
             <label>Processing FPS (1–15)
@@ -303,6 +303,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=6"></script>
+  <script src="/static/app.js?v=7"></script>
 </body>
 </html>

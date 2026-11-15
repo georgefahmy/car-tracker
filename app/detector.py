@@ -599,14 +599,12 @@ class ObjectDetector:
             torch.set_num_threads(threads)
             cv2.setNumThreads(min(2, threads))
 
-        if self.device == "cpu" and inference_backend in ("auto", "openvino"):
-            is_x86 = platform.machine().lower() in ("x86_64", "amd64")
-            if inference_backend == "openvino" or is_x86:
-                ov_model = self._try_load_openvino(YOLO, model_name, imgsz, models_dir)
-                if ov_model is not None:
-                    self.model = ov_model
-                    self.backend = "openvino"
-                    return
+        if self.device == "cpu" and inference_backend == "openvino":
+            ov_model = self._try_load_openvino(YOLO, model_name, imgsz, models_dir)
+            if ov_model is not None:
+                self.model = ov_model
+                self.backend = "openvino"
+                return
 
         self.model = YOLO(model_name)
 

@@ -1,5 +1,5 @@
 name: Car & Red-Zone Tracker
-version: "1.0.6"
+version: "1.0.7"
 slug: car_tracker
 description: Real-time YOLO vehicle & person tracker, red-zone parking violation detector, 3D ground calibration, and two-line speed monitor.
 url: https://github.com/georgefahmy/car-tracker

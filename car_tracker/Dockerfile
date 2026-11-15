@@ -11,6 +11,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
+COPY config.yaml /tmp/addon_config.yaml
 RUN git clone --depth 1 --branch main https://github.com/georgefahmy/car-tracker.git /app \
     && uv sync --frozen --no-dev
 

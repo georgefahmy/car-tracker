@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.5
+- Fixed Docker build cache in the HA add-on `Dockerfile` (`COPY config.yaml` before `git clone`) so version bumps always pull the latest app code, OpenVINO backend, and dependencies from `main`.
+
 ## 1.0.4
 - Disabled noisy per-request HTTP access logs (`--no-access-log` in Uvicorn) so rapid `/api/stream/frame.jpg` and `/api/stats` polls no longer flood the add-on logs.
 

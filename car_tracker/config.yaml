@@ -1,5 +1,5 @@
 name: Car & Red-Zone Tracker
-version: "1.0.8"
+version: "1.0.9"
 slug: car_tracker
 description: Real-time YOLO vehicle & person tracker, red-zone parking violation detector, 3D ground calibration, and two-line speed monitor.
 url: https://github.com/georgefahmy/car-tracker
@@ -10,6 +10,10 @@ startup: application
 boot: auto
 init: false
 host_network: true
+ingress: true
+ingress_port: 8000
+panel_icon: mdi:car-speed-limiter
+panel_title: Car Tracker
 webui: "http://[HOST]:[PORT:8000]"
 ports:
   8000/tcp: 8000

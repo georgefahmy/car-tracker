@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.9
+- Enabled Home Assistant **Ingress** (`Show in sidebar`) so you can open Car Tracker directly inside the Home Assistant left sidebar menu (`Car Tracker`).
+- Converted frontend asset, snapshot, and API URLs to relative paths so both Ingress and direct port `8000` access work seamlessly.
+
 ## 1.0.8
 - Added high-res snapshot capture & Discord/webhook alerting when a vehicle exceeds the configurable Speed Limit (default `25 mph`) between two traffic lines.
 

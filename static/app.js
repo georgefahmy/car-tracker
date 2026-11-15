@@ -30,7 +30,7 @@ async function pollFrameLoop() {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 4000);
     try {
-      const res = await fetch(`/api/stream/frame.jpg?t=${Date.now()}`, {
+      const res = await fetch(`api/stream/frame.jpg?t=${Date.now()}`, {
         cache: "no-store",
         signal: controller.signal,
       });
@@ -404,7 +404,7 @@ async function finishLine() {
 }
 
 async function saveLines(lines) {
-  const res = await fetch("/api/lines", {
+  const res = await fetch("api/lines", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(lines),
@@ -414,7 +414,7 @@ async function saveLines(lines) {
 }
 
 async function loadLines() {
-  const res = await fetch("/api/lines");
+  const res = await fetch("api/lines");
   savedLines = await res.json();
   renderLinesList();
 }
@@ -529,7 +529,7 @@ async function autoDetectRedCurb() {
   btn.disabled = true;
   btn.textContent = "Scanning curb...";
   try {
-    const res = await fetch("/api/zones/auto-detect", { method: "POST" });
+    const res = await fetch("api/zones/auto-detect", { method: "POST" });
     const data = await res.json();
     if (!res.ok) {
       alert(data.detail || "Auto-detect failed.");
@@ -557,7 +557,7 @@ async function autoDetectRedCurb() {
 }
 
 async function saveZones(zones) {
-  const res = await fetch("/api/zones", {
+  const res = await fetch("api/zones", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(zones),
@@ -567,7 +567,7 @@ async function saveZones(zones) {
 }
 
 async function loadZones() {
-  const res = await fetch("/api/zones");
+  const res = await fetch("api/zones");
   savedZones = await res.json();
   renderZonesList();
 }
@@ -606,7 +606,7 @@ function renderZonesList() {
 
 async function refreshStats() {
   try {
-    const res = await fetch("/api/stats");
+    const res = await fetch("api/stats");
     const data = await res.json();
 
     document.getElementById("kpiActiveCars").textContent = data.active_cars;
@@ -767,7 +767,7 @@ trafficChartEl.addEventListener("mouseleave", () => {
 
 async function refreshViolations() {
   try {
-    const res = await fetch("/api/violations?limit=30");
+    const res = await fetch("api/violations?limit=30");
     const items = await res.json();
     const list = document.getElementById("violationsList");
     document.getElementById("violationCountLabel").textContent = `${items.length} shown`;
@@ -786,7 +786,7 @@ async function refreshViolations() {
         ? `Speed: ${v.dwell_seconds.toFixed(1)} mph`
         : `Dwell: ${v.dwell_seconds.toFixed(0)}s`;
       card.innerHTML = `
-        <img src="/snapshots/${encodeURIComponent(v.snapshot_filename)}" alt="Snapshot" />
+        <img src="snapshots/${encodeURIComponent(v.snapshot_filename)}" alt="Snapshot" />
         <div class="violation-meta">
           <div class="violation-title">${escapeHtml(v.vehicle_class.toUpperCase())} #${v.track_id} • ${escapeHtml(v.zone_name)}</div>
           <div class="muted">${detailLine}</div>
@@ -796,11 +796,11 @@ async function refreshViolations() {
       `;
       card.querySelector("img").addEventListener("click", () => {
         document.getElementById("snapshotTitle").textContent = `${v.vehicle_class.toUpperCase()} #${v.track_id} — ${v.zone_name}`;
-        document.getElementById("snapshotFullImg").src = `/snapshots/${encodeURIComponent(v.snapshot_filename)}`;
+        document.getElementById("snapshotFullImg").src = `snapshots/${encodeURIComponent(v.snapshot_filename)}`;
         document.getElementById("snapshotModal").classList.remove("hidden");
       });
       card.querySelector("button").addEventListener("click", async () => {
-        await fetch(`/api/violations/${v.id}`, { method: "DELETE" });
+        await fetch(`api/violations/${v.id}`, { method: "DELETE" });
         refreshViolations();
         refreshStats();
       });
@@ -813,19 +813,19 @@ async function refreshViolations() {
 
 // Heatmap & Reset controls
 document.getElementById("btnHeatmapToggle").addEventListener("click", async () => {
-  const res = await fetch("/api/heatmap/toggle", { method: "POST" });
+  const res = await fetch("api/heatmap/toggle", { method: "POST" });
   const data = await res.json();
   heatmapEnabled = data.heatmap_enabled;
   document.getElementById("btnHeatmapToggle").textContent = `Heatmap: ${heatmapEnabled ? "ON" : "OFF"}`;
 });
 
 document.getElementById("btnHeatmapReset").addEventListener("click", async () => {
-  await fetch("/api/heatmap/reset", { method: "POST" });
+  await fetch("api/heatmap/reset", { method: "POST" });
 });
 
 document.getElementById("btnResetStats").addEventListener("click", async () => {
   if (!confirm("Reset unique/total vehicle & people counters?")) return;
-  await fetch("/api/stats/reset", { method: "POST" });
+  await fetch("api/stats/reset", { method: "POST" });
   refreshStats();
 });
 
@@ -834,7 +834,7 @@ const settingsModal = document.getElementById("settingsModal");
 const settingsForm = document.getElementById("settingsForm");
 
 document.getElementById("btnSettings").addEventListener("click", async () => {
-  const res = await fetch("/api/config");
+  const res = await fetch("api/config");
   const cfg = await res.json();
   for (const [key, val] of Object.entries(cfg)) {
     const input = settingsForm.elements[key];
@@ -855,7 +855,7 @@ document.getElementById("btnTestStream").addEventListener("click", async () => {
   const out = document.getElementById("testStreamResult");
   out.textContent = "Testing connection...";
   const payload = formToPayload();
-  const res = await fetch("/api/stream/test", {
+  const res = await fetch("api/stream/test", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -880,7 +880,7 @@ document.getElementById("btnTestWebhook").addEventListener("click", async () => 
   }
   out.textContent = "Sending test alert...";
   out.style.color = "#8b9bb4";
-  const res = await fetch("/api/webhook/test", {
+  const res = await fetch("api/webhook/test", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ webhook_url: url }),
@@ -905,7 +905,7 @@ document.getElementById("btnSendDailyReport").addEventListener("click", async ()
   }
   out.textContent = "Sending daily report...";
   out.style.color = "#8b9bb4";
-  const res = await fetch("/api/report/daily/send", {
+  const res = await fetch("api/report/daily/send", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ webhook_url: url }),
@@ -924,7 +924,7 @@ settingsForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const payload = formToPayload();
   payload.heatmap_enabled = heatmapEnabled;
-  await fetch("/api/config", {
+  await fetch("api/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -982,7 +982,7 @@ function updateCalibrationUI() {
 
 async function loadCalibration() {
   try {
-    const res = await fetch("/api/calibration");
+    const res = await fetch("api/calibration");
     const data = await res.json();
     groundCalib = data.calibration || null;
     groundToImgMatrix = data.ground_to_img_norm || null;
@@ -1009,7 +1009,7 @@ async function finishCalibration() {
     grid_step_ft: 5.0,
     show_grid: true,
   };
-  const res = await fetch("/api/calibration", {
+  const res = await fetch("api/calibration", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -1024,7 +1024,7 @@ async function finishCalibration() {
 document.getElementById("btnToggleGrid").addEventListener("click", async () => {
   if (!groundCalib) return;
   const updated = { ...groundCalib, show_grid: !groundCalib.show_grid };
-  const res = await fetch("/api/calibration", {
+  const res = await fetch("api/calibration", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(updated),
@@ -1092,7 +1092,7 @@ function setBevDrawing(active) {
 }
 
 function refreshBirdseyeImage() {
-  birdseyeImg.src = `/api/calibration/birdseye.jpg?t=${Date.now()}`;
+  birdseyeImg.src = `api/calibration/birdseye.jpg?t=${Date.now()}`;
 }
 
 birdseyeImg.addEventListener("load", renderBevCanvas);
@@ -1126,7 +1126,7 @@ document.getElementById("btnBevSaveZone").addEventListener("click", async () => 
   }
   const name = prompt("Name this Red Zone:", `Red Zone ${savedZones.length + 1}`);
   if (!name) return;
-  const projRes = await fetch("/api/calibration/project", {
+  const projRes = await fetch("api/calibration/project", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ points: bevDraftPoints }),
@@ -1160,7 +1160,7 @@ document.getElementById("btnBevRecalibrate").addEventListener("click", () => {
 });
 
 document.getElementById("btnBevClear").addEventListener("click", async () => {
-  await fetch("/api/calibration", { method: "DELETE" });
+  await fetch("api/calibration", { method: "DELETE" });
   groundCalib = null;
   groundToImgMatrix = null;
   setBevDrawing(false);

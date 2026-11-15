@@ -173,7 +173,7 @@ class StreamWorker:
         self.hotspot = HotspotTracker()
         self.emergency_classifier = EmergencyVehicleClassifier()
         self.alpr = LicensePlateReader()
-        self.ha_publisher = HomeAssistantPublisher()
+        self.ha_publisher = HomeAssistantPublisher(db=db)
 
         self._latest_jpeg: bytes | None = None
         self._latest_raw_frame: np.ndarray | None = None

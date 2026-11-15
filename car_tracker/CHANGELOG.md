@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.14
+- **Single "Car Tracker" Home Assistant Device**: Registers a native `"Car Tracker"` device in Home Assistant's Device Registry and attaches all 8 entities (`sensor.car_tracker_vehicles_today`, `sensor.car_tracker_people_today`, `sensor.car_tracker_active_vehicles`, `sensor.car_tracker_last_speed`, `sensor.car_tracker_avg_speed`, `sensor.car_tracker_violations_total`, `sensor.car_tracker_last_plate`, and `binary_sensor.car_tracker_red_zone_occupied`) under that single device with persistent `unique_id`s, automatic cleanup of legacy standalone `/api/states` entities, batch webhook updates, and automatic re-registration if the device is ever deleted.
+
 ## 1.0.13
 - **Zones & Lines Dropdown Menu UI**: Consolidated the 7 Live Camera Feed action buttons (`+ Draw Red Zone`, `Auto-Detect Red Curb`, `+ Exclusion Mask`, `+ Draw Traffic Line`, `3D Ground Grid`, `Grid: ON/OFF`, `Bird's-Eye View`) and both `Configured Red Zones` and `Configured Traffic Flow Lines` lists into a single anchored `Zones & Lines` dropdown popover (responsive bottom sheet on mobile), keeping the active drawing buttons (`Undo Point`, `Rename`, `Finish & Save`, `Cancel`) visible inline only while drawing or editing.
 - **Static Car Tracking & Count Reliability**: Fixed YOLO+ByteTrack two-stage low-confidence tracking (`fuse_score: False`, `track_buffer: 150`, `agnostic_nms=True`) and added a post-tracker `TrackStabilizer` with spatial ID stitching, confidence-weighted vehicle class voting, adaptive bounding-box smoothing, and short dropout coasting so static parked cars stop flickering IDs/labels or inflating `Unique Vehicles`.

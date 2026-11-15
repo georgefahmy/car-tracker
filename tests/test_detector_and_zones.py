@@ -554,6 +554,7 @@ def test_database_license_plate_migration_and_csv(tmp_path: Path) -> None:
 
 
 def test_home_assistant_publisher_and_api(tmp_path: Path, monkeypatch) -> None:
+    import json as json_mod
     from unittest.mock import MagicMock, patch
 
     import requests
@@ -562,9 +563,26 @@ def test_home_assistant_publisher_and_api(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setenv("SUPERVISOR_TOKEN", "sup_secret_tok")
     posted: list[tuple[str, str, dict]] = []
+    deleted: list[tuple[str, str]] = []
+
+    def _fake_delete(url: str, headers: dict | None = None, timeout: int = 3):
+        deleted.append((url, (headers or {}).get("Authorization", "")))
+        return MagicMock(status_code=200, text="{}")
 
     def _fake_post(url: str, headers: dict | None = None, json: dict | None = None, timeout: int = 4):
-        posted.append((url, (headers or {}).get("Authorization", ""), json or {}))
+        body = json or {}
+        posted.append((url, (headers or {}).get("Authorization", ""), body))
+        if url.endswith("/mobile_app/registrations"):
+            return MagicMock(status_code=201, text=json_mod.dumps({"webhook_id": "wh_car_tracker_1"}))
+        if "/webhook/" in url:
+            if body.get("type") == "register_sensor":
+                return MagicMock(status_code=201, text='{"success": true}')
+            if body.get("type") == "update_sensor_states":
+                items = body.get("data") or []
+                return MagicMock(
+                    status_code=200,
+                    text=json_mod.dumps({item["unique_id"]: {"success": True} for item in items}),
+                )
         return MagicMock(status_code=200, text="{}")
 
     settings = Settings(data_dir=str(tmp_path / "data"), nvr_pass="pw", ha_token="custom_secret")
@@ -581,33 +599,195 @@ def test_home_assistant_publisher_and_api(tmp_path: Path, monkeypatch) -> None:
         assert put_r.status_code == 200
         assert app.state.worker.config.ha_token == "custom_secret"
 
-        with patch("requests.post", side_effect=_fake_post):
+        with (
+            patch("requests.delete", side_effect=_fake_delete),
+            patch("requests.post", side_effect=_fake_post),
+            patch.object(HomeAssistantPublisher, "_polish_entities_via_ws"),
+        ):
             ha_r = client.post("/api/ha/test", json={"ha_url": "", "ha_token": ""})
         assert ha_r.status_code == 200
         body = ha_r.json()
         assert body["ok"] is True
         assert body["mode"] == "supervisor"
         assert body["entities"] == 8
-        urls = [u for u, _, _ in posted]
-        assert any(u == "http://supervisor/core/api/states/sensor.car_tracker_vehicles_today" for u in urls)
-        assert any(u == "http://supervisor/core/api/states/sensor.car_tracker_last_plate" for u in urls)
-        assert any(u == "http://supervisor/core/api/states/binary_sensor.car_tracker_red_zone_occupied" for u in urls)
-        assert all(auth == "Bearer sup_secret_tok" for _, auth, _ in posted)
+        assert body["device_name"] == "Car Tracker"
+        assert body["device_registered"] is True
+
+        # Device registration call used device_name="Car Tracker" and supervisor token
+        reg_calls = [(u, auth, b) for u, auth, b in posted if u.endswith("/mobile_app/registrations")]
+        assert len(reg_calls) == 1
+        assert reg_calls[0][0] == "http://supervisor/core/api/mobile_app/registrations"
+        assert reg_calls[0][1] == "Bearer sup_secret_tok"
+        assert reg_calls[0][2]["device_name"] == "Car Tracker"
+
+        # Legacy loose /api/states/* entries were deleted prior to registering entities
+        del_urls = {u for u, _ in deleted}
+        assert "http://supervisor/core/api/states/sensor.car_tracker_vehicles_today" in del_urls
+        assert "http://supervisor/core/api/states/binary_sensor.car_tracker_red_zone_occupied" in del_urls
+        assert len(del_urls) == 8
+
+        # All 8 sensors were registered and then updated in a single batch webhook call
+        reg_sensor_calls = [b["data"] for u, _, b in posted if "/webhook/wh_car_tracker_1" in u and b.get("type") == "register_sensor"]
+        assert len(reg_sensor_calls) == 8
+        update_calls = [b["data"] for u, _, b in posted if "/webhook/wh_car_tracker_1" in u and b.get("type") == "update_sensor_states"]
+        assert len(update_calls) == 1
+        assert len(update_calls[0]) == 8
+
+        # Subsequent sync reuses saved registration without registering another device
+        posted.clear()
+        deleted.clear()
+        with patch("requests.post", side_effect=_fake_post):
+            ha_r2 = client.post("/api/ha/test", json={"ha_url": "", "ha_token": ""})
+        assert ha_r2.status_code == 200
+        assert ha_r2.json()["ok"] is True
+        assert not deleted
+        assert not any(u.endswith("/mobile_app/registrations") for u, _, _ in posted)
+        assert len(posted) == 1
+        assert posted[0][2]["type"] == "update_sensor_states"
 
     # Verify fallback to 172.30.32.2 when `supervisor` hostname fails DNS resolution
     pub = HomeAssistantPublisher()
     fallback_urls: list[str] = []
 
+    def _fake_fallback_delete(url: str, headers: dict | None = None, timeout: int = 3):
+        if url.startswith("http://supervisor"):
+            raise requests.ConnectionError("DNS resolution failed")
+        return MagicMock(status_code=404, text="")
+
     def _fake_fallback_post(url: str, headers: dict | None = None, json: dict | None = None, timeout: int = 4):
         fallback_urls.append(url)
         if url.startswith("http://supervisor"):
             raise requests.ConnectionError("DNS resolution failed")
+        body = json or {}
+        if url.endswith("/mobile_app/registrations"):
+            return MagicMock(status_code=201, text=json_mod.dumps({"webhook_id": "wh_fallback_1"}))
+        if "/webhook/" in url:
+            if body.get("type") == "register_sensor":
+                return MagicMock(status_code=201, text='{"success": true}')
+            if body.get("type") == "update_sensor_states":
+                items = body.get("data") or []
+                return MagicMock(
+                    status_code=200,
+                    text=json_mod.dumps({item["unique_id"]: {"success": True} for item in items}),
+                )
         return MagicMock(status_code=200, text="{}")
 
-    with patch("requests.post", side_effect=_fake_fallback_post):
+    with (
+        patch("requests.delete", side_effect=_fake_fallback_delete),
+        patch("requests.post", side_effect=_fake_fallback_post),
+        patch.object(HomeAssistantPublisher, "_polish_entities_via_ws"),
+    ):
         res = pub.publish_states({"vehicles_today": 3, "people_today": 1})
     assert res["ok"] is True
-    assert any(u.startswith("http://172.30.32.2/core/api/states/") for u in fallback_urls)
+    assert res["device_name"] == "Car Tracker"
+    assert any(u.startswith("http://172.30.32.2/core/api/") for u in fallback_urls)
+
+
+def test_home_assistant_device_persistence_reregistration_and_fallback(tmp_path: Path, monkeypatch) -> None:
+    import json as json_mod
+    from unittest.mock import MagicMock, patch
+
+    from app.database import Database
+    from app.ha_integration import HomeAssistantPublisher
+
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    monkeypatch.delenv("HASSIO_TOKEN", raising=False)
+
+    # Check sensor definition types carefully: None speeds -> None (null), binary_sensor -> bool
+    defs = HomeAssistantPublisher.build_sensor_definitions(
+        {
+            "vehicles_today": 5,
+            "last_speed_mph": None,
+            "avg_speed_mph": None,
+            "red_zone_occupied": True,
+        }
+    )
+    by_uid = {d["unique_id"]: d for d in defs}
+    assert by_uid["last_speed"]["state"] is None
+    assert by_uid["avg_speed"]["state"] is None
+    assert by_uid["red_zone_occupied"]["state"] is True
+    assert isinstance(by_uid["red_zone_occupied"]["state"], bool)
+
+    db = Database(tmp_path / "ha_meta.db")
+    try:
+        pub1 = HomeAssistantPublisher(db=db)
+        reg_counter = 0
+        webhook_deleted = False
+        calls: list[tuple[str, str, dict]] = []
+
+        def _post(url: str, headers: dict | None = None, json: dict | None = None, timeout: int = 4):
+            nonlocal reg_counter
+            body = json or {}
+            calls.append((url, (headers or {}).get("Authorization", ""), body))
+            if url.endswith("/mobile_app/registrations"):
+                reg_counter += 1
+                return MagicMock(status_code=201, text=json_mod.dumps({"webhook_id": f"wh_{reg_counter}"}))
+            if f"/webhook/wh_1" in url and webhook_deleted:
+                # HA Core intentionally returns 200 "" when a webhook/device has been deleted
+                return MagicMock(status_code=200, text="")
+            if "/webhook/" in url:
+                if body.get("type") == "register_sensor":
+                    return MagicMock(status_code=201, text='{"success": true}')
+                if body.get("type") == "update_sensor_states":
+                    items = body.get("data") or []
+                    return MagicMock(
+                        status_code=200,
+                        text=json_mod.dumps({item["unique_id"]: {"success": True} for item in items}),
+                    )
+            return MagicMock(status_code=200, text="{}")
+
+        with (
+            patch("requests.delete", return_value=MagicMock(status_code=404, text="")),
+            patch("requests.post", side_effect=_post),
+            patch.object(HomeAssistantPublisher, "_polish_entities_via_ws"),
+        ):
+            r1 = pub1.publish_states(
+                {"vehicles_today": 1}, ha_url="http://ha.local:8123", ha_token="tok_custom"
+            )
+            assert r1["ok"] is True
+            assert reg_counter == 1
+
+            # New publisher backed by the same SQLite DB reuses wh_1 across restarts
+            calls.clear()
+            pub2 = HomeAssistantPublisher(db=db)
+            r2 = pub2.publish_states(
+                {"vehicles_today": 2}, ha_url="http://ha.local:8123", ha_token="tok_custom"
+            )
+            assert r2["ok"] is True
+            assert reg_counter == 1
+            assert len(calls) == 1
+            assert calls[0][0] == "http://ha.local:8123/api/webhook/wh_1"
+
+            # Simulate user deleting Device 'Car Tracker' in HA -> webhook returns 200 empty -> auto re-registers
+            webhook_deleted = True
+            calls.clear()
+            r3 = pub2.publish_states(
+                {"vehicles_today": 3}, ha_url="http://ha.local:8123", ha_token="tok_custom"
+            )
+            assert r3["ok"] is True
+            assert reg_counter == 2
+            assert any("/webhook/wh_2" in u and b.get("type") == "update_sensor_states" for u, _, b in calls)
+
+        # Fallback to /api/states/* if custom HA Core returns 404 for /mobile_app/registrations
+        pub_fallback = HomeAssistantPublisher()
+        fallback_calls: list[str] = []
+
+        def _post_no_mobile_app(url: str, headers: dict | None = None, json: dict | None = None, timeout: int = 4):
+            fallback_calls.append(url)
+            if url.endswith("/mobile_app/registrations"):
+                return MagicMock(status_code=404, text="404: Not Found")
+            return MagicMock(status_code=200, text="{}")
+
+        with patch("requests.post", side_effect=_post_no_mobile_app):
+            r_fb = pub_fallback.publish_states(
+                {"vehicles_today": 4}, ha_url="http://ha.local:8123", ha_token="tok_custom"
+            )
+        assert r_fb["ok"] is True
+        assert r_fb["device_registered"] is False
+        assert r_fb["entities"] == 8
+        assert any("/api/states/sensor.car_tracker_vehicles_today" in u for u in fallback_calls)
+    finally:
+        db.close()
 
 
 def test_onnx_and_openvino_gpu_config_and_fallback() -> None:

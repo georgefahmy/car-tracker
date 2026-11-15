@@ -593,7 +593,11 @@ class ObjectDetector:
             self.backend = "cuda"
         else:
             self.device = "cpu"
-            torch.set_num_threads(max(1, os.cpu_count() or 4))
+            os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+            os.environ.setdefault("KMP_BLOCKTIME", "0")
+            threads = min(4, max(1, os.cpu_count() or 4))
+            torch.set_num_threads(threads)
+            cv2.setNumThreads(min(2, threads))
 
         if self.device == "cpu" and inference_backend in ("auto", "openvino"):
             is_x86 = platform.machine().lower() in ("x86_64", "amd64")

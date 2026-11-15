@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.6
+- Fixed 100% CPU spin-waiting and thread contention under OpenVINO/PyTorch by setting `OMP_WAIT_POLICY=PASSIVE`, `KMP_BLOCKTIME=0`, `OMP_NUM_THREADS=4`, `MKL_NUM_THREADS=4`, and capping OpenCV/PyTorch worker threads.
+
 ## 1.0.5
 - Fixed Docker build cache in the HA add-on `Dockerfile` (`COPY config.yaml` before `git clone`) so version bumps always pull the latest app code, OpenVINO backend, and dependencies from `main`.
 

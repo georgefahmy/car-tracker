@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Car Tracker & Red-Zone Monitor</title>
-  <link rel="stylesheet" href="static/styles.css?v=9" />
+  <link rel="stylesheet" href="static/styles.css?v=10" />
 </head>
 <body>
   <header class="topbar">
@@ -126,7 +126,7 @@
     <div class="modal">
       <div class="modal-header">
         <h2>Stream & Tracker Settings</h2>
-        <button class="btn btn-ghost" id="btnCloseSettings">&times;</button>
+        <button class="btn btn-ghost" id="btnCloseSettings" aria-label="Close">&times;</button>
       </div>
       <form id="settingsForm" class="modal-body">
         <div class="form-section">
@@ -277,7 +277,7 @@
     <div class="modal modal-wide">
       <div class="modal-header">
         <h2 id="snapshotTitle">Violation Snapshot</h2>
-        <button class="btn btn-ghost" id="btnCloseSnapshot">&times;</button>
+        <button class="btn btn-ghost" id="btnCloseSnapshot" aria-label="Close">&times;</button>
       </div>
       <div class="modal-body">
         <img id="snapshotFullImg" src="" alt="Violation Snapshot" class="snapshot-full" />
@@ -290,7 +290,7 @@
     <div class="modal modal-wide">
       <div class="modal-header">
         <h2>3D Ground Plane — Bird's-Eye View</h2>
-        <button class="btn btn-ghost" id="btnCloseBirdseye">&times;</button>
+        <button class="btn btn-ghost" id="btnCloseBirdseye" aria-label="Close">&times;</button>
       </div>
       <div class="modal-body">
         <div class="test-row" style="margin-bottom: 10px; flex-wrap: wrap;">
@@ -310,6 +310,6 @@
     </div>
   </div>
 
-  <script src="static/app.js?v=9"></script>
+  <script src="static/app.js?v=10"></script>
 </body>
 </html>

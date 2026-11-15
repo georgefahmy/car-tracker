@@ -180,11 +180,15 @@ function renderZoneCanvas() {
     ctx.lineWidth = 2.5;
     ctx.stroke();
 
+    const handleRadius =
+      drawingMode === "edit"
+        ? (window.matchMedia("(pointer: coarse)").matches ? 9 : 7)
+        : 5;
     draftPoints.forEach(([nx, ny], idx) => {
       const px = nx * w;
       const py = ny * h;
       ctx.beginPath();
-      ctx.arc(px, py, drawingMode === "edit" ? 7 : 5, 0, Math.PI * 2);
+      ctx.arc(px, py, handleRadius, 0, Math.PI * 2);
       ctx.fillStyle = isLine ? "#38bdf8" : "#ef4444";
       ctx.fill();
       ctx.strokeStyle = "#fff";
@@ -292,14 +296,15 @@ function findNearestEdgeIndex(px, py, maxDist = 14) {
 zoneCanvas.addEventListener("pointerdown", (e) => {
   if (drawingMode !== "edit" || e.button !== 0) return;
   const { nx, ny, px, py } = getNormalizedPointer(e);
-  const vIdx = findNearestVertex(px, py);
+  const isTouch = e.pointerType === "touch";
+  const vIdx = findNearestVertex(px, py, isTouch ? 28 : 15);
   if (vIdx >= 0) {
     dragVertexIndex = vIdx;
     zoneCanvas.setPointerCapture(e.pointerId);
     return;
   }
   if (editingTarget?.kind === "zone") {
-    const edgeIdx = findNearestEdgeIndex(px, py);
+    const edgeIdx = findNearestEdgeIndex(px, py, isTouch ? 24 : 14);
     if (edgeIdx >= 0) {
       draftPoints.splice(edgeIdx + 1, 0, [nx, ny]);
       dragVertexIndex = edgeIdx + 1;
@@ -745,7 +750,7 @@ function drawTrafficChart(rows) {
 }
 
 const trafficChartEl = document.getElementById("trafficChart");
-trafficChartEl.addEventListener("mousemove", (e) => {
+function updateChartHoverFromEvent(e) {
   if (!lastTrafficRows.length) return;
   const rect = trafficChartEl.getBoundingClientRect();
   const x = (e.clientX - rect.left) * (trafficChartEl.width / Math.max(rect.width, 1));
@@ -757,8 +762,10 @@ trafficChartEl.addEventListener("mousemove", (e) => {
     hoveredTrafficIdx = nextIdx;
     drawTrafficChart(lastTrafficRows);
   }
-});
-trafficChartEl.addEventListener("mouseleave", () => {
+}
+trafficChartEl.addEventListener("pointermove", updateChartHoverFromEvent);
+trafficChartEl.addEventListener("pointerdown", updateChartHoverFromEvent);
+trafficChartEl.addEventListener("pointerleave", () => {
   if (hoveredTrafficIdx !== -1) {
     hoveredTrafficIdx = -1;
     drawTrafficChart(lastTrafficRows);
@@ -1080,6 +1087,7 @@ function renderBevCanvas() {
 function setBevDrawing(active) {
   bevDrawing = active;
   bevDraftPoints = [];
+  birdseyeCanvas.classList.toggle("drawing", active);
   birdseyeCanvas.style.pointerEvents = active ? "auto" : "none";
   birdseyeCanvas.style.cursor = active ? "crosshair" : "default";
   document.getElementById("btnBevDrawZone").classList.toggle("hidden", active);

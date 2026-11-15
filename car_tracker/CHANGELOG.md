@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.11
+- Optimized the web UI for mobile phones and Home Assistant Companion / Ingress views: 2-column KPI grid, 44px coarse-pointer touch targets, safe-area inset & `dvh` bottom-sheet modals, larger touch hit radii for dragging zone corners, tap-to-inspect tooltips on Hourly Traffic, and iOS input auto-zoom prevention.
+
 ## 1.0.10
 - Automatically resets all counts (vehicles, people, hourly traffic, line crossings, and speed history) after a daily report is successfully sent to the webhook.
 

@@ -17,6 +17,7 @@ let dragVertexIndex = -1;
 let heatmapEnabled = false;
 let groundCalib = null;
 let groundToImgMatrix = null;
+let latestLiveStats = null;
 
 function updateZonesMenuBadge() {
   if (zonesMenuBadge) {
@@ -764,10 +765,36 @@ function renderZonesList() {
   restoreRowFocus(el, focusMeta, document.getElementById("btnDrawZone"));
 }
 
+function updateCvRuntimeHint() {
+  const hintEl = document.getElementById("cvRuntimeHint");
+  if (!hintEl) return;
+  if (!latestLiveStats) {
+    hintEl.textContent = "Runtime status will appear once connected.";
+    return;
+  }
+  const activeModel = latestLiveStats.yolo_model || "—";
+  const activeBackend = latestLiveStats.inference_backend
+    ? String(latestLiveStats.inference_backend).toUpperCase()
+    : "—";
+  const activeImgsz = latestLiveStats.yolo_imgsz ? ` @ ${latestLiveStats.yolo_imgsz}px` : "";
+  const parts = [`Active: ${activeModel} (${activeBackend}${activeImgsz})`];
+  if (latestLiveStats.backend_fallback) {
+    parts.push(`⚠️ ${latestLiveStats.backend_fallback}`);
+  }
+  if (latestLiveStats.model_loading && latestLiveStats.model_loading_target) {
+    parts.push(`⏳ Loading ${latestLiveStats.model_loading_target}…`);
+  }
+  if (latestLiveStats.model_error) {
+    parts.push(`❌ ${latestLiveStats.model_error}`);
+  }
+  hintEl.textContent = parts.join(" • ");
+}
+
 async function refreshStats() {
   try {
     const res = await fetch("api/stats");
     const data = await res.json();
+    latestLiveStats = data;
 
     document.getElementById("kpiActiveCars").textContent = data.active_cars;
     document.getElementById("kpiUniqueCars").textContent = data.unique_cars;
@@ -808,9 +835,23 @@ async function refreshStats() {
       verBadge.classList.remove("hidden");
     }
 
-    const backendStr = data.inference_backend ? ` • ${String(data.inference_backend).toUpperCase()}` : "";
+    const modelStr = data.yolo_model ? ` • ${data.yolo_model}` : "";
+    const backendLabel = data.inference_backend ? String(data.inference_backend).toUpperCase() : "";
+    const imgszLabel = data.yolo_imgsz ? `@${data.yolo_imgsz}` : "";
+    const backendStr = backendLabel ? ` • ${backendLabel}${imgszLabel}` : "";
+    let modelNoteStr = "";
+    if (data.model_loading && data.model_loading_target) {
+      modelNoteStr = ` • LOADING ${data.model_loading_target}`;
+    } else if (data.model_error) {
+      modelNoteStr = ` • MODEL ERR: ${data.model_error}`;
+    } else if (data.backend_fallback) {
+      modelNoteStr = ` • ${data.backend_fallback}`;
+    }
     document.getElementById("streamInfo").textContent =
-      `${data.stream_status.toUpperCase()} • ${resStr} • ${data.fps} FPS${backendStr}${sysStr} • ${data.source}`;
+      `${data.stream_status.toUpperCase()} • ${resStr} • ${data.fps} FPS${modelStr}${backendStr}${modelNoteStr}${sysStr} • ${data.source}`;
+    if (settingsModal && !settingsModal.classList.contains("hidden")) {
+      updateCvRuntimeHint();
+    }
 
     heatmapEnabled = Boolean(data.heatmap_enabled);
     document.getElementById("btnHeatmapToggle").textContent = `Heatmap: ${heatmapEnabled ? "ON" : "OFF"}`;
@@ -1115,6 +1156,7 @@ document.getElementById("btnSettings").addEventListener("click", async () => {
   document.getElementById("testWebhookResult").textContent = "";
   const haOut = document.getElementById("testHaResult");
   if (haOut) haOut.textContent = "";
+  updateCvRuntimeHint();
   settingsModal.classList.remove("hidden");
 });
 
@@ -1222,15 +1264,38 @@ document.getElementById("btnTestHa")?.addEventListener("click", async () => {
 
 settingsForm.addEventListener("submit", async (e) => {
   e.preventDefault();
-  const payload = formToPayload();
-  payload.heatmap_enabled = heatmapEnabled;
-  await fetch("api/config", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  settingsModal.classList.add("hidden");
-  refreshStats();
+  const submitBtn = settingsForm.querySelector('button[type="submit"]');
+  const prevLabel = submitBtn ? submitBtn.textContent : "";
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Applying...";
+  }
+  try {
+    const payload = formToPayload();
+    payload.heatmap_enabled = heatmapEnabled;
+    const res = await fetch("api/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try {
+        const body = await res.json();
+        if (body && body.detail) detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+      } catch (_) {}
+      throw new Error(detail);
+    }
+    settingsModal.classList.add("hidden");
+    refreshStats();
+  } catch (err) {
+    alert(`Failed to save settings: ${err.message || err}`);
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = prevLabel || "Save & Apply";
+    }
+  }
 });
 
 function formToPayload() {

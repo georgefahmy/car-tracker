@@ -1145,17 +1145,189 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
 
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
+    expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
+    assert expected_ver == "1.0.17"
     get_app_version.cache_clear()
-    assert get_app_version() == "1.0.16"
-    assert HomeAssistantPublisher.APP_VERSION == "1.0.16"
+    assert get_app_version() == expected_ver
+    assert HomeAssistantPublisher.APP_VERSION == expected_ver
 
     settings = Settings(data_dir=str(tmp_path / "data"))
     app = create_app(settings=settings, start_worker=False)
     with TestClient(app) as client:
         stats = client.get("/api/stats").json()
-        assert stats["version"] == "1.0.16"
+        assert stats["version"] == expected_ver
         index_html = client.get("/").text
         assert 'id="appVersionBadge"' in index_html
+
+
+def test_live_model_and_backend_hot_reload(tmp_path: Path, monkeypatch) -> None:
+    import types
+    import torch
+    import ultralytics
+    import app.detector as detector_mod
+    import app.stream as stream_mod
+    from app.config import RuntimeConfig
+    from app.database import Database
+    from app.detector import ObjectDetector, TrackStabilizer
+    from app.stream import StreamWorker
+
+    # 1. Verify explicit backend choice is honored even when MPS is available, and auto prefers MPS.
+    class _FakeYOLO:
+        def __init__(self, src: str, task: str | None = None) -> None:
+            self.src = src
+            self.task = task
+            self.predictor = None
+
+        def add_callback(self, *_args, **_kwargs) -> None:
+            return None
+
+    monkeypatch.setattr(ultralytics, "YOLO", _FakeYOLO)
+    monkeypatch.setattr(detector_mod, "_ensure_tracker_yaml", lambda *_a, **_kw: "bytetrack.yaml")
+    monkeypatch.setattr(detector_mod, "_resolve_model_source", lambda m, *_a: m)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
+
+    FakeOnnxModel = _FakeYOLO("cached.onnx", task="detect")
+    monkeypatch.setattr(ObjectDetector, "_try_load_onnx", staticmethod(lambda *_a, **_kw: FakeOnnxModel))
+
+    det_explicit_onnx = ObjectDetector(
+        model_name="yolo11n.pt",
+        imgsz=640,
+        inference_backend="onnx",
+        models_dir=tmp_path / "models",
+    )
+    assert det_explicit_onnx.backend == "onnx"
+    assert det_explicit_onnx.device == "cpu"
+    assert det_explicit_onnx.requested_backend == "onnx"
+    assert det_explicit_onnx.fallback_note == ""
+
+    det_auto_mps = ObjectDetector(
+        model_name="yolo11n.pt",
+        imgsz=640,
+        inference_backend="auto",
+        models_dir=tmp_path / "models",
+    )
+    assert det_auto_mps.backend == "mps"
+    assert det_auto_mps.requested_backend == "auto"
+    assert det_auto_mps.fallback_note == ""
+
+    # Fallback note when explicit ONNX is unavailable on MPS host
+    monkeypatch.setattr(ObjectDetector, "_try_load_onnx", staticmethod(lambda *_a, **_kw: None))
+    det_fallback = ObjectDetector(
+        model_name="yolo11n.pt",
+        imgsz=640,
+        inference_backend="onnx",
+        models_dir=tmp_path / "models",
+    )
+    assert det_fallback.backend == "mps"
+    assert det_fallback.requested_backend == "onnx"
+    assert "ONNX unavailable" in det_fallback.fallback_note
+
+    # Static backends must pass compiled self.imgsz to self.model.track
+    recorded_track_imgsz: list[int] = []
+    det_explicit_onnx.model = types.SimpleNamespace(
+        predictor=None,
+        track=lambda _frame, **kw: recorded_track_imgsz.append(kw["imgsz"]) or [],
+    )
+    det_explicit_onnx.detect_and_track(np.zeros((100, 100, 3), dtype=np.uint8), imgsz=1280, conf=0.35)
+    assert recorded_track_imgsz == [640]
+
+    # 2. Verify StreamWorker hot-reloading, TrackStabilizer continuity, in-place PyTorch imgsz update,
+    #    static ONNX imgsz reload, and failure recovery without killing the stream.
+    created_calls: list[tuple[str, int, str]] = []
+
+    class _StubDetector:
+        def __init__(self, model_name: str, imgsz: int, inference_backend: str, models_dir=None) -> None:
+            if model_name == "broken.pt":
+                raise RuntimeError("weights missing")
+            created_calls.append((model_name, imgsz, inference_backend))
+            self.model_name = model_name
+            self.imgsz = imgsz
+            self.requested_backend = inference_backend
+            self.backend = "pytorch" if inference_backend == "auto" else inference_backend
+            self.fallback_note = ""
+            self.stabilizer = TrackStabilizer()
+
+        def reset(self) -> None:
+            self.stabilizer.reset()
+
+    monkeypatch.setattr(stream_mod, "ObjectDetector", _StubDetector)
+
+    settings = Settings(data_dir=str(tmp_path / "worker_data"))
+    db = Database(settings.db_path)
+    worker = StreamWorker(settings=settings, db=db)
+
+    base_cfg = RuntimeConfig(yolo_model="yolov8n.pt", inference_backend="pytorch", yolo_imgsz=640)
+    worker.update_config(base_cfg)
+    det1 = worker._ensure_detector()
+    assert det1 is not None
+    assert len(created_calls) == 1
+
+    # Bind raw ByteTrack ID 1 -> canonical ID 1 on det1 and mark stream connected
+    t1 = det1.stabilizer.stabilize([_make_car(1, cx=0.5, y2=0.5)], 1000, 1000, now_ts=10.0)
+    assert [d.track_id for d in t1] == [1]
+    assert det1.stabilizer._raw_to_canonical == {1: 1}
+    worker._set_status("connected", "")
+
+    # Change model + backend -> reloads without dropping RTSP (_reconnect_event stays False)
+    worker._reconnect_event.clear()
+    cfg_onnx = base_cfg.model_copy(update={"yolo_model": "yolo11n.pt", "inference_backend": "onnx", "yolo_imgsz": 960})
+    worker.update_config(cfg_onnx)
+    assert not worker._reconnect_event.is_set()
+    assert worker._config_wake_event.is_set()
+
+    det2 = worker._ensure_detector()
+    assert det2 is not det1
+    assert len(created_calls) == 2
+    assert worker._stream_status == "connected"
+    assert det2.stabilizer is det1.stabilizer
+    assert det2.stabilizer._raw_to_canonical == {}
+
+    # New raw ByteTrack ID 99 at the same location re-attaches canonical ID 1
+    t2 = det2.stabilizer.stabilize([_make_car(99, cx=0.5, y2=0.5)], 1000, 1000, now_ts=11.0)
+    assert [d.track_id for d in t2] == [1]
+
+    state = worker.get_live_state()
+    assert state["yolo_model"] == "yolo11n.pt"
+    assert state["inference_backend"] == "onnx"
+    assert state["yolo_imgsz"] == 960
+    assert state["model_loading"] is False
+    assert state["model_error"] == ""
+
+    # Static ONNX imgsz change triggers a full reload
+    worker.update_config(cfg_onnx.model_copy(update={"yolo_imgsz": 640}))
+    det3 = worker._ensure_detector()
+    assert det3 is not det2
+    assert len(created_calls) == 3
+    assert worker.get_live_state()["yolo_imgsz"] == 640
+
+    # Dynamic PyTorch imgsz change updates in-place without reconstructing detector
+    cfg_pt = cfg_onnx.model_copy(update={"inference_backend": "pytorch", "yolo_imgsz": 640})
+    worker.update_config(cfg_pt)
+    det4 = worker._ensure_detector()
+    assert len(created_calls) == 4
+    worker.update_config(cfg_pt.model_copy(update={"yolo_imgsz": 960}))
+    det4_same = worker._ensure_detector()
+    assert det4_same is det4
+    assert len(created_calls) == 4
+    assert worker.get_live_state()["yolo_imgsz"] == 960
+
+    # Failed model swap preserves working detector, avoids tight retry loop, and recovers on valid update
+    worker.update_config(cfg_pt.model_copy(update={"yolo_model": "broken.pt"}))
+    det_after_fail = worker._ensure_detector()
+    assert det_after_fail is det4
+    assert worker._stream_status == "connected"
+    assert "broken.pt" in worker.get_live_state()["model_error"]
+
+    # Second call with same failing config skips retrying until config changes
+    assert worker._ensure_detector() is det4
+    assert len(created_calls) == 4
+
+    worker.update_config(cfg_pt.model_copy(update={"yolo_model": "yolo11s.pt"}))
+    det5 = worker._ensure_detector()
+    assert det5 is not det4
+    assert len(created_calls) == 5
+    assert worker.get_live_state()["yolo_model"] == "yolo11s.pt"
+    assert worker.get_live_state()["model_error"] == ""
 
 
 

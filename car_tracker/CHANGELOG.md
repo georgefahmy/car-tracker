@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.17
+- **Live YOLO Model, Inference Backend & Image Size Hot-Reload**: Changing `yolo_model`, `inference_backend`, or static `yolo_imgsz` (`onnx`/`openvino`/`openvino_gpu`) in Settings now reloads the `ObjectDetector` dynamically inside the live processing loop without restarting the container or dropping active RTSP / HTTP Snap connections.
+- **Explicit Backend Honors on GPU Hosts**: Fixed `ObjectDetector` initialization so explicit `onnx`, `openvino`, `openvino_gpu`, and `pytorch` selections are honored even on hosts with Apple MPS or CUDA GPUs, recorded with fallback reasons when a requested runtime is unavailable, and enforced static `imgsz` on ONNX/OpenVINO inference calls.
+- **Track & Stream Resilience + UI Runtime Visibility**: Preserved canonical `TrackStabilizer` vehicle IDs across detector swaps (`clear_raw_bindings`), kept the worker alive if initial model load fails until updated in Settings, guarded against tight reload retry loops on failed models, and surfaced active model/backend/`imgsz`/loading/fallback status in `#streamInfo` and Settings (`#cvRuntimeHint`).
+
 ## 1.0.16
 - **UI Header Version Badge**: Displays the running add-on version (e.g. `v1.0.16`) as a pill badge beside the header title in the web UI, backed by a dynamic `version` field in `GET /api/stats` and FastAPI metadata sourced from `config.yaml` (and `/tmp/addon_config.yaml` inside the Home Assistant add-on container), keeping the Web UI, API, and Home Assistant `"Car Tracker"` device software version automatically in sync.
 

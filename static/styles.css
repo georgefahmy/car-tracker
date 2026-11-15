@@ -40,6 +40,7 @@ h1, h2, h3 { text-wrap: balance; }
 .hidden { display: none !important; }
 .muted { color: var(--muted); }
 .small { font-size: 0.82rem; }
+.runtime-hint { margin: 0 0 10px; }
 
 .topbar {
   display: flex;

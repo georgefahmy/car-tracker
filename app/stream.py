@@ -170,12 +170,18 @@ class StreamWorker:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._reconnect_event = threading.Event()
+        self._config_wake_event = threading.Event()
         self._ha_wake_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._report_thread: threading.Thread | None = None
         self._ha_thread: threading.Thread | None = None
 
         self._detector: ObjectDetector | None = None
+        self._detector_key: tuple[str, int, str] | None = None
+        self._failed_detector_key: tuple[str, int, str] | None = None
+        self._model_loading: bool = False
+        self._model_loading_target: str = ""
+        self._model_error: str = ""
         self.monitor = RedZoneMonitor()
         self.line_monitor = LineCrossingMonitor()
         self.hotspot = HotspotTracker()
@@ -242,6 +248,7 @@ class StreamWorker:
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._config_wake_event.set()
         self._ha_wake_event.set()
         if self._thread:
             self._thread.join(timeout=5.0)
@@ -250,14 +257,28 @@ class StreamWorker:
         if self._ha_thread:
             self._ha_thread.join(timeout=2.0)
 
+    @staticmethod
+    def _desired_detector_key(cfg: RuntimeConfig) -> tuple[str, int, str]:
+        backend = (cfg.inference_backend or "auto").strip().lower()
+        imgsz_key = cfg.yolo_imgsz if backend in ("onnx", "openvino", "openvino_gpu") else 0
+        return (cfg.yolo_model, imgsz_key, backend)
+
     def update_config(self, new_cfg: RuntimeConfig) -> None:
         old_source = self.get_source_url(self.config)
         old_mode = self.config.stream_mode
+        desired_key = self._desired_detector_key(new_cfg)
+        worker_alive = self._thread is not None and self._thread.is_alive()
         with self._lock:
             self.config = new_cfg
             self.db.save_config(new_cfg.model_dump())
+            self._failed_detector_key = None
+            self._model_error = ""
+            if worker_alive and (self._detector is None or desired_key != self._detector_key):
+                self._model_loading = True
+                self._model_loading_target = f"{new_cfg.yolo_model} ({desired_key[2].upper()} @ {new_cfg.yolo_imgsz}px)"
         self.emergency_classifier.reset()
         self._snap_client = None
+        self._config_wake_event.set()
         self._ha_wake_event.set()
         new_source = self.get_source_url(new_cfg)
         if old_source != new_source or old_mode != new_cfg.stream_mode:
@@ -393,27 +414,108 @@ class StreamWorker:
                 "ha": ha_status,
                 "system": system_metrics,
                 "speed": self.line_monitor.get_speed_summary(),
-                "inference_backend": self._detector.backend if self._detector is not None else self.config.inference_backend,
-                "yolo_model": self.config.yolo_model,
+                "inference_backend": (
+                    getattr(self._detector, "backend", self.config.inference_backend)
+                    if self._detector is not None
+                    else self.config.inference_backend
+                ),
+                "requested_backend": (
+                    getattr(self._detector, "requested_backend", self.config.inference_backend)
+                    if self._detector is not None
+                    else self.config.inference_backend
+                ),
+                "backend_fallback": (
+                    getattr(self._detector, "fallback_note", "") if self._detector is not None else ""
+                ),
+                "yolo_model": (
+                    getattr(self._detector, "model_name", self.config.yolo_model)
+                    if self._detector is not None
+                    else self.config.yolo_model
+                ),
+                "yolo_imgsz": (
+                    getattr(self._detector, "imgsz", self.config.yolo_imgsz)
+                    if self._detector is not None
+                    else self.config.yolo_imgsz
+                ),
+                "model_loading": self._model_loading,
+                "model_loading_target": self._model_loading_target,
+                "model_error": self._model_error,
             }
 
-    def _ensure_detector(self) -> ObjectDetector:
+    def _ensure_detector(self) -> ObjectDetector | None:
         cfg = self.config
-        desired_key = (
-            cfg.yolo_model,
-            cfg.yolo_imgsz if cfg.inference_backend in ("auto", "onnx", "openvino", "openvino_gpu") else 0,
-            cfg.inference_backend,
-        )
-        if self._detector is None or getattr(self, "_detector_key", None) != desired_key:
-            self._set_status("loading_model", "")
-            self._detector = ObjectDetector(
+        desired_key = self._desired_detector_key(cfg)
+        if self._detector is not None and self._detector_key == desired_key:
+            if getattr(self._detector, "backend", "") not in ("onnx", "openvino", "openvino_gpu"):
+                self._detector.imgsz = cfg.yolo_imgsz
+            with self._lock:
+                self._model_loading = False
+                self._model_loading_target = ""
+            return self._detector
+
+        if self._failed_detector_key == desired_key:
+            with self._lock:
+                self._model_loading = False
+                self._model_loading_target = ""
+            return self._detector
+
+        prev_detector = self._detector
+        with self._lock:
+            prev_status = self._stream_status
+            prev_error = self._last_error
+            self._model_loading = True
+            self._model_loading_target = f"{cfg.yolo_model} ({desired_key[2].upper()} @ {cfg.yolo_imgsz}px)"
+            self._model_error = ""
+            if prev_status != "loading_model":
+                self._stream_status = "loading_model"
+                self._last_error = ""
+            if prev_detector is None:
+                self._latest_jpeg = self._render_placeholder(f"Loading {cfg.yolo_model}...")
+
+        try:
+            new_detector = ObjectDetector(
                 model_name=cfg.yolo_model,
                 imgsz=cfg.yolo_imgsz,
                 inference_backend=cfg.inference_backend,
                 models_dir=self.settings.data_path / "models",
             )
+        except Exception as exc:
+            with self._lock:
+                self._failed_detector_key = desired_key
+                self._model_error = f"Failed to load {cfg.yolo_model}: {exc}"
+                if self._desired_detector_key(self.config) == desired_key:
+                    self._model_loading = False
+                    self._model_loading_target = ""
+                if prev_detector is not None:
+                    self._stream_status = prev_status
+                    self._last_error = prev_error
+                else:
+                    self._stream_status = "error"
+                    self._last_error = f"Failed to load YOLO model: {exc}"
+                    self._latest_jpeg = self._render_placeholder(f"Model error: {exc}")
+            return prev_detector
+
+        if prev_detector is not None:
+            prev_detector.stabilizer.clear_raw_bindings()
+            new_detector.stabilizer = prev_detector.stabilizer
+
+        with self._lock:
+            self._detector = new_detector
             self._detector_key = desired_key
-        return self._detector
+            self._failed_detector_key = None
+            self._model_error = ""
+            if self._desired_detector_key(self.config) == desired_key:
+                self._model_loading = False
+                self._model_loading_target = ""
+            if prev_status in ("connected", "connected_http"):
+                self._stream_status = prev_status
+                self._last_error = prev_error
+            elif prev_detector is None or self._stream_status == "loading_model":
+                self._stream_status = "initializing" if prev_detector is None else prev_status
+                self._last_error = "" if prev_detector is None else prev_error
+
+        self._ha_wake_event.set()
+        return new_detector
 
     @staticmethod
     def _scale_tracks(
@@ -848,7 +950,7 @@ class StreamWorker:
             self._set_status("error", f"Inference error: {exc}")
             time.sleep(1.0)
 
-    def _run_http_snap_fallback(self, detector: ObjectDetector) -> bool:
+    def _run_http_snap_fallback(self) -> bool:
         """Poll Reolink HTTP Snap API in a background reader thread. Returns True if frames were served."""
         cfg = self.config
         client = ReolinkHTTPSnapClient(cfg.nvr_host, cfg.nvr_channel, cfg.nvr_user, cfg.nvr_pass)
@@ -899,6 +1001,10 @@ class StreamWorker:
                     time.sleep(0.01)
                     continue
                 last_seq = seq
+                detector = self._ensure_detector()
+                if detector is None:
+                    time.sleep(0.25)
+                    continue
                 t0 = time.monotonic()
                 dt = t0 - last_infer_ts if last_infer_ts > 0 else interval
                 last_infer_ts = t0
@@ -1045,18 +1151,16 @@ class StreamWorker:
         with self._lock:
             self._latest_jpeg = self._render_placeholder("Loading YOLO model...")
 
-        try:
-            detector = self._ensure_detector()
-        except Exception as exc:
-            self._set_status("error", f"Failed to load YOLO model: {exc}")
-            with self._lock:
-                self._latest_jpeg = self._render_placeholder(f"Model error: {exc}")
-            return
-
         backoff = 1.0
         while not self._stop_event.is_set():
             self._reconnect_event.clear()
+            self._config_wake_event.clear()
             cfg = self.config
+            detector = self._ensure_detector()
+            if detector is None:
+                self._config_wake_event.wait(timeout=2.0)
+                continue
+
             source = self.get_source_url(cfg)
             is_file = bool(cfg.test_video_path.strip())
 
@@ -1064,17 +1168,17 @@ class StreamWorker:
                 self._set_status("waiting_for_credentials", "Enter NVR username/password in Settings.")
                 with self._lock:
                     self._latest_jpeg = self._render_placeholder("Configure NVR credentials or Test Video in Settings")
-                self._reconnect_event.wait(timeout=2.0)
+                self._config_wake_event.wait(timeout=2.0)
                 continue
 
             if not is_file and cfg.stream_mode == "http_snap":
-                if self._run_http_snap_fallback(detector):
+                if self._run_http_snap_fallback():
                     backoff = 1.0
                     continue
                 self._set_status("reconnecting", f"HTTP Snap failed for {cfg.nvr_host}")
                 with self._lock:
                     self._latest_jpeg = self._render_placeholder(f"Reconnecting HTTP Snap to {cfg.nvr_host}...")
-                self._reconnect_event.wait(timeout=backoff)
+                self._config_wake_event.wait(timeout=backoff)
                 backoff = min(backoff * 2.0, 15.0)
                 continue
 
@@ -1085,13 +1189,13 @@ class StreamWorker:
             if not cap.isOpened():
                 cap.release()
                 # Fall back to Reolink HTTP Snap API when RTSP cannot open
-                if not is_file and cfg.stream_mode == "auto" and self._run_http_snap_fallback(detector):
+                if not is_file and cfg.stream_mode == "auto" and self._run_http_snap_fallback():
                     backoff = 1.0
                     continue
                 self._set_status("reconnecting", f"Cannot open {mask_rtsp_url(source)}")
                 with self._lock:
                     self._latest_jpeg = self._render_placeholder(f"Reconnecting to {mask_rtsp_url(source)}...")
-                self._reconnect_event.wait(timeout=backoff)
+                self._config_wake_event.wait(timeout=backoff)
                 backoff = min(backoff * 2.0, 15.0)
                 continue
 
@@ -1159,6 +1263,9 @@ class StreamWorker:
             last_seq = 0
             while not self._stop_event.is_set() and not self._reconnect_event.is_set():
                 cfg = self.config
+                detector = self._ensure_detector()
+                if detector is None:
+                    break
                 interval = 1.0 / max(cfg.target_fps, 0.5)
 
                 if is_file:
@@ -1208,4 +1315,4 @@ class StreamWorker:
             else:
                 cap.release()
             if not first_frame_seen and not is_file and cfg.stream_mode == "auto" and not self._stop_event.is_set() and not self._reconnect_event.is_set():
-                self._run_http_snap_fallback(detector)
+                self._run_http_snap_fallback()

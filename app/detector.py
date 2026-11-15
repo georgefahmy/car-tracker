@@ -817,6 +817,10 @@ class TrackStabilizer:
         self._canonical_tracks.clear()
         self._raw_to_canonical.clear()
 
+    def clear_raw_bindings(self) -> None:
+        """Drop raw ByteTrack ID bindings when swapping detectors while keeping canonical tracks."""
+        self._raw_to_canonical.clear()
+
     def stabilize(
         self,
         raw_tracks: list[TrackedDetection],
@@ -1093,12 +1097,62 @@ class ObjectDetector:
         import torch
         from ultralytics import YOLO
 
+        req_backend = (inference_backend or "auto").strip().lower()
         self.model_name = model_name
         self.imgsz = imgsz
+        self.requested_backend = req_backend
+        self.fallback_note = ""
         self.backend = "pytorch"
+        self.device = "cpu"
         self.stabilizer = TrackStabilizer()
         self._tracker_yaml = _ensure_tracker_yaml(models_dir, 0.35)
         threads = min(4, max(1, os.cpu_count() or 4))
+
+        def _configure_cpu_threads() -> None:
+            os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+            os.environ.setdefault("KMP_BLOCKTIME", "0")
+            try:
+                torch.set_num_threads(threads)
+            except RuntimeError:
+                pass
+            cv2.setNumThreads(min(2, threads))
+
+        fallback_reason: str | None = None
+        if req_backend == "onnx":
+            _configure_cpu_threads()
+            onnx_model = self._try_load_onnx(YOLO, model_name, imgsz, models_dir, threads)
+            if onnx_model is not None:
+                self.model = onnx_model
+                self.device = "cpu"
+                self.backend = "onnx"
+                return
+            fallback_reason = "ONNX unavailable"
+        elif req_backend == "openvino_gpu":
+            _configure_cpu_threads()
+            ov_gpu_model = self._try_load_openvino(YOLO, model_name, imgsz, models_dir, require_gpu=True)
+            if ov_gpu_model is not None:
+                self.model = ov_gpu_model
+                self.device = "intel:gpu"
+                self.backend = "openvino_gpu"
+                return
+            # Never silently drop from openvino_gpu onto OpenVINO CPU spin-wait; prefer ONNX CPU instead.
+            onnx_model = self._try_load_onnx(YOLO, model_name, imgsz, models_dir, threads)
+            if onnx_model is not None:
+                self.model = onnx_model
+                self.device = "cpu"
+                self.backend = "onnx"
+                self.fallback_note = "Intel GPU unavailable; fell back to ONNX"
+                return
+            fallback_reason = "OpenVINO GPU & ONNX unavailable"
+        elif req_backend == "openvino":
+            _configure_cpu_threads()
+            ov_model = self._try_load_openvino(YOLO, model_name, imgsz, models_dir, require_gpu=False)
+            if ov_model is not None:
+                self.model = ov_model
+                self.device = "cpu"
+                self.backend = "openvino"
+                return
+            fallback_reason = "OpenVINO unavailable"
 
         if torch.backends.mps.is_available():
             self.device = "mps"
@@ -1108,37 +1162,11 @@ class ObjectDetector:
             self.backend = "cuda"
         else:
             self.device = "cpu"
-            os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
-            os.environ.setdefault("KMP_BLOCKTIME", "0")
-            torch.set_num_threads(threads)
-            cv2.setNumThreads(min(2, threads))
+            self.backend = "pytorch"
+            _configure_cpu_threads()
 
-        if self.device == "cpu":
-            if inference_backend == "onnx":
-                onnx_model = self._try_load_onnx(YOLO, model_name, imgsz, models_dir, threads)
-                if onnx_model is not None:
-                    self.model = onnx_model
-                    self.backend = "onnx"
-                    return
-            elif inference_backend == "openvino_gpu":
-                ov_gpu_model = self._try_load_openvino(YOLO, model_name, imgsz, models_dir, require_gpu=True)
-                if ov_gpu_model is not None:
-                    self.model = ov_gpu_model
-                    self.device = "intel:gpu"
-                    self.backend = "openvino_gpu"
-                    return
-                # Never silently drop from openvino_gpu onto OpenVINO CPU spin-wait; prefer ONNX CPU instead.
-                onnx_model = self._try_load_onnx(YOLO, model_name, imgsz, models_dir, threads)
-                if onnx_model is not None:
-                    self.model = onnx_model
-                    self.backend = "onnx"
-                    return
-            elif inference_backend == "openvino":
-                ov_model = self._try_load_openvino(YOLO, model_name, imgsz, models_dir, require_gpu=False)
-                if ov_model is not None:
-                    self.model = ov_model
-                    self.backend = "openvino"
-                    return
+        if fallback_reason:
+            self.fallback_note = f"{fallback_reason}; fell back to {self.backend.upper()}"
 
         self.model = YOLO(_resolve_model_source(model_name, models_dir))
 
@@ -1169,14 +1197,16 @@ class ObjectDetector:
         onnx_path = cache_root / f"{Path(model_name).stem}_imgsz{imgsz}.onnx"
 
         try:
-            if not onnx_path.exists():
+            if onnx_path.exists() and onnx_path.stat().st_size == 0:
+                onnx_path.unlink(missing_ok=True)
+            if not (onnx_path.exists() and onnx_path.stat().st_size > 0):
                 pt_model = yolo_cls(_resolve_model_source(model_name, models_dir))
                 exported_path = Path(
                     str(pt_model.export(format="onnx", imgsz=imgsz, half=False, simplify=False))
                 )
                 if exported_path.exists() and exported_path.resolve() != onnx_path.resolve():
                     shutil.move(str(exported_path), str(onnx_path))
-            if onnx_path.exists():
+            if onnx_path.exists() and onnx_path.stat().st_size > 0:
                 y_model = yolo_cls(str(onnx_path), task="detect")
 
                 def _tune_ort_session(predictor: Any) -> None:
@@ -1199,6 +1229,7 @@ class ObjectDetector:
                 y_model.add_callback("on_predict_start", _tune_ort_session)
                 return y_model
         except Exception as exc:
+            onnx_path.unlink(missing_ok=True)
             print(f"[detector] ONNX export/load fallback to PyTorch: {exc}", flush=True)
         return None
 
@@ -1269,11 +1300,12 @@ class ObjectDetector:
                 tr_args.track_low_thresh = low_track
                 tr_args.new_track_thresh = new_thresh
 
+        run_imgsz = self.imgsz if self.backend in ("onnx", "openvino", "openvino_gpu") else imgsz
         results = self.model.track(
             frame,
             persist=True,
             tracker=self._tracker_yaml,
-            imgsz=imgsz,
+            imgsz=run_imgsz,
             conf=low_conf,
             iou=0.55,
             agnostic_nms=True,

@@ -576,7 +576,7 @@ class LineCrossingMonitor:
 
 
 class ObjectDetector:
-    """Ultralytics YOLO + built-in ByteTrack wrapper with optional OpenVINO acceleration."""
+    """Ultralytics YOLO + built-in ByteTrack wrapper with ONNX Runtime & OpenVINO acceleration."""
 
     def __init__(
         self,
@@ -591,6 +591,7 @@ class ObjectDetector:
         self.model_name = model_name
         self.imgsz = imgsz
         self.backend = "pytorch"
+        threads = min(4, max(1, os.cpu_count() or 4))
 
         if torch.backends.mps.is_available():
             self.device = "mps"
@@ -602,18 +603,89 @@ class ObjectDetector:
             self.device = "cpu"
             os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
             os.environ.setdefault("KMP_BLOCKTIME", "0")
-            threads = min(4, max(1, os.cpu_count() or 4))
             torch.set_num_threads(threads)
             cv2.setNumThreads(min(2, threads))
 
-        if self.device == "cpu" and inference_backend == "openvino":
-            ov_model = self._try_load_openvino(YOLO, model_name, imgsz, models_dir)
-            if ov_model is not None:
-                self.model = ov_model
-                self.backend = "openvino"
-                return
+        if self.device == "cpu":
+            if inference_backend == "onnx":
+                onnx_model = self._try_load_onnx(YOLO, model_name, imgsz, models_dir, threads)
+                if onnx_model is not None:
+                    self.model = onnx_model
+                    self.backend = "onnx"
+                    return
+            elif inference_backend == "openvino_gpu":
+                ov_gpu_model = self._try_load_openvino(YOLO, model_name, imgsz, models_dir, require_gpu=True)
+                if ov_gpu_model is not None:
+                    self.model = ov_gpu_model
+                    self.device = "intel:gpu"
+                    self.backend = "openvino_gpu"
+                    return
+                # Never silently drop from openvino_gpu onto OpenVINO CPU spin-wait; prefer ONNX CPU instead.
+                onnx_model = self._try_load_onnx(YOLO, model_name, imgsz, models_dir, threads)
+                if onnx_model is not None:
+                    self.model = onnx_model
+                    self.backend = "onnx"
+                    return
+            elif inference_backend == "openvino":
+                ov_model = self._try_load_openvino(YOLO, model_name, imgsz, models_dir, require_gpu=False)
+                if ov_model is not None:
+                    self.model = ov_model
+                    self.backend = "openvino"
+                    return
 
         self.model = YOLO(model_name)
+
+    @staticmethod
+    def _try_load_onnx(
+        yolo_cls: Any,
+        model_name: str,
+        imgsz: int,
+        models_dir: Path | None,
+        threads: int = 4,
+    ) -> Any | None:
+        try:
+            import onnx  # noqa: F401
+            import onnxruntime as ort
+        except ImportError:
+            return None
+
+        cache_root = Path(models_dir) if models_dir is not None else Path("data/models")
+        cache_root.mkdir(parents=True, exist_ok=True)
+        onnx_path = cache_root / f"{Path(model_name).stem}_imgsz{imgsz}.onnx"
+
+        try:
+            if not onnx_path.exists():
+                pt_model = yolo_cls(model_name)
+                exported_path = Path(
+                    str(pt_model.export(format="onnx", imgsz=imgsz, half=False, simplify=False))
+                )
+                if exported_path.exists() and exported_path.resolve() != onnx_path.resolve():
+                    shutil.move(str(exported_path), str(onnx_path))
+            if onnx_path.exists():
+                y_model = yolo_cls(str(onnx_path), task="detect")
+
+                def _tune_ort_session(predictor: Any) -> None:
+                    if getattr(predictor, "_ort_tuned", False):
+                        return
+                    backend = getattr(predictor.model, "backend", None)
+                    if backend is not None and hasattr(backend, "session"):
+                        opts = ort.SessionOptions()
+                        opts.intra_op_num_threads = threads
+                        opts.inter_op_num_threads = 1
+                        opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+                        opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
+                        backend.session = ort.InferenceSession(
+                            str(onnx_path),
+                            sess_options=opts,
+                            providers=["CPUExecutionProvider"],
+                        )
+                        predictor._ort_tuned = True
+
+                y_model.add_callback("on_predict_start", _tune_ort_session)
+                return y_model
+        except Exception as exc:
+            print(f"[detector] ONNX export/load fallback to PyTorch: {exc}", flush=True)
+        return None
 
     @staticmethod
     def _try_load_openvino(
@@ -621,11 +693,26 @@ class ObjectDetector:
         model_name: str,
         imgsz: int,
         models_dir: Path | None,
+        require_gpu: bool = False,
     ) -> Any | None:
         try:
-            import openvino  # noqa: F401
+            import openvino as ov
         except ImportError:
             return None
+
+        if require_gpu:
+            try:
+                core = ov.Core()
+                devices = list(core.available_devices)
+                if not any(d == "GPU" or d.startswith("GPU.") for d in devices):
+                    print(
+                        f"[detector] Intel iGPU not detected in OpenVINO devices ({devices}); falling back from openvino_gpu",
+                        flush=True,
+                    )
+                    return None
+            except Exception as exc:
+                print(f"[detector] OpenVINO device probe failed: {exc}", flush=True)
+                return None
 
         cache_root = Path(models_dir) if models_dir is not None else Path("data/models")
         cache_root.mkdir(parents=True, exist_ok=True)
@@ -642,7 +729,7 @@ class ObjectDetector:
             if ov_dir.exists() and any(ov_dir.glob("*.xml")):
                 return yolo_cls(str(ov_dir), task="detect")
         except Exception as exc:
-            print(f"[detector] OpenVINO export/load fallback to PyTorch: {exc}", flush=True)
+            print(f"[detector] OpenVINO export/load fallback: {exc}", flush=True)
         return None
 
     def detect_and_track(
@@ -770,6 +857,8 @@ def annotate_frame(
             label = f"#{det.track_id} {det.class_name}"
         if det.is_vehicle and st.get("speed_mph") is not None:
             label = f"{label} | {st['speed_mph']:.0f} mph"
+        if det.is_vehicle and st.get("license_plate"):
+            label = f"{label} [{st['license_plate']}]"
 
         cv2.rectangle(out, (x1, y1), (x2, y2), color, box_thick)
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_thick)

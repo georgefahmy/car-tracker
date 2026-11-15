@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
@@ -45,6 +46,11 @@ class StreamTestPayload(BaseModel):
 
 class WebhookTestPayload(BaseModel):
     webhook_url: str | None = None
+
+
+class HaTestPayload(BaseModel):
+    ha_url: str | None = None
+    ha_token: str | None = None
 
 
 class BevProjectPayload(BaseModel):
@@ -148,9 +154,9 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
         rows = db.get_violations(limit=5000, offset=0)
         buf = io.StringIO()
         writer = csv.writer(buf)
-        writer.writerow(["id", "flagged_at", "started_at", "dwell_seconds", "zone_name", "vehicle_class", "track_id", "snapshot_filename"])
+        writer.writerow(["id", "flagged_at", "started_at", "dwell_seconds", "zone_name", "vehicle_class", "license_plate", "track_id", "snapshot_filename"])
         for r in rows:
-            writer.writerow([r.id, r.flagged_at, r.started_at, r.dwell_seconds, r.zone_name, r.vehicle_class, r.track_id, r.snapshot_filename])
+            writer.writerow([r.id, r.flagged_at, r.started_at, r.dwell_seconds, r.zone_name, r.vehicle_class, r.license_plate, r.track_id, r.snapshot_filename])
         return Response(
             content=buf.getvalue(),
             media_type="text/csv",
@@ -167,24 +173,40 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
             snap.unlink()
         return {"ok": True}
 
-    @app.get("/api/config")
-    async def get_config() -> dict:
-        data = worker.config.model_dump()
+    def _public_config_dict(cfg: RuntimeConfig) -> dict:
+        data = cfg.model_dump()
         has_pass = bool(data.get("nvr_pass"))
+        has_ha_token = bool(data.get("ha_token"))
         data["nvr_pass"] = "***" if has_pass else ""
         data["has_password"] = has_pass
+        data["ha_token"] = "***" if has_ha_token else ""
+        data["has_ha_token"] = has_ha_token
+        data["ha_supervisor_detected"] = bool(
+            os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN")
+        )
         return data
+
+    @app.get("/api/config")
+    async def get_config() -> dict:
+        return _public_config_dict(worker.config)
 
     @app.put("/api/config")
     async def put_config(payload: ConfigUpdatePayload) -> dict:
         if payload.nvr_pass == "***":
             payload.nvr_pass = worker.config.nvr_pass
+        if payload.ha_token == "***":
+            payload.ha_token = worker.config.ha_token
         worker.update_config(RuntimeConfig(**payload.model_dump()))
-        data = worker.config.model_dump()
-        has_pass = bool(data.get("nvr_pass"))
-        data["nvr_pass"] = "***" if has_pass else ""
-        data["has_password"] = has_pass
-        return data
+        return _public_config_dict(worker.config)
+
+    @app.post("/api/ha/test")
+    async def test_ha_integration(payload: HaTestPayload | None = None) -> dict:
+        cur = worker.config
+        url = cur.ha_url if (payload is None or payload.ha_url is None) else payload.ha_url
+        token = cur.ha_token if (payload is None or payload.ha_token is None) else payload.ha_token
+        if token == "***":
+            token = cur.ha_token
+        return await asyncio.to_thread(worker.sync_ha_now, url, token)
 
     @app.post("/api/stream/test")
     async def test_stream(payload: StreamTestPayload) -> dict:

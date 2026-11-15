@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.12
+- **Native Home Assistant Entities & Events (#1)**: Automatically publishes `sensor.car_tracker_vehicles_today`, `sensor.car_tracker_people_today`, `sensor.car_tracker_active_vehicles`, `sensor.car_tracker_last_speed`, `sensor.car_tracker_avg_speed`, `sensor.car_tracker_violations_total`, `sensor.car_tracker_last_plate`, and `binary_sensor.car_tracker_red_zone_occupied` via Supervisor Core API (`homeassistant_api: true`), plus fires `car_tracker_violation` and `car_tracker_speeding` automation events.
+- **On-Demand License Plate Recognition (#2)**: Uses local ONNX OCR (`rapidocr-onnxruntime`) only when a Red-Zone violation or Speeding snapshot is captured (`0%` live-stream CPU overhead), storing plates in SQLite, showing plate badges & filtering in Violations, exporting in CSV, appending to Discord/webhook alerts, and updating `sensor.car_tracker_last_plate`.
+- **ONNX Runtime + Intel iGPU Acceleration (#5)**: Adds `onnx` (ONNX Runtime CPU with `allow_spinning="0"` and capped intra-op threads) and `openvino_gpu` (`intel:gpu` offloading via `/dev/dri` and `video: true`), falling back cleanly if no iGPU is exposed.
+
 ## 1.0.11
 - Optimized the web UI for mobile phones and Home Assistant Companion / Ingress views: 2-column KPI grid, 44px coarse-pointer touch targets, safe-area inset & `dvh` bottom-sheet modals, larger touch hit radii for dragging zone corners, tap-to-inspect tooltips on Hourly Traffic, and iOS input auto-zoom prevention.
 

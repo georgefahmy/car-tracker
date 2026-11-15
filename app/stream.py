@@ -15,6 +15,7 @@ try:
 except ImportError:  # pragma: no cover
     psutil = None
 
+from app.alpr import LicensePlateReader
 from app.config import RuntimeConfig, Settings, build_rtmp_url, build_rtsp_url, mask_rtsp_url
 from app.database import Database
 from app.detector import (
@@ -27,6 +28,7 @@ from app.detector import (
     annotate_frame,
     filter_excluded_tracks,
 )
+from app.ha_integration import HomeAssistantPublisher
 
 # Force RTSP over TCP to prevent H.264/H.265 packet-loss smearing over WiFi
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
@@ -160,14 +162,18 @@ class StreamWorker:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._reconnect_event = threading.Event()
+        self._ha_wake_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._report_thread: threading.Thread | None = None
+        self._ha_thread: threading.Thread | None = None
 
         self._detector: ObjectDetector | None = None
         self.monitor = RedZoneMonitor()
         self.line_monitor = LineCrossingMonitor()
         self.hotspot = HotspotTracker()
         self.emergency_classifier = EmergencyVehicleClassifier()
+        self.alpr = LicensePlateReader()
+        self.ha_publisher = HomeAssistantPublisher()
 
         self._latest_jpeg: bytes | None = None
         self._latest_raw_frame: np.ndarray | None = None
@@ -179,10 +185,13 @@ class StreamWorker:
         self._active_people: int = 0
         self._active_dwells: list[dict[str, Any]] = []
         self._last_violation: dict[str, Any] | None = None
+        self._last_plate: dict[str, Any] = {"plate": "", "confidence": 0.0, "updated_at": ""}
+        self._prev_red_zone_occupied: bool = False
         self._latest_overlay: tuple[
             list[TrackedDetection], dict[int, dict[str, Any]], list[Any], list[Any]
         ] = ([], {}, [], [])
         self._last_preview_ts: float = 0.0
+        self._last_viewer_ts: float = 0.0
         self._snap_client: ReolinkHTTPSnapClient | None = None
 
     def get_source_url(self, cfg: RuntimeConfig | None = None) -> str:
@@ -210,29 +219,38 @@ class StreamWorker:
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
+        self._ha_wake_event.clear()
         self._thread = threading.Thread(target=self._run_loop, name="stream-worker", daemon=True)
         self._thread.start()
         self._report_thread = threading.Thread(
             target=self._daily_report_loop, name="daily-report", daemon=True
         )
         self._report_thread.start()
+        self._ha_thread = threading.Thread(
+            target=self._ha_sync_loop, name="ha-sync", daemon=True
+        )
+        self._ha_thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._ha_wake_event.set()
         if self._thread:
             self._thread.join(timeout=5.0)
         if self._report_thread:
             self._report_thread.join(timeout=2.0)
+        if self._ha_thread:
+            self._ha_thread.join(timeout=2.0)
 
     def update_config(self, new_cfg: RuntimeConfig) -> None:
         old_source = self.get_source_url(self.config)
         old_mode = self.config.stream_mode
-        new_source = self.get_source_url(new_cfg)
         with self._lock:
             self.config = new_cfg
             self.db.save_config(new_cfg.model_dump())
         self.emergency_classifier.reset()
         self._snap_client = None
+        self._ha_wake_event.set()
+        new_source = self.get_source_url(new_cfg)
         if old_source != new_source or old_mode != new_cfg.stream_mode:
             self._reconnect_event.set()
 
@@ -287,9 +305,60 @@ class StreamWorker:
             "cpu_temp_c": cpu_temp_c,
         }
 
+    def build_ha_payload(self) -> dict[str, Any]:
+        stats = self.db.get_stats_state()
+        speed = self.line_monitor.get_speed_summary()
+        violations_total = self.db.count_violations()
+        with self._lock:
+            dwells = list(self._active_dwells)
+            last_plate = dict(self._last_plate)
+            last_violation = self._last_violation
+            active_cars = self._active_cars
+            active_people = self._active_people
+        return {
+            "vehicles_today": stats["total_cars"],
+            "people_today": stats["total_people"],
+            "unique_cars": stats["unique_cars"],
+            "unique_people": stats["unique_people"],
+            "active_cars": active_cars,
+            "active_people": active_people,
+            "last_speed_mph": speed.get("last_speed_mph"),
+            "avg_speed_mph": speed.get("avg_speed_mph"),
+            "max_speed_mph": speed.get("max_speed_mph"),
+            "samples_count": speed.get("samples_count", 0),
+            "violations_total": violations_total,
+            "last_violation": last_violation,
+            "last_plate": last_plate.get("plate", ""),
+            "last_plate_confidence": last_plate.get("confidence", 0.0),
+            "last_plate_updated_at": last_plate.get("updated_at", ""),
+            "red_zone_occupied": len(dwells) > 0,
+            "dwelling_vehicles": len(dwells),
+            "max_dwell_seconds": max((float(d.get("dwell_seconds", 0.0)) for d in dwells), default=0.0),
+        }
+
+    def sync_ha_now(
+        self, ha_url: str | None = None, ha_token: str | None = None
+    ) -> dict[str, Any]:
+        cfg = self.config
+        url = cfg.ha_url if ha_url is None else ha_url
+        token = cfg.ha_token if ha_token is None else ha_token
+        return self.ha_publisher.publish_states(self.build_ha_payload(), ha_url=url, ha_token=token)
+
+    def _ha_sync_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                cfg = self.config
+                if cfg.ha_enabled and self.ha_publisher.resolve_target(cfg.ha_url, cfg.ha_token) is not None:
+                    self.sync_ha_now(cfg.ha_url, cfg.ha_token)
+            except Exception:
+                pass
+            self._ha_wake_event.wait(timeout=10.0)
+            self._ha_wake_event.clear()
+
     def get_live_state(self) -> dict[str, Any]:
         stats = self.db.get_stats_state()
         system_metrics = self._get_system_metrics()
+        ha_status = self.ha_publisher.get_status()
         with self._lock:
             return {
                 "stream_status": self._stream_status,
@@ -308,6 +377,8 @@ class StreamWorker:
                 "active_dwells": list(self._active_dwells),
                 "heatmap_enabled": self.config.heatmap_enabled,
                 "last_violation": self._last_violation,
+                "last_plate": dict(self._last_plate),
+                "ha": ha_status,
                 "system": system_metrics,
                 "speed": self.line_monitor.get_speed_summary(),
                 "inference_backend": self._detector.backend if self._detector is not None else self.config.inference_backend,
@@ -318,7 +389,7 @@ class StreamWorker:
         cfg = self.config
         desired_key = (
             cfg.yolo_model,
-            cfg.yolo_imgsz if cfg.inference_backend in ("auto", "openvino") else 0,
+            cfg.yolo_imgsz if cfg.inference_backend in ("auto", "onnx", "openvino", "openvino_gpu") else 0,
             cfg.inference_backend,
         )
         if self._detector is None or getattr(self, "_detector_key", None) != desired_key:
@@ -508,6 +579,25 @@ class StreamWorker:
                 snap_base = self._get_highres_violation_frame(frame, cfg)
                 sh, sw = snap_base.shape[:2]
                 snap_tracks = self._scale_tracks(tracks, w, h, sw, sh)
+                track_bbox_map = {t.track_id: t.bbox_xyxy for t in snap_tracks}
+                plates_by_tid: dict[int, tuple[str, float]] = {}
+
+                if cfg.alpr_enabled:
+                    event_tids = {v.track_id for v in step.new_violations} | {
+                        int(sp["track_id"]) for sp in speeding_events
+                    }
+                    for tid in event_tids:
+                        plate, plate_conf = self.alpr.read_plate(snap_base, track_bbox_map.get(tid))
+                        if plate:
+                            plates_by_tid[tid] = (plate, plate_conf)
+                            step.track_statuses.setdefault(tid, {})["license_plate"] = plate
+                            with self._lock:
+                                self._last_plate = {
+                                    "plate": plate,
+                                    "confidence": plate_conf,
+                                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                                }
+
                 annotated_full = annotate_frame(
                     frame=snap_base,
                     tracks=snap_tracks,
@@ -524,6 +614,7 @@ class StreamWorker:
                     fname = f"violation_{ts_slug}_t{v.track_id}.jpg"
                     snap_path = self.snapshots_dir / fname
                     cv2.imwrite(str(snap_path), annotated_full, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    plate_text = plates_by_tid.get(v.track_id, ("", 0.0))[0]
                     rec = self.db.add_violation(
                         track_id=v.track_id,
                         zone_id=v.zone_id,
@@ -533,11 +624,18 @@ class StreamWorker:
                         flagged_at=v.flagged_at,
                         dwell_seconds=v.dwell_seconds,
                         snapshot_filename=fname,
+                        license_plate=plate_text,
                     )
                     with self._lock:
                         self._last_violation = rec.model_dump()
                     if cfg.webhook_url.strip():
                         self._dispatch_webhook(cfg.webhook_url.strip(), rec.model_dump(), snap_path)
+                    if cfg.ha_enabled:
+                        threading.Thread(
+                            target=self.ha_publisher.fire_event,
+                            args=("car_tracker_violation", rec.model_dump(), cfg.ha_url, cfg.ha_token),
+                            daemon=True,
+                        ).start()
 
                 for sp in speeding_events:
                     now_iso = datetime.now(timezone.utc).isoformat()
@@ -545,6 +643,7 @@ class StreamWorker:
                     fname = f"speeding_{ts_slug}_t{sp['track_id']}.jpg"
                     snap_path = self.snapshots_dir / fname
                     cv2.imwrite(str(snap_path), annotated_full, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    plate_text = plates_by_tid.get(int(sp["track_id"]), ("", 0.0))[0]
                     rec = self.db.add_violation(
                         track_id=sp["track_id"],
                         zone_id="speeding",
@@ -554,11 +653,21 @@ class StreamWorker:
                         flagged_at=now_iso,
                         dwell_seconds=float(sp["speed_mph"]),
                         snapshot_filename=fname,
+                        license_plate=plate_text,
                     )
                     with self._lock:
                         self._last_violation = rec.model_dump()
                     if cfg.webhook_url.strip():
                         self._dispatch_webhook(cfg.webhook_url.strip(), rec.model_dump(), snap_path)
+                    if cfg.ha_enabled:
+                        event_payload = {**rec.model_dump(), "speed_mph": float(sp["speed_mph"])}
+                        threading.Thread(
+                            target=self.ha_publisher.fire_event,
+                            args=("car_tracker_speeding", event_payload, cfg.ha_url, cfg.ha_token),
+                            daemon=True,
+                        ).start()
+
+                self._ha_wake_event.set()
 
             jpg_bytes = (
                 self._render_preview_jpeg(
@@ -590,6 +699,11 @@ class StreamWorker:
                 self._active_cars = step.active_cars
                 self._active_people = step.active_people
                 self._active_dwells = dwells
+
+            red_zone_occupied = len(dwells) > 0
+            if red_zone_occupied != self._prev_red_zone_occupied:
+                self._prev_red_zone_occupied = red_zone_occupied
+                self._ha_wake_event.set()
         except Exception as exc:
             self._set_status("error", f"Inference error: {exc}")
             time.sleep(1.0)
@@ -674,6 +788,8 @@ class StreamWorker:
                         f"🚨 Red-Zone Violation: {record['vehicle_class'].upper()} #{record['track_id']} "
                         f"in {record['zone_name']} (dwell: {record['dwell_seconds']:.0f}s)"
                     )
+                if record.get("license_plate"):
+                    msg = f"{msg} • 🪪 Plate: **{record['license_plate']}**"
                 if "discord.com/api/webhooks" in url:
                     with open(snap_path, "rb") as f:
                         requests.post(
@@ -721,6 +837,7 @@ class StreamWorker:
         self.db.reset_line_counts()
         self.monitor.reset()
         self.line_monitor.reset()
+        self._ha_wake_event.set()
 
     def send_daily_report(
         self,

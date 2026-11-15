@@ -1,7 +1,7 @@
 name: Car & Red-Zone Tracker
-version: "1.0.11"
+version: "1.0.12"
 slug: car_tracker
-description: Real-time YOLO vehicle & person tracker, red-zone parking violation detector, 3D ground calibration, and two-line speed monitor.
+description: Real-time YOLO vehicle & person tracker, red-zone parking & speeding detector with on-demand ALPR, native Home Assistant entities, and ONNX/iGPU acceleration.
 url: https://github.com/georgefahmy/car-tracker
 arch:
   - amd64
@@ -10,6 +10,8 @@ startup: application
 boot: auto
 init: false
 host_network: true
+homeassistant_api: true
+video: true
 ingress: true
 ingress_port: 8000
 panel_icon: mdi:car-speed-limiter

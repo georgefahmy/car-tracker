@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     libgl1 \
     libglib2.0-0 \
+    && if [ "$(dpkg --print-architecture)" = "amd64" ]; then apt-get install -y --no-install-recommends ocl-icd-libopencl1 intel-opencl-icd || true; fi \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv

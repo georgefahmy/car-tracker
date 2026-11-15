@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Car Tracker & Red-Zone Monitor</title>
-  <link rel="stylesheet" href="static/styles.css?v=10" />
+  <link rel="stylesheet" href="static/styles.css?v=11" />
 </head>
 <body>
   <header class="topbar">
@@ -113,6 +113,9 @@
               <a class="btn btn-ghost" href="api/violations/export.csv" download="violations.csv" style="text-decoration:none;padding:4px 8px;font-size:0.78rem;">Export CSV</a>
             </div>
           </div>
+          <search class="violations-search">
+            <input type="search" id="violationFilter" name="violation_filter" aria-label="Filter violations by plate, zone, or vehicle" placeholder="Filter by plate, zone, or vehicle..." autocorrect="off" autocapitalize="none" spellcheck="false" />
+          </search>
           <div id="violationsList" class="violations-list">
             <p class="muted">No illegal parking violations recorded yet.</p>
           </div>
@@ -133,7 +136,7 @@
           <h3>Reolink NVR Connection</h3>
           <div class="form-grid">
             <label>NVR IP / Host
-              <input type="text" name="nvr_host" required />
+              <input type="text" name="nvr_host" autocorrect="off" autocapitalize="none" spellcheck="false" required />
             </label>
             <label>RTSP Port
               <input type="number" name="nvr_port" min="1" max="65535" required />
@@ -156,18 +159,18 @@
               </select>
             </label>
             <label>Username
-              <input type="text" name="nvr_user" />
+              <input type="text" name="nvr_user" autocorrect="off" autocapitalize="none" spellcheck="false" />
             </label>
             <label>Password
               <input type="password" name="nvr_pass" placeholder="Leave *** to keep existing" />
             </label>
           </div>
           <label class="full-width">Local Test Video Path (optional — overrides RTSP when set)
-            <input type="text" name="test_video_path" placeholder="/path/to/test_traffic.mp4" />
+            <input type="text" name="test_video_path" autocorrect="off" autocapitalize="none" spellcheck="false" placeholder="/path/to/test_traffic.mp4" />
           </label>
           <div class="test-row">
             <button type="button" class="btn btn-secondary" id="btnTestStream">Test Connection</button>
-            <span id="testStreamResult" class="small muted"></span>
+            <span id="testStreamResult" class="small muted" role="status"></span>
           </div>
         </div>
 
@@ -178,15 +181,17 @@
               <select name="yolo_model">
                 <option value="yolov8n.pt">YOLOv8n (Fast baseline)</option>
                 <option value="yolo11n.pt">YOLO11n (Faster + better accuracy)</option>
-                <option value="yolo11s.pt">YOLO11s (High accuracy — x86 OpenVINO)</option>
+                <option value="yolo11s.pt">YOLO11s (High accuracy — x86 ONNX/iGPU)</option>
                 <option value="yolov8s.pt">YOLOv8s (High accuracy)</option>
               </select>
             </label>
             <label>Inference Backend
               <select name="inference_backend">
-                <option value="auto">Auto (PyTorch CPU — Low Idle CPU)</option>
-                <option value="openvino">OpenVINO (Higher CPU Spin)</option>
-                <option value="pytorch">PyTorch</option>
+                <option value="auto">Auto (PyTorch CPU — Safe Default)</option>
+                <option value="onnx">ONNX Runtime (Fast x86 CPU — Low Idle)</option>
+                <option value="openvino_gpu">OpenVINO Intel iGPU (/dev/dri Hardware)</option>
+                <option value="openvino">OpenVINO CPU (High CPU Spin)</option>
+                <option value="pytorch">PyTorch CPU</option>
               </select>
             </label>
             <label>Processing FPS (1–15)
@@ -228,6 +233,10 @@
             <span>Capture high-res snapshot (and webhook alert) when a vehicle exceeds the Speed Limit</span>
           </label>
           <label class="checkbox-row">
+            <input type="checkbox" name="alpr_enabled" />
+            <span>Read license plates automatically on Red-Zone & Speeding snapshots (on-demand ALPR)</span>
+          </label>
+          <label class="checkbox-row">
             <input type="checkbox" name="exempt_emergency_vehicles" />
             <span>Exempt Emergency Vehicles (police lightbars, fire trucks, ambulances) from Red-Zone violations</span>
           </label>
@@ -246,7 +255,7 @@
             </label>
           </div>
           <label class="full-width">Alert Webhook URL (Discord, Slack, or JSON endpoint — optional)
-            <input type="url" name="webhook_url" placeholder="https://discord.com/api/webhooks/..." />
+            <input type="url" name="webhook_url" autocorrect="off" autocapitalize="none" spellcheck="false" placeholder="https://discord.com/api/webhooks/..." />
           </label>
           <div class="form-grid" style="margin-top: 10px;">
             <label class="checkbox-row">
@@ -260,7 +269,28 @@
           <div class="test-row">
             <button type="button" class="btn btn-secondary" id="btnTestWebhook">Test Webhook</button>
             <button type="button" class="btn btn-secondary" id="btnSendDailyReport">Send Daily Report Now</button>
-            <span id="testWebhookResult" class="small muted"></span>
+            <span id="testWebhookResult" class="small muted" role="status"></span>
+          </div>
+        </div>
+
+        <div class="form-section">
+          <h3>Home Assistant Integration</h3>
+          <label class="checkbox-row">
+            <input type="checkbox" name="ha_enabled" />
+            <span>Publish live sensors, binary occupancy & violation events to Home Assistant</span>
+          </label>
+          <p class="small muted" id="haSupervisorHint" style="margin: 8px 0 6px;"></p>
+          <div class="form-grid">
+            <label>Home Assistant URL (optional outside HAOS)
+              <input type="url" name="ha_url" autocorrect="off" autocapitalize="none" spellcheck="false" placeholder="http://homeassistant.local:8123 (blank on HAOS)" />
+            </label>
+            <label>Long-Lived Access Token (optional outside HAOS)
+              <input type="password" name="ha_token" placeholder="Auto on HAOS (or *** to keep saved)" />
+            </label>
+          </div>
+          <div class="test-row">
+            <button type="button" class="btn btn-secondary" id="btnTestHa">Sync & Test HA Entities</button>
+            <span id="testHaResult" class="small muted" role="status"></span>
           </div>
         </div>
 
@@ -310,6 +340,6 @@
     </div>
   </div>
 
-  <script src="static/app.js?v=10"></script>
+  <script src="static/app.js?v=11"></script>
 </body>
 </html>

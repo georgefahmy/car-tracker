@@ -772,47 +772,75 @@ trafficChartEl.addEventListener("pointerleave", () => {
   }
 });
 
+let lastViolationItems = [];
+
+function renderViolationsList() {
+  const list = document.getElementById("violationsList");
+  const filterInput = document.getElementById("violationFilter");
+  const query = (filterInput?.value || "").trim().toLowerCase();
+
+  const filtered = query
+    ? lastViolationItems.filter((v) => {
+        const hay = `${v.license_plate || ""} ${v.zone_name || ""} ${v.vehicle_class || ""} #${v.track_id}`.toLowerCase();
+        return hay.includes(query);
+      })
+    : lastViolationItems;
+
+  const labelEl = document.getElementById("violationCountLabel");
+  labelEl.textContent = query
+    ? `${filtered.length} / ${lastViolationItems.length} shown`
+    : `${lastViolationItems.length} shown`;
+
+  if (!filtered.length) {
+    list.innerHTML = query
+      ? `<p class="muted">No violations match "${escapeHtml(query)}".</p>`
+      : `<p class="muted">No illegal parking violations recorded yet.</p>`;
+    return;
+  }
+
+  list.innerHTML = "";
+  for (const v of filtered) {
+    const card = document.createElement("div");
+    card.className = "violation-card";
+    const timeStr = new Date(v.flagged_at).toLocaleString();
+    const detailLine = v.zone_id === "speeding"
+      ? `Speed: ${v.dwell_seconds.toFixed(1)} mph`
+      : `Dwell: ${v.dwell_seconds.toFixed(0)}s`;
+    const plateBadge = v.license_plate
+      ? `<div class="plate-badge">🪪 ${escapeHtml(v.license_plate)}</div>`
+      : "";
+    card.innerHTML = `
+      <img src="snapshots/${encodeURIComponent(v.snapshot_filename)}" alt="Snapshot" />
+      <div class="violation-meta">
+        <div class="violation-title">${escapeHtml(v.vehicle_class.toUpperCase())} #${v.track_id} • ${escapeHtml(v.zone_name)}</div>
+        ${plateBadge}
+        <div class="muted">${detailLine}</div>
+        <div class="muted">${escapeHtml(timeStr)}</div>
+      </div>
+      <button class="btn btn-ghost" title="Delete">✕</button>
+    `;
+    card.querySelector("img").addEventListener("click", () => {
+      const plateSuffix = v.license_plate ? ` [${v.license_plate}]` : "";
+      document.getElementById("snapshotTitle").textContent = `${v.vehicle_class.toUpperCase()} #${v.track_id}${plateSuffix} — ${v.zone_name}`;
+      document.getElementById("snapshotFullImg").src = `snapshots/${encodeURIComponent(v.snapshot_filename)}`;
+      document.getElementById("snapshotModal").classList.remove("hidden");
+    });
+    card.querySelector("button").addEventListener("click", async () => {
+      await fetch(`api/violations/${v.id}`, { method: "DELETE" });
+      refreshViolations();
+      refreshStats();
+    });
+    list.appendChild(card);
+  }
+}
+
+document.getElementById("violationFilter")?.addEventListener("input", renderViolationsList);
+
 async function refreshViolations() {
   try {
     const res = await fetch("api/violations?limit=30");
-    const items = await res.json();
-    const list = document.getElementById("violationsList");
-    document.getElementById("violationCountLabel").textContent = `${items.length} shown`;
-
-    if (!items.length) {
-      list.innerHTML = `<p class="muted">No illegal parking violations recorded yet.</p>`;
-      return;
-    }
-
-    list.innerHTML = "";
-    for (const v of items) {
-      const card = document.createElement("div");
-      card.className = "violation-card";
-      const timeStr = new Date(v.flagged_at).toLocaleString();
-      const detailLine = v.zone_id === "speeding"
-        ? `Speed: ${v.dwell_seconds.toFixed(1)} mph`
-        : `Dwell: ${v.dwell_seconds.toFixed(0)}s`;
-      card.innerHTML = `
-        <img src="snapshots/${encodeURIComponent(v.snapshot_filename)}" alt="Snapshot" />
-        <div class="violation-meta">
-          <div class="violation-title">${escapeHtml(v.vehicle_class.toUpperCase())} #${v.track_id} • ${escapeHtml(v.zone_name)}</div>
-          <div class="muted">${detailLine}</div>
-          <div class="muted">${escapeHtml(timeStr)}</div>
-        </div>
-        <button class="btn btn-ghost" title="Delete">✕</button>
-      `;
-      card.querySelector("img").addEventListener("click", () => {
-        document.getElementById("snapshotTitle").textContent = `${v.vehicle_class.toUpperCase()} #${v.track_id} — ${v.zone_name}`;
-        document.getElementById("snapshotFullImg").src = `snapshots/${encodeURIComponent(v.snapshot_filename)}`;
-        document.getElementById("snapshotModal").classList.remove("hidden");
-      });
-      card.querySelector("button").addEventListener("click", async () => {
-        await fetch(`api/violations/${v.id}`, { method: "DELETE" });
-        refreshViolations();
-        refreshStats();
-      });
-      list.appendChild(card);
-    }
+    lastViolationItems = await res.json();
+    renderViolationsList();
   } catch (err) {
     console.error("Violations poll error:", err);
   }
@@ -849,8 +877,16 @@ document.getElementById("btnSettings").addEventListener("click", async () => {
     if (input.type === "checkbox") input.checked = Boolean(val);
     else input.value = val ?? "";
   }
+  const haHint = document.getElementById("haSupervisorHint");
+  if (haHint) {
+    haHint.textContent = cfg.ha_supervisor_detected
+      ? "✅ Home Assistant Supervisor API detected automatically — leave URL & Token blank."
+      : "Optional: Enter Home Assistant URL & Long-Lived Access Token if running outside HAOS.";
+  }
   document.getElementById("testStreamResult").textContent = "";
   document.getElementById("testWebhookResult").textContent = "";
+  const haOut = document.getElementById("testHaResult");
+  if (haOut) haOut.textContent = "";
   settingsModal.classList.remove("hidden");
 });
 
@@ -927,6 +963,32 @@ document.getElementById("btnSendDailyReport").addEventListener("click", async ()
   }
 });
 
+document.getElementById("btnTestHa")?.addEventListener("click", async () => {
+  const out = document.getElementById("testHaResult");
+  const ha_url = settingsForm.elements["ha_url"]?.value?.trim() || "";
+  const ha_token = settingsForm.elements["ha_token"]?.value?.trim() || "";
+  out.textContent = "Syncing Home Assistant entities...";
+  out.style.color = "#8b9bb4";
+  try {
+    const res = await fetch("api/ha/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ha_url, ha_token }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      out.textContent = `Synced ${data.entities} entities (${data.mode})`;
+      out.style.color = "#22c55e";
+    } else {
+      out.textContent = data.error || "HA sync failed";
+      out.style.color = "#ef4444";
+    }
+  } catch (err) {
+    out.textContent = err.message || "HA sync failed";
+    out.style.color = "#ef4444";
+  }
+});
+
 settingsForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const payload = formToPayload();
@@ -962,6 +1024,7 @@ function formToPayload() {
     annotation_scale: Number(fd.get("annotation_scale")),
     speed_capture_enabled: Boolean(settingsForm.elements["speed_capture_enabled"]?.checked),
     speed_limit_mph: Number(fd.get("speed_limit_mph")) || 25,
+    alpr_enabled: Boolean(settingsForm.elements["alpr_enabled"]?.checked),
     exempt_emergency_vehicles: Boolean(settingsForm.elements["exempt_emergency_vehicles"]?.checked),
     emergency_min_saturation: Number(fd.get("emergency_min_saturation")),
     emergency_min_value: Number(fd.get("emergency_min_value")),
@@ -970,6 +1033,9 @@ function formToPayload() {
     webhook_url: fd.get("webhook_url") || "",
     daily_report_enabled: Boolean(settingsForm.elements["daily_report_enabled"]?.checked),
     daily_report_time: fd.get("daily_report_time") || "23:55",
+    ha_enabled: Boolean(settingsForm.elements["ha_enabled"]?.checked),
+    ha_url: fd.get("ha_url") || "",
+    ha_token: fd.get("ha_token") || "",
   };
 }
 

@@ -45,7 +45,7 @@ class GroundCalibrationModel(BaseModel):
 
 
 class ViolationRecord(BaseModel):
-    """Stored illegal red-zone parking violation."""
+    """Stored illegal red-zone parking or speeding violation."""
 
     id: int
     track_id: int
@@ -56,6 +56,7 @@ class ViolationRecord(BaseModel):
     flagged_at: str
     dwell_seconds: float
     snapshot_filename: str
+    license_plate: str = ""
 
 
 class Database:
@@ -93,7 +94,8 @@ class Database:
                     started_at TEXT NOT NULL,
                     flagged_at TEXT NOT NULL,
                     dwell_seconds REAL NOT NULL,
-                    snapshot_filename TEXT NOT NULL
+                    snapshot_filename TEXT NOT NULL,
+                    license_plate TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE TABLE IF NOT EXISTS stats_state (
@@ -139,6 +141,10 @@ class Database:
             cols = {row[1] for row in cur.fetchall()}
             if "zone_type" not in cols:
                 cur.execute("ALTER TABLE zones ADD COLUMN zone_type TEXT NOT NULL DEFAULT 'red_zone'")
+            cur.execute("PRAGMA table_info(violations)")
+            vcols = {row[1] for row in cur.fetchall()}
+            if "license_plate" not in vcols:
+                cur.execute("ALTER TABLE violations ADD COLUMN license_plate TEXT NOT NULL DEFAULT ''")
             self._conn.commit()
 
     def close(self) -> None:
@@ -262,6 +268,7 @@ class Database:
         flagged_at: str,
         dwell_seconds: float,
         snapshot_filename: str,
+        license_plate: str = "",
     ) -> ViolationRecord:
         with self._lock:
             cur = self._conn.cursor()
@@ -269,8 +276,8 @@ class Database:
                 """
                 INSERT INTO violations (
                     track_id, zone_id, zone_name, vehicle_class,
-                    started_at, flagged_at, dwell_seconds, snapshot_filename
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    started_at, flagged_at, dwell_seconds, snapshot_filename, license_plate
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     track_id,
@@ -281,6 +288,7 @@ class Database:
                     flagged_at,
                     dwell_seconds,
                     snapshot_filename,
+                    license_plate,
                 ),
             )
             self._conn.commit()
@@ -295,6 +303,7 @@ class Database:
             flagged_at=flagged_at,
             dwell_seconds=dwell_seconds,
             snapshot_filename=snapshot_filename,
+            license_plate=license_plate,
         )
 
     def get_violations(self, limit: int = 50, offset: int = 0) -> list[ViolationRecord]:
@@ -302,7 +311,7 @@ class Database:
             rows = self._conn.execute(
                 """
                 SELECT id, track_id, zone_id, zone_name, vehicle_class,
-                       started_at, flagged_at, dwell_seconds, snapshot_filename
+                       started_at, flagged_at, dwell_seconds, snapshot_filename, license_plate
                 FROM violations
                 ORDER BY id DESC
                 LIMIT ? OFFSET ?
@@ -467,7 +476,7 @@ class Database:
             ).fetchall()
             violation_rows = self._conn.execute(
                 """
-                SELECT zone_name, vehicle_class, flagged_at, dwell_seconds
+                SELECT zone_name, vehicle_class, flagged_at, dwell_seconds, license_plate
                 FROM violations
                 ORDER BY id DESC
                 LIMIT 500

@@ -454,4 +454,197 @@ def test_two_line_speed_estimation() -> None:
     assert lm.get_speed_summary()["samples_count"] == 1
 
 
+def test_alpr_plate_normalization_and_reader() -> None:
+    from unittest.mock import MagicMock
+
+    from app.alpr import LicensePlateReader, normalize_plate_candidate
+
+    assert normalize_plate_candidate("7ABC123") == "7ABC123"
+    assert normalize_plate_candidate("CA 8XYZ-991") == "8XYZ991"
+    assert normalize_plate_candidate("12345A1") == "12345A1"
+    assert normalize_plate_candidate("TOYOTA") is None
+    assert normalize_plate_candidate("REOLINK") is None
+    assert normalize_plate_candidate("2026") is None
+    assert normalize_plate_candidate("AB") is None
+
+    reader = LicensePlateReader()
+    reader._ocr = MagicMock(
+        return_value=(
+            [
+                [[[10, 10], [90, 10], [90, 30], [10, 30]], "TESLA", 0.99],
+                [[[40, 150], [140, 150], [140, 180], [40, 180]], "7XYZ-421", 0.91],
+            ],
+            [0.02],
+        )
+    )
+    frame = np.zeros((300, 400, 3), dtype=np.uint8)
+    plate, conf = reader.read_plate(frame, bbox_xyxy=(50, 40, 250, 260))
+    assert plate == "7XYZ421"
+    assert abs(conf - 0.91) < 1e-3
+
+    # Errors in OCR never raise out of read_plate
+    reader._ocr = MagicMock(side_effect=RuntimeError("mock failure"))
+    assert reader.read_plate(frame) == ("", 0.0)
+
+
+def test_database_license_plate_migration_and_csv(tmp_path: Path) -> None:
+    import sqlite3
+
+    from app.database import Database
+
+    db_file = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db_file))
+    conn.execute(
+        """
+        CREATE TABLE violations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_id INTEGER NOT NULL,
+            zone_id TEXT NOT NULL,
+            zone_name TEXT NOT NULL,
+            vehicle_class TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            flagged_at TEXT NOT NULL,
+            dwell_seconds REAL NOT NULL,
+            snapshot_filename TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # Initializing Database should migrate violations table cleanly without losing compatibility
+    migrated_db = Database(db_file)
+    rec = migrated_db.add_violation(
+        track_id=5,
+        zone_id="z1",
+        zone_name="Red Curb",
+        vehicle_class="car",
+        started_at="2026-11-14T20:00:00Z",
+        flagged_at="2026-11-14T20:00:20Z",
+        dwell_seconds=20.0,
+        snapshot_filename="violation_test.jpg",
+        license_plate="7ABC123",
+    )
+    assert rec.license_plate == "7ABC123"
+    migrated_db.close()
+
+    settings = Settings(data_dir=str(tmp_path))
+    # Point test app directly to a fresh DB inside tmp_path via db_path=data_dir/tracker.db
+    app = create_app(settings=settings, start_worker=False)
+    with TestClient(app) as client:
+        app.state.db.add_violation(
+            track_id=9,
+            zone_id="z1",
+            zone_name="Red Curb",
+            vehicle_class="car",
+            started_at="2026-11-14T20:05:00Z",
+            flagged_at="2026-11-14T20:05:25Z",
+            dwell_seconds=25.0,
+            snapshot_filename="snap_plate.jpg",
+            license_plate="7ABC123",
+        )
+        items = client.get("/api/violations").json()
+        assert len(items) == 1
+        assert items[0]["license_plate"] == "7ABC123"
+
+        csv_r = client.get("/api/violations/export.csv")
+        assert csv_r.status_code == 200
+        assert "license_plate" in csv_r.text
+        assert "7ABC123" in csv_r.text
+
+
+def test_home_assistant_publisher_and_api(tmp_path: Path, monkeypatch) -> None:
+    from unittest.mock import MagicMock, patch
+
+    import requests
+
+    from app.ha_integration import HomeAssistantPublisher
+
+    monkeypatch.setenv("SUPERVISOR_TOKEN", "sup_secret_tok")
+    posted: list[tuple[str, str, dict]] = []
+
+    def _fake_post(url: str, headers: dict | None = None, json: dict | None = None, timeout: int = 4):
+        posted.append((url, (headers or {}).get("Authorization", ""), json or {}))
+        return MagicMock(status_code=200, text="{}")
+
+    settings = Settings(data_dir=str(tmp_path / "data"), nvr_pass="pw", ha_token="custom_secret")
+    app = create_app(settings=settings, start_worker=False)
+    with TestClient(app) as client:
+        # Config masks ha_token and exposes ha_supervisor_detected
+        cfg = client.get("/api/config").json()
+        assert cfg["ha_token"] == "***"
+        assert cfg["has_ha_token"] is True
+        assert cfg["ha_supervisor_detected"] is True
+
+        # Updating config with "***" preserves existing ha_token
+        put_r = client.put("/api/config", json=cfg)
+        assert put_r.status_code == 200
+        assert app.state.worker.config.ha_token == "custom_secret"
+
+        with patch("requests.post", side_effect=_fake_post):
+            ha_r = client.post("/api/ha/test", json={"ha_url": "", "ha_token": ""})
+        assert ha_r.status_code == 200
+        body = ha_r.json()
+        assert body["ok"] is True
+        assert body["mode"] == "supervisor"
+        assert body["entities"] == 8
+        urls = [u for u, _, _ in posted]
+        assert any(u == "http://supervisor/core/api/states/sensor.car_tracker_vehicles_today" for u in urls)
+        assert any(u == "http://supervisor/core/api/states/sensor.car_tracker_last_plate" for u in urls)
+        assert any(u == "http://supervisor/core/api/states/binary_sensor.car_tracker_red_zone_occupied" for u in urls)
+        assert all(auth == "Bearer sup_secret_tok" for _, auth, _ in posted)
+
+    # Verify fallback to 172.30.32.2 when `supervisor` hostname fails DNS resolution
+    pub = HomeAssistantPublisher()
+    fallback_urls: list[str] = []
+
+    def _fake_fallback_post(url: str, headers: dict | None = None, json: dict | None = None, timeout: int = 4):
+        fallback_urls.append(url)
+        if url.startswith("http://supervisor"):
+            raise requests.ConnectionError("DNS resolution failed")
+        return MagicMock(status_code=200, text="{}")
+
+    with patch("requests.post", side_effect=_fake_fallback_post):
+        res = pub.publish_states({"vehicles_today": 3, "people_today": 1})
+    assert res["ok"] is True
+    assert any(u.startswith("http://172.30.32.2/core/api/states/") for u in fallback_urls)
+
+
+def test_onnx_and_openvino_gpu_config_and_fallback() -> None:
+    import sys
+    import types
+
+    from app.config import RuntimeConfig
+    from app.detector import ObjectDetector
+
+    cfg_onnx = RuntimeConfig(inference_backend="onnx")
+    assert cfg_onnx.inference_backend == "onnx"
+    cfg_igpu = RuntimeConfig(inference_backend="openvino_gpu")
+    assert cfg_igpu.inference_backend == "openvino_gpu"
+
+    fake_ov = types.ModuleType("openvino")
+
+    class _FakeCore:
+        available_devices = ["CPU"]
+
+    fake_ov.Core = _FakeCore  # type: ignore[attr-defined]
+    prev = sys.modules.get("openvino")
+    sys.modules["openvino"] = fake_ov
+    try:
+        res = ObjectDetector._try_load_openvino(
+            yolo_cls=object,
+            model_name="yolov8n.pt",
+            imgsz=640,
+            models_dir=None,
+            require_gpu=True,
+        )
+        assert res is None
+    finally:
+        if prev is None:
+            sys.modules.pop("openvino", None)
+        else:
+            sys.modules["openvino"] = prev
+
+
+
 

@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     test_video_path: str = ""
 
     yolo_model: str = "yolov8n.pt"
-    inference_backend: Literal["auto", "openvino", "pytorch"] = "auto"
+    inference_backend: Literal["auto", "onnx", "openvino_gpu", "openvino", "pytorch"] = "auto"
     yolo_imgsz: int = 960
     confidence_threshold: float = 0.35
     target_fps: float = 3.0
@@ -40,9 +40,13 @@ class Settings(BaseSettings):
     annotation_scale: float = 1.0
     speed_capture_enabled: bool = True
     speed_limit_mph: float = 25.0
+    alpr_enabled: bool = True
     webhook_url: str = ""
     daily_report_enabled: bool = True
     daily_report_time: str = "23:55"
+    ha_enabled: bool = True
+    ha_url: str = ""
+    ha_token: str = ""
 
     host: str = "0.0.0.0"
     port: int = 8000
@@ -74,7 +78,7 @@ class RuntimeConfig(BaseModel):
     test_video_path: str = ""
 
     yolo_model: str = "yolov8n.pt"
-    inference_backend: Literal["auto", "openvino", "pytorch"] = "auto"
+    inference_backend: Literal["auto", "onnx", "openvino_gpu", "openvino", "pytorch"] = "auto"
     yolo_imgsz: int = Field(default=960, ge=320, le=1920)
     confidence_threshold: float = Field(default=0.35, ge=0.05, le=0.95)
     target_fps: float = Field(default=3.0, ge=0.5, le=30.0)
@@ -91,9 +95,13 @@ class RuntimeConfig(BaseModel):
     annotation_scale: float = Field(default=1.0, ge=0.4, le=3.0)
     speed_capture_enabled: bool = True
     speed_limit_mph: float = Field(default=25.0, ge=1.0, le=150.0)
+    alpr_enabled: bool = True
     webhook_url: str = ""
     daily_report_enabled: bool = True
     daily_report_time: str = "23:55"
+    ha_enabled: bool = True
+    ha_url: str = ""
+    ha_token: str = ""
     heatmap_enabled: bool = False
 
     @classmethod
@@ -124,9 +132,13 @@ class RuntimeConfig(BaseModel):
             annotation_scale=s.annotation_scale,
             speed_capture_enabled=s.speed_capture_enabled,
             speed_limit_mph=s.speed_limit_mph,
+            alpr_enabled=s.alpr_enabled,
             webhook_url=s.webhook_url,
             daily_report_enabled=s.daily_report_enabled,
             daily_report_time=s.daily_report_time,
+            ha_enabled=s.ha_enabled,
+            ha_url=s.ha_url,
+            ha_token=s.ha_token,
         )
 
 

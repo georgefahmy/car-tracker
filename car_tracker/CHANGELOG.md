@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.4
+- Disabled noisy per-request HTTP access logs (`--no-access-log` in Uvicorn) so rapid `/api/stream/frame.jpg` and `/api/stats` polls no longer flood the add-on logs.
+
 ## 1.0.3
 - Added automatic **OpenVINO** export & caching on x86_64 Linux (Beelink/Intel mini-PCs) for 2–3× faster CPU inference.
 - Removed the 4-thread CPU cap so PyTorch/OpenVINO can utilize all available CPU cores.

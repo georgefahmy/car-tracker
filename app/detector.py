@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import math
+import os
+import platform
+import shutil
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -565,23 +569,72 @@ class LineCrossingMonitor:
 
 
 class ObjectDetector:
-    """Ultralytics YOLO + built-in ByteTrack wrapper."""
+    """Ultralytics YOLO + built-in ByteTrack wrapper with optional OpenVINO acceleration."""
 
-    def __init__(self, model_name: str = "yolov8n.pt") -> None:
+    def __init__(
+        self,
+        model_name: str = "yolov8n.pt",
+        imgsz: int = 960,
+        inference_backend: str = "auto",
+        models_dir: Path | None = None,
+    ) -> None:
         import torch
         from ultralytics import YOLO
 
+        self.model_name = model_name
+        self.imgsz = imgsz
+        self.backend = "pytorch"
+
         if torch.backends.mps.is_available():
             self.device = "mps"
+            self.backend = "mps"
         elif torch.cuda.is_available():
             self.device = "cuda"
+            self.backend = "cuda"
         else:
-            import os
-
             self.device = "cpu"
-            torch.set_num_threads(min(4, os.cpu_count() or 4))
+            torch.set_num_threads(max(1, os.cpu_count() or 4))
+
+        if self.device == "cpu" and inference_backend in ("auto", "openvino"):
+            is_x86 = platform.machine().lower() in ("x86_64", "amd64")
+            if inference_backend == "openvino" or is_x86:
+                ov_model = self._try_load_openvino(YOLO, model_name, imgsz, models_dir)
+                if ov_model is not None:
+                    self.model = ov_model
+                    self.backend = "openvino"
+                    return
 
         self.model = YOLO(model_name)
+
+    @staticmethod
+    def _try_load_openvino(
+        yolo_cls: Any,
+        model_name: str,
+        imgsz: int,
+        models_dir: Path | None,
+    ) -> Any | None:
+        try:
+            import openvino  # noqa: F401
+        except ImportError:
+            return None
+
+        cache_root = Path(models_dir) if models_dir is not None else Path("data/models")
+        cache_root.mkdir(parents=True, exist_ok=True)
+        ov_dir = cache_root / f"{Path(model_name).stem}_imgsz{imgsz}_openvino_model"
+
+        try:
+            if not (ov_dir.exists() and any(ov_dir.glob("*.xml"))):
+                pt_model = yolo_cls(model_name)
+                exported_path = Path(str(pt_model.export(format="openvino", imgsz=imgsz, half=False)))
+                if exported_path.exists() and exported_path.resolve() != ov_dir.resolve():
+                    if ov_dir.exists():
+                        shutil.rmtree(ov_dir)
+                    shutil.move(str(exported_path), str(ov_dir))
+            if ov_dir.exists() and any(ov_dir.glob("*.xml")):
+                return yolo_cls(str(ov_dir), task="detect")
+        except Exception as exc:
+            print(f"[detector] OpenVINO export/load fallback to PyTorch: {exc}", flush=True)
+        return None
 
     def detect_and_track(
         self, frame: np.ndarray, imgsz: int = 960, conf: float = 0.35

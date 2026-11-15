@@ -636,8 +636,9 @@ async function refreshStats() {
     if (sys.memory_percent != null) sysParts.push(`RAM ${sys.memory_percent}%`);
     if (sys.cpu_temp_c != null) sysParts.push(`${sys.cpu_temp_c}°C`);
     const sysStr = sysParts.length ? ` • ${sysParts.join(" • ")}` : "";
+    const backendStr = data.inference_backend ? ` • ${String(data.inference_backend).toUpperCase()}` : "";
     document.getElementById("streamInfo").textContent =
-      `${data.stream_status.toUpperCase()} • ${resStr} • ${data.fps} FPS${sysStr} • ${data.source}`;
+      `${data.stream_status.toUpperCase()} • ${resStr} • ${data.fps} FPS${backendStr}${sysStr} • ${data.source}`;
 
     heatmapEnabled = Boolean(data.heatmap_enabled);
     document.getElementById("btnHeatmapToggle").textContent = `Heatmap: ${heatmapEnabled ? "ON" : "OFF"}`;
@@ -940,6 +941,8 @@ function formToPayload() {
     nvr_user: fd.get("nvr_user"),
     nvr_pass: fd.get("nvr_pass"),
     test_video_path: fd.get("test_video_path"),
+    yolo_model: fd.get("yolo_model") || "yolov8n.pt",
+    inference_backend: fd.get("inference_backend") || "auto",
     target_fps: Number(fd.get("target_fps")),
     yolo_imgsz: Number(fd.get("yolo_imgsz")),
     confidence_threshold: Number(fd.get("confidence_threshold")),

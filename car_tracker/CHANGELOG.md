@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.3
+- Added automatic **OpenVINO** export & caching on x86_64 Linux (Beelink/Intel mini-PCs) for 2–3× faster CPU inference.
+- Removed the 4-thread CPU cap so PyTorch/OpenVINO can utilize all available CPU cores.
+- Added **YOLO Model** (`yolov8n.pt`, `yolo11n.pt`, `yolo11s.pt`, `yolov8s.pt`) and **Inference Backend** (`auto`, `openvino`, `pytorch`) selectors in Settings, plus live backend status in the header.
+
 ## 1.0.2
 - Added `CHANGELOG.md` so Home Assistant displays release notes in the add-on Changelog tab and update dialog.
 

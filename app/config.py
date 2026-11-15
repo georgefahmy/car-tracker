@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     test_video_path: str = ""
 
     yolo_model: str = "yolov8n.pt"
+    inference_backend: Literal["auto", "openvino", "pytorch"] = "auto"
     yolo_imgsz: int = 960
     confidence_threshold: float = 0.35
     target_fps: float = 3.0
@@ -70,6 +71,8 @@ class RuntimeConfig(BaseModel):
     nvr_pass: str = ""
     test_video_path: str = ""
 
+    yolo_model: str = "yolov8n.pt"
+    inference_backend: Literal["auto", "openvino", "pytorch"] = "auto"
     yolo_imgsz: int = Field(default=960, ge=320, le=1920)
     confidence_threshold: float = Field(default=0.35, ge=0.05, le=0.95)
     target_fps: float = Field(default=3.0, ge=0.5, le=30.0)
@@ -100,6 +103,8 @@ class RuntimeConfig(BaseModel):
             nvr_user=s.nvr_user,
             nvr_pass=s.nvr_pass,
             test_video_path=s.test_video_path,
+            yolo_model=s.yolo_model,
+            inference_backend=s.inference_backend,
             yolo_imgsz=s.yolo_imgsz,
             confidence_threshold=s.confidence_threshold,
             target_fps=s.target_fps,

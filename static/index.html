@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Car Tracker & Red-Zone Monitor</title>
-  <link rel="stylesheet" href="/static/styles.css?v=5" />
+  <link rel="stylesheet" href="/static/styles.css?v=6" />
 </head>
 <body>
   <header class="topbar">
@@ -174,6 +174,21 @@
         <div class="form-section">
           <h3>Computer Vision & Red-Zone Rules</h3>
           <div class="form-grid">
+            <label>YOLO Model
+              <select name="yolo_model">
+                <option value="yolov8n.pt">YOLOv8n (Fast baseline)</option>
+                <option value="yolo11n.pt">YOLO11n (Faster + better accuracy)</option>
+                <option value="yolo11s.pt">YOLO11s (High accuracy — x86 OpenVINO)</option>
+                <option value="yolov8s.pt">YOLOv8s (High accuracy)</option>
+              </select>
+            </label>
+            <label>Inference Backend
+              <select name="inference_backend">
+                <option value="auto">Auto (OpenVINO on x86_64)</option>
+                <option value="openvino">OpenVINO (Intel/x86 Optimized)</option>
+                <option value="pytorch">PyTorch (Fallback)</option>
+              </select>
+            </label>
             <label>Processing FPS (1–15)
               <input type="number" name="target_fps" step="0.5" min="0.5" max="30" required />
             </label>
@@ -288,6 +303,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/app.js?v=6"></script>
 </body>
 </html>

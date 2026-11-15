@@ -309,12 +309,26 @@ class StreamWorker:
                 "last_violation": self._last_violation,
                 "system": system_metrics,
                 "speed": self.line_monitor.get_speed_summary(),
+                "inference_backend": self._detector.backend if self._detector is not None else self.config.inference_backend,
+                "yolo_model": self.config.yolo_model,
             }
 
     def _ensure_detector(self) -> ObjectDetector:
-        if self._detector is None:
+        cfg = self.config
+        desired_key = (
+            cfg.yolo_model,
+            cfg.yolo_imgsz if cfg.inference_backend in ("auto", "openvino") else 0,
+            cfg.inference_backend,
+        )
+        if self._detector is None or getattr(self, "_detector_key", None) != desired_key:
             self._set_status("loading_model", "")
-            self._detector = ObjectDetector(self.settings.yolo_model)
+            self._detector = ObjectDetector(
+                model_name=cfg.yolo_model,
+                imgsz=cfg.yolo_imgsz,
+                inference_backend=cfg.inference_backend,
+                models_dir=self.settings.data_path / "models",
+            )
+            self._detector_key = desired_key
         return self._detector
 
     @staticmethod

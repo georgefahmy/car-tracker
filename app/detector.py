@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import platform
 import shutil
 import time
+import types
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1050,6 +1052,551 @@ class TrackStabilizer:
         return stabilized
 
 
+DFINE_MODEL_REPOS: dict[str, str] = {
+    "dfine_n.onnx": "onnx-community/dfine_n_coco-ONNX",
+    "dfine_s.onnx": "onnx-community/dfine_s_coco-ONNX",
+}
+_TARGET_CLASS_SET = frozenset(TARGET_CLASS_IDS)
+
+
+def is_dfine_model(model_name: str) -> bool:
+    """Return True if `model_name` refers to a D-FINE transformer ONNX model."""
+    return Path(str(model_name).strip()).name.lower() in DFINE_MODEL_REPOS
+
+
+def compute_optimal_input_hw(frame_w: int, frame_h: int, max_imgsz: int) -> tuple[int, int]:
+    """Compute stream-aspect-matched (in_h, in_w) aligned to stride 32 without upscaling."""
+
+    def _stride32(val: float) -> int:
+        return max(32, int(math.ceil(val / 32.0)) * 32)
+
+    cap = max(32, int(max_imgsz))
+    if frame_w <= 0 or frame_h <= 0:
+        side = _stride32(cap)
+        return (side, side)
+
+    scale = min(1.0, float(cap) / float(max(frame_w, frame_h)))
+    in_w = _stride32(frame_w * scale)
+    in_h = _stride32(frame_h * scale)
+    return (in_h, in_w)
+
+
+def _download_url_atomic(url: str, dest: Path, timeout: int = 120) -> None:
+    """Download `url` to `dest` atomically via a sibling `.tmp` file."""
+    import requests
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = dest.with_name(f".{dest.name}.tmp")
+    try:
+        with requests.get(url, stream=True, timeout=timeout) as resp:
+            resp.raise_for_status()
+            with open(tmp_path, "wb") as fh:
+                for chunk in resp.iter_content(chunk_size=1024 * 256):
+                    if chunk:
+                        fh.write(chunk)
+        os.replace(tmp_path, dest)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _ensure_dfine_onnx(model_name: str, models_dir: Path | None) -> tuple[Path, dict[str, Any]]:
+    """Ensure local cached D-FINE `model.onnx`, any external data file, and preprocessor config exist."""
+    direct = Path(model_name)
+    if direct.is_file() and direct.stat().st_size > 0:
+        preproc: dict[str, Any] = {}
+        preproc_sibling = direct.with_name("preprocessor_config.json")
+        if preproc_sibling.is_file():
+            try:
+                preproc = json.loads(preproc_sibling.read_text(encoding="utf-8"))
+            except Exception:
+                preproc = {}
+        return direct, preproc
+
+    key = Path(str(model_name).strip()).name.lower()
+    repo = DFINE_MODEL_REPOS.get(key)
+    if repo is None:
+        raise FileNotFoundError(f"Unknown D-FINE model '{model_name}'")
+
+    cache_root = Path(models_dir) if models_dir is not None else Path("data/models")
+    model_dir = cache_root / Path(key).stem
+    model_dir.mkdir(parents=True, exist_ok=True)
+    onnx_path = model_dir / "model.onnx"
+    preproc_path = model_dir / "preprocessor_config.json"
+
+    if onnx_path.exists() and onnx_path.stat().st_size == 0:
+        onnx_path.unlink(missing_ok=True)
+
+    base_url = f"https://huggingface.co/{repo}/resolve/main"
+    if not onnx_path.exists():
+        _download_url_atomic(f"{base_url}/onnx/model.onnx", onnx_path, timeout=180)
+        try:
+            import onnx
+
+            proto = onnx.load(str(onnx_path), load_external_data=False)
+            ext_locations: set[str] = set()
+            for tensor in proto.graph.initializer:
+                if tensor.data_location == onnx.TensorProto.EXTERNAL:
+                    for entry in tensor.external_data:
+                        if entry.key == "location" and entry.value:
+                            ext_locations.add(Path(entry.value).name)
+            for ext_name in sorted(ext_locations):
+                ext_path = model_dir / ext_name
+                if not (ext_path.exists() and ext_path.stat().st_size > 0):
+                    _download_url_atomic(f"{base_url}/onnx/{ext_name}", ext_path, timeout=180)
+        except ImportError:
+            pass
+        except Exception:
+            onnx_path.unlink(missing_ok=True)
+            raise
+
+    if not preproc_path.exists():
+        try:
+            _download_url_atomic(f"{base_url}/preprocessor_config.json", preproc_path, timeout=30)
+        except Exception:
+            preproc_path.unlink(missing_ok=True)
+
+    preproc_cfg: dict[str, Any] = {}
+    if preproc_path.is_file():
+        try:
+            preproc_cfg = json.loads(preproc_path.read_text(encoding="utf-8"))
+        except Exception:
+            preproc_cfg = {}
+    return onnx_path, preproc_cfg
+
+
+def _parse_tracker_yaml_args(tracker_yaml: str) -> types.SimpleNamespace:
+    """Parse key-value ByteTrack YAML parameters into a SimpleNamespace for BYTETracker."""
+    parsed: dict[str, Any] = {
+        "tracker_type": "bytetrack",
+        "track_high_thresh": 0.35,
+        "track_low_thresh": 0.12,
+        "new_track_thresh": 0.40,
+        "track_buffer": 150,
+        "match_thresh": 0.85,
+        "fuse_score": False,
+    }
+    try:
+        for raw_line in Path(tracker_yaml).read_text(encoding="utf-8").splitlines():
+            line = raw_line.split("#", 1)[0].strip()
+            if not line or ":" not in line:
+                continue
+            k, v = line.split(":", 1)
+            key = k.strip()
+            val = v.strip()
+            low = val.lower()
+            if low == "true":
+                parsed[key] = True
+            elif low == "false":
+                parsed[key] = False
+            else:
+                try:
+                    parsed[key] = int(val)
+                except ValueError:
+                    try:
+                        parsed[key] = float(val)
+                    except ValueError:
+                        parsed[key] = val.strip("'\"")
+    except OSError:
+        pass
+    return types.SimpleNamespace(**parsed)
+
+
+class _DFineRunner:
+    """NMS-free D-FINE ONNX/OpenVINO runner paired with Ultralytics BYTETracker."""
+
+    def __init__(
+        self,
+        model_name: str,
+        req_backend: str,
+        models_dir: Path | None,
+        tracker_yaml: str,
+        threads: int = 4,
+    ) -> None:
+        from ultralytics.trackers.byte_tracker import BYTETracker
+
+        self.onnx_path, self.preproc_cfg = _ensure_dfine_onnx(model_name, models_dir)
+        self._tracker_args = _parse_tracker_yaml_args(tracker_yaml)
+        self.tracker = BYTETracker(args=self._tracker_args)
+        self.fallback_note = ""
+        self._ort_session: Any = None
+        self._ov_compiled: Any = None
+        self._input_specs: list[tuple[str, tuple[Any, ...], str]] = []
+
+        compiled = False
+        if req_backend in ("openvino", "openvino_gpu"):
+            try:
+                import openvino as ov
+
+                core = ov.Core()
+                if req_backend == "openvino_gpu":
+                    devices = list(core.available_devices)
+                    if any(d == "GPU" or d.startswith("GPU.") for d in devices):
+                        self._ov_compiled = core.compile_model(str(self.onnx_path), "GPU")
+                        self.backend = "openvino_gpu"
+                        self.device = "intel:gpu"
+                        for inp in self._ov_compiled.inputs:
+                            pshape = tuple(
+                                int(dim.get_length()) if dim.is_static else -1
+                                for dim in inp.get_partial_shape()
+                            )
+                            self._input_specs.append(
+                                (inp.any_name, pshape, str(inp.get_element_type()))
+                            )
+                        compiled = True
+                    else:
+                        self.fallback_note = "Intel GPU unavailable; fell back to ONNX"
+                else:
+                    self._ov_compiled = core.compile_model(str(self.onnx_path), "CPU")
+                    self.backend = "openvino"
+                    self.device = "cpu"
+                    for inp in self._ov_compiled.inputs:
+                        pshape = tuple(
+                            int(dim.get_length()) if dim.is_static else -1
+                            for dim in inp.get_partial_shape()
+                        )
+                        self._input_specs.append(
+                            (inp.any_name, pshape, str(inp.get_element_type()))
+                        )
+                    compiled = True
+            except Exception as exc:
+                self.fallback_note = (
+                    "Intel GPU unavailable; fell back to ONNX"
+                    if req_backend == "openvino_gpu"
+                    else f"OpenVINO unavailable ({exc}); fell back to ONNX"
+                )
+
+        if not compiled:
+            import onnxruntime as ort
+
+            opts = ort.SessionOptions()
+            opts.intra_op_num_threads = threads
+            opts.inter_op_num_threads = 1
+            opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
+            self._ort_session = ort.InferenceSession(
+                str(self.onnx_path),
+                sess_options=opts,
+                providers=["CPUExecutionProvider"],
+            )
+            self.backend = "onnx"
+            self.device = "cpu"
+            if req_backend == "pytorch" and not self.fallback_note:
+                self.fallback_note = "D-FINE runs via ONNX Runtime"
+            for inp in self._ort_session.get_inputs():
+                self._input_specs.append((inp.name, tuple(inp.shape), str(inp.type)))
+
+        self.input_hw = self._resolve_input_hw()
+
+    def _resolve_input_hw(self) -> tuple[int, int]:
+        size_cfg = self.preproc_cfg.get("size")
+        if isinstance(size_cfg, dict):
+            sh = int(size_cfg.get("height", 0) or 0)
+            sw = int(size_cfg.get("width", 0) or 0)
+            if sh > 0 and sw > 0:
+                return (sh, sw)
+        for _, shape, _ in self._input_specs:
+            if len(shape) == 4 and isinstance(shape[2], int) and isinstance(shape[3], int):
+                if shape[2] > 0 and shape[3] > 0:
+                    return (int(shape[2]), int(shape[3]))
+        return (640, 640)
+
+    def reset(self) -> None:
+        self.tracker.reset()
+
+    @staticmethod
+    def _decode_dfine_outputs(
+        outputs: list[Any], frame_w: int, frame_h: int, low_conf: float
+    ) -> np.ndarray:
+        """Decode D-FINE ONNX outputs into (N, 6) [x1, y1, x2, y2, score, cls_id] float32 array."""
+        arrays = [np.asarray(out) for out in outputs]
+        if not arrays:
+            return np.empty((0, 6), dtype=np.float32)
+
+        boxes_arr: np.ndarray | None = None
+        logits_arr: np.ndarray | None = None
+        labels_arr: np.ndarray | None = None
+        scores_arr: np.ndarray | None = None
+
+        for arr in arrays:
+            if arr.ndim >= 2 and arr.shape[-1] == 4 and boxes_arr is None:
+                boxes_arr = arr.astype(np.float32)
+            elif arr.ndim >= 2 and arr.shape[-1] >= 5 and logits_arr is None:
+                logits_arr = arr.astype(np.float32)
+
+        if logits_arr is not None and boxes_arr is not None:
+            logits2d = logits_arr[0] if logits_arr.ndim == 3 else logits_arr
+            boxes2d = boxes_arr[0] if boxes_arr.ndim == 3 else boxes_arr
+            if logits2d.size == 0 or boxes2d.size == 0:
+                return np.empty((0, 6), dtype=np.float32)
+            if float(logits2d.min()) < 0.0 or float(logits2d.max()) > 1.0:
+                probs = 1.0 / (1.0 + np.exp(-np.clip(logits2d, -50.0, 50.0)))
+            else:
+                probs = logits2d
+            if probs.shape[-1] == 81:
+                probs = probs[..., :80]
+            cls_ids = np.argmax(probs, axis=-1).astype(np.int32)
+            scores = probs[np.arange(probs.shape[0]), cls_ids].astype(np.float32)
+        elif len(arrays) >= 3 and boxes_arr is not None:
+            # Fallback for 3-output (labels, boxes, scores) exports
+            for arr in arrays:
+                if arr is boxes_arr:
+                    continue
+                flat = arr.reshape(-1)
+                if np.issubdtype(flat.dtype, np.integer) and labels_arr is None:
+                    labels_arr = flat.astype(np.int32)
+                elif scores_arr is None:
+                    scores_arr = flat.astype(np.float32)
+            if labels_arr is None or scores_arr is None:
+                return np.empty((0, 6), dtype=np.float32)
+            boxes2d = boxes_arr.reshape(-1, 4)
+            cls_ids = labels_arr
+            scores = scores_arr
+        else:
+            return np.empty((0, 6), dtype=np.float32)
+
+        target_mask = np.isin(cls_ids, TARGET_CLASS_IDS)
+        keep = (scores >= float(low_conf)) & target_mask
+        if not np.any(keep):
+            return np.empty((0, 6), dtype=np.float32)
+
+        kept_boxes = boxes2d[keep]
+        kept_scores = scores[keep]
+        kept_cls = cls_ids[keep].astype(np.float32)
+
+        if float(kept_boxes.max()) <= 1.5 and logits_arr is not None:
+            cx = kept_boxes[:, 0] * float(frame_w)
+            cy = kept_boxes[:, 1] * float(frame_h)
+            bw = kept_boxes[:, 2] * float(frame_w)
+            bh = kept_boxes[:, 3] * float(frame_h)
+            x1 = cx - (bw * 0.5)
+            y1 = cy - (bh * 0.5)
+            x2 = cx + (bw * 0.5)
+            y2 = cy + (bh * 0.5)
+        elif float(kept_boxes.max()) <= 1.5:
+            x1 = kept_boxes[:, 0] * float(frame_w)
+            y1 = kept_boxes[:, 1] * float(frame_h)
+            x2 = kept_boxes[:, 2] * float(frame_w)
+            y2 = kept_boxes[:, 3] * float(frame_h)
+        else:
+            x1 = kept_boxes[:, 0]
+            y1 = kept_boxes[:, 1]
+            x2 = kept_boxes[:, 2]
+            y2 = kept_boxes[:, 3]
+
+        x1 = np.clip(x1, 0.0, float(frame_w))
+        y1 = np.clip(y1, 0.0, float(frame_h))
+        x2 = np.clip(x2, 0.0, float(frame_w))
+        y2 = np.clip(y2, 0.0, float(frame_h))
+
+        valid = (x2 > (x1 + 1.0)) & (y2 > (y1 + 1.0))
+        if not np.any(valid):
+            return np.empty((0, 6), dtype=np.float32)
+
+        return np.column_stack(
+            [x1[valid], y1[valid], x2[valid], y2[valid], kept_scores[valid], kept_cls[valid]]
+        ).astype(np.float32)
+
+    def infer_detections(self, frame: np.ndarray, low_conf: float) -> np.ndarray:
+        frame_h, frame_w = frame.shape[:2]
+        in_h, in_w = self.input_hw
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        resized = cv2.resize(rgb, (in_w, in_h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+        if self.preproc_cfg.get("do_rescale", True):
+            resized *= float(self.preproc_cfg.get("rescale_factor", 1.0 / 255.0))
+        if self.preproc_cfg.get("do_normalize", False):
+            mean = np.asarray(
+                self.preproc_cfg.get("image_mean", [0.485, 0.456, 0.406]), dtype=np.float32
+            ).reshape(1, 1, 3)
+            std = np.asarray(
+                self.preproc_cfg.get("image_std", [0.229, 0.224, 0.225]), dtype=np.float32
+            ).reshape(1, 1, 3)
+            resized = (resized - mean) / std
+        pixel_values = np.ascontiguousarray(resized.transpose(2, 0, 1)[None, ...], dtype=np.float32)
+
+        feed: dict[str, np.ndarray] = {}
+        for idx, (inp_name, _shape, inp_type) in enumerate(self._input_specs):
+            if idx == 0 or "pixel" in inp_name or "image" in inp_name:
+                feed[inp_name] = pixel_values
+            elif "size" in inp_name:
+                dtype = np.int32 if "int32" in inp_type.lower() or "i32" in inp_type.lower() else np.int64
+                feed[inp_name] = np.array([[frame_h, frame_w]], dtype=dtype)
+        if not feed:
+            feed = {"pixel_values": pixel_values}
+
+        if self._ov_compiled is not None:
+            res = self._ov_compiled(feed)
+            outputs = [res[out] for out in self._ov_compiled.outputs]
+        else:
+            outputs = self._ort_session.run(None, feed)
+
+        return self._decode_dfine_outputs(outputs, frame_w=frame_w, frame_h=frame_h, low_conf=low_conf)
+
+    def track(
+        self,
+        frame: np.ndarray,
+        low_conf: float,
+        high_conf: float,
+        low_track: float,
+        new_thresh: float,
+    ) -> list[TrackedDetection]:
+        import torch
+        from ultralytics.engine.results import Boxes
+
+        frame_h, frame_w = frame.shape[:2]
+        self._tracker_args.track_high_thresh = high_conf
+        self._tracker_args.track_low_thresh = low_track
+        self._tracker_args.new_track_thresh = new_thresh
+
+        dets = self.infer_detections(frame, low_conf=low_conf)
+        boxes_tensor = (
+            torch.from_numpy(dets) if len(dets) > 0 else torch.empty((0, 6), dtype=torch.float32)
+        )
+        tracked = self.tracker.update(Boxes(boxes_tensor, orig_shape=(frame_h, frame_w)), img=frame)
+
+        raw_output: list[TrackedDetection] = []
+        if isinstance(tracked, np.ndarray) and tracked.ndim == 2 and tracked.shape[0] > 0:
+            for row in tracked:
+                x1, y1, x2, y2, tid, score, cls_id = row[:7]
+                cid = int(cls_id)
+                if cid not in _TARGET_CLASS_SET:
+                    continue
+                cls_name = "person" if cid == PERSON_CLASS_ID else VEHICLE_CLASSES.get(cid, "vehicle")
+                raw_output.append(
+                    TrackedDetection(
+                        track_id=int(tid),
+                        class_id=cid,
+                        class_name=cls_name,
+                        confidence=float(score),
+                        bbox_xyxy=(float(x1), float(y1), float(x2), float(y2)),
+                    )
+                )
+        return raw_output
+
+
+class MotionGate:
+    """Lightweight OpenCV motion gate that throttles neural-network inference on static scenes."""
+
+    def __init__(
+        self,
+        width: int = 160,
+        height: int = 90,
+        diff_threshold: int = 14,
+        pixel_ratio_threshold: float = 0.002,
+        cooldown_seconds: float = 2.5,
+    ) -> None:
+        self.width = max(32, int(width))
+        self.height = max(32, int(height))
+        self.diff_threshold = max(1, int(diff_threshold))
+        self.pixel_ratio_threshold = max(0.0001, float(pixel_ratio_threshold))
+        self.cooldown_seconds = max(0.0, float(cooldown_seconds))
+        self._prev_gray: np.ndarray | None = None
+        self._last_infer_gray: np.ndarray | None = None
+        self._last_infer_mono: float = 0.0
+        self._motion_until_mono: float = 0.0
+        self._excl_sig: Any = None
+        self._valid_mask: np.ndarray | None = None
+
+    def reset(self) -> None:
+        self._prev_gray = None
+        self._last_infer_gray = None
+        self._last_infer_mono = 0.0
+        self._motion_until_mono = 0.0
+
+    def _get_valid_mask(self, zones: list[ZoneModel] | None) -> np.ndarray | None:
+        excl_polys = [
+            tuple(
+                (round(float(pt[0]), 4), round(float(pt[1]), 4))
+                for pt in z.points
+            )
+            for z in (zones or [])
+            if z.enabled and getattr(z, "zone_type", "red_zone") == "exclusion" and len(z.points) >= 3
+        ]
+        sig = tuple(excl_polys)
+        if sig == self._excl_sig:
+            return self._valid_mask
+        self._excl_sig = sig
+        if not excl_polys:
+            self._valid_mask = None
+            return None
+
+        mask = np.full((self.height, self.width), 255, dtype=np.uint8)
+        for poly in excl_polys:
+            pts = np.array(
+                [
+                    [
+                        max(0, min(self.width, int(round(px * self.width)))),
+                        max(0, min(self.height, int(round(py * self.height)))),
+                    ]
+                    for px, py in poly
+                ],
+                dtype=np.int32,
+            )
+            cv2.fillPoly(mask, [pts], 0)
+        self._valid_mask = mask
+        return mask
+
+    def should_infer(
+        self,
+        frame: np.ndarray,
+        zones: list[ZoneModel] | None = None,
+        now_mono: float | None = None,
+        idle_interval: float = 2.0,
+    ) -> tuple[bool, str]:
+        """Return (should_run_nn_inference, motion_state['active' | 'idle'])."""
+        now = time.monotonic() if now_mono is None else float(now_mono)
+        small = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_AREA)
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if small.ndim == 3 else small
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        if (
+            self._prev_gray is None
+            or self._last_infer_gray is None
+            or self._prev_gray.shape != gray.shape
+        ):
+            self._prev_gray = gray
+            self._last_infer_gray = gray
+            self._last_infer_mono = now
+            self._motion_until_mono = now + self.cooldown_seconds
+            return (True, "active")
+
+        diff = np.maximum(
+            cv2.absdiff(gray, self._prev_gray),
+            cv2.absdiff(gray, self._last_infer_gray),
+        )
+        self._prev_gray = gray
+
+        valid_mask = self._get_valid_mask(zones)
+        if valid_mask is not None:
+            diff = cv2.bitwise_and(diff, valid_mask)
+            valid_pixels = max(1, int(np.count_nonzero(valid_mask)))
+        else:
+            valid_pixels = self.width * self.height
+
+        _, motion_bin = cv2.threshold(diff, self.diff_threshold, 255, cv2.THRESH_BINARY)
+        motion_bin = cv2.erode(motion_bin, np.ones((2, 2), dtype=np.uint8), iterations=1)
+        changed_ratio = float(np.count_nonzero(motion_bin)) / float(valid_pixels)
+
+        if changed_ratio >= self.pixel_ratio_threshold:
+            self._motion_until_mono = now + self.cooldown_seconds
+            self._last_infer_mono = now
+            self._last_infer_gray = gray
+            return (True, "active")
+
+        if now < self._motion_until_mono:
+            self._last_infer_mono = now
+            self._last_infer_gray = gray
+            return (True, "active")
+
+        if (now - self._last_infer_mono) >= max(0.25, float(idle_interval)):
+            self._last_infer_mono = now
+            self._last_infer_gray = gray
+            return (True, "idle")
+
+        return (False, "idle")
+
+
 def _resolve_model_source(model_name: str, models_dir: Path | None) -> str:
     """Resolve YOLO weights path so downloaded `.pt` files persist inside `models_dir`."""
     if models_dir is None or "/" in model_name or "\\" in model_name:
@@ -1085,7 +1632,7 @@ def _ensure_tracker_yaml(models_dir: Path | None, conf: float = 0.35) -> str:
 
 
 class ObjectDetector:
-    """Ultralytics YOLO + built-in ByteTrack wrapper with ONNX Runtime & OpenVINO acceleration."""
+    """Ultralytics YOLO / D-FINE + ByteTrack wrapper with ONNX Runtime & OpenVINO acceleration."""
 
     def __init__(
         self,
@@ -1093,6 +1640,7 @@ class ObjectDetector:
         imgsz: int = 960,
         inference_backend: str = "auto",
         models_dir: Path | None = None,
+        input_hw: tuple[int, int] | None = None,
     ) -> None:
         import torch
         from ultralytics import YOLO
@@ -1106,6 +1654,8 @@ class ObjectDetector:
         self.device = "cpu"
         self.stabilizer = TrackStabilizer()
         self._tracker_yaml = _ensure_tracker_yaml(models_dir, 0.35)
+        self._is_dfine = is_dfine_model(model_name)
+        self._dfine_runner: _DFineRunner | None = None
         threads = min(4, max(1, os.cpu_count() or 4))
 
         def _configure_cpu_threads() -> None:
@@ -1117,10 +1667,36 @@ class ObjectDetector:
                 pass
             cv2.setNumThreads(min(2, threads))
 
+        if self._is_dfine:
+            _configure_cpu_threads()
+            runner = _DFineRunner(
+                model_name=model_name,
+                req_backend=req_backend,
+                models_dir=models_dir,
+                tracker_yaml=self._tracker_yaml,
+                threads=threads,
+            )
+            self._dfine_runner = runner
+            self.backend = runner.backend
+            self.device = runner.device
+            self.fallback_note = runner.fallback_note
+            self.input_hw: tuple[int, int] = runner.input_hw
+            self.model: Any = None
+            return
+
+        if input_hw is not None and input_hw[0] > 0 and input_hw[1] > 0:
+            self.input_hw = (int(input_hw[0]), int(input_hw[1]))
+        else:
+            side = max(32, int(imgsz))
+            self.input_hw = (side, side)
+        target_size: int | tuple[int, int] = (
+            self.input_hw[0] if self.input_hw[0] == self.input_hw[1] else self.input_hw
+        )
+
         fallback_reason: str | None = None
         if req_backend == "onnx":
             _configure_cpu_threads()
-            onnx_model = self._try_load_onnx(YOLO, model_name, imgsz, models_dir, threads)
+            onnx_model = self._try_load_onnx(YOLO, model_name, target_size, models_dir, threads)
             if onnx_model is not None:
                 self.model = onnx_model
                 self.device = "cpu"
@@ -1129,14 +1705,16 @@ class ObjectDetector:
             fallback_reason = "ONNX unavailable"
         elif req_backend == "openvino_gpu":
             _configure_cpu_threads()
-            ov_gpu_model = self._try_load_openvino(YOLO, model_name, imgsz, models_dir, require_gpu=True)
+            ov_gpu_model = self._try_load_openvino(
+                YOLO, model_name, target_size, models_dir, require_gpu=True
+            )
             if ov_gpu_model is not None:
                 self.model = ov_gpu_model
                 self.device = "intel:gpu"
                 self.backend = "openvino_gpu"
                 return
             # Never silently drop from openvino_gpu onto OpenVINO CPU spin-wait; prefer ONNX CPU instead.
-            onnx_model = self._try_load_onnx(YOLO, model_name, imgsz, models_dir, threads)
+            onnx_model = self._try_load_onnx(YOLO, model_name, target_size, models_dir, threads)
             if onnx_model is not None:
                 self.model = onnx_model
                 self.device = "cpu"
@@ -1146,7 +1724,9 @@ class ObjectDetector:
             fallback_reason = "OpenVINO GPU & ONNX unavailable"
         elif req_backend == "openvino":
             _configure_cpu_threads()
-            ov_model = self._try_load_openvino(YOLO, model_name, imgsz, models_dir, require_gpu=False)
+            ov_model = self._try_load_openvino(
+                YOLO, model_name, target_size, models_dir, require_gpu=False
+            )
             if ov_model is not None:
                 self.model = ov_model
                 self.device = "cpu"
@@ -1170,9 +1750,17 @@ class ObjectDetector:
 
         self.model = YOLO(_resolve_model_source(model_name, models_dir))
 
+    @property
+    def input_resolution_label(self) -> str:
+        """Return effective model input geometry formatted as `WxH`."""
+        return f"{self.input_hw[1]}x{self.input_hw[0]}"
+
     def reset(self) -> None:
-        """Reset post-tracker stabilization and Ultralytics ByteTrack state."""
+        """Reset post-tracker stabilization and ByteTrack state."""
         self.stabilizer.reset()
+        if self._dfine_runner is not None:
+            self._dfine_runner.reset()
+            return
         predictor = getattr(self.model, "predictor", None)
         for tr in getattr(predictor, "trackers", None) or []:
             if hasattr(tr, "reset"):
@@ -1182,7 +1770,7 @@ class ObjectDetector:
     def _try_load_onnx(
         yolo_cls: Any,
         model_name: str,
-        imgsz: int,
+        imgsz: int | tuple[int, int],
         models_dir: Path | None,
         threads: int = 4,
     ) -> Any | None:
@@ -1192,9 +1780,13 @@ class ObjectDetector:
         except ImportError:
             return None
 
+        in_h, in_w = (int(imgsz), int(imgsz)) if isinstance(imgsz, int) else (int(imgsz[0]), int(imgsz[1]))
+        export_imgsz: int | tuple[int, int] = in_h if in_h == in_w else (in_h, in_w)
+        size_tag = f"imgsz{in_h}" if in_h == in_w else f"{in_h}x{in_w}"
+
         cache_root = Path(models_dir) if models_dir is not None else Path("data/models")
         cache_root.mkdir(parents=True, exist_ok=True)
-        onnx_path = cache_root / f"{Path(model_name).stem}_imgsz{imgsz}.onnx"
+        onnx_path = cache_root / f"{Path(model_name).stem}_{size_tag}.onnx"
 
         try:
             if onnx_path.exists() and onnx_path.stat().st_size == 0:
@@ -1202,7 +1794,7 @@ class ObjectDetector:
             if not (onnx_path.exists() and onnx_path.stat().st_size > 0):
                 pt_model = yolo_cls(_resolve_model_source(model_name, models_dir))
                 exported_path = Path(
-                    str(pt_model.export(format="onnx", imgsz=imgsz, half=False, simplify=False))
+                    str(pt_model.export(format="onnx", imgsz=export_imgsz, half=False, simplify=False))
                 )
                 if exported_path.exists() and exported_path.resolve() != onnx_path.resolve():
                     shutil.move(str(exported_path), str(onnx_path))
@@ -1237,7 +1829,7 @@ class ObjectDetector:
     def _try_load_openvino(
         yolo_cls: Any,
         model_name: str,
-        imgsz: int,
+        imgsz: int | tuple[int, int],
         models_dir: Path | None,
         require_gpu: bool = False,
     ) -> Any | None:
@@ -1260,14 +1852,18 @@ class ObjectDetector:
                 print(f"[detector] OpenVINO device probe failed: {exc}", flush=True)
                 return None
 
+        in_h, in_w = (int(imgsz), int(imgsz)) if isinstance(imgsz, int) else (int(imgsz[0]), int(imgsz[1]))
+        export_imgsz: int | tuple[int, int] = in_h if in_h == in_w else (in_h, in_w)
+        size_tag = f"imgsz{in_h}" if in_h == in_w else f"{in_h}x{in_w}"
+
         cache_root = Path(models_dir) if models_dir is not None else Path("data/models")
         cache_root.mkdir(parents=True, exist_ok=True)
-        ov_dir = cache_root / f"{Path(model_name).stem}_imgsz{imgsz}_openvino_model"
+        ov_dir = cache_root / f"{Path(model_name).stem}_{size_tag}_openvino_model"
 
         try:
             if not (ov_dir.exists() and any(ov_dir.glob("*.xml"))):
                 pt_model = yolo_cls(_resolve_model_source(model_name, models_dir))
-                exported_path = Path(str(pt_model.export(format="openvino", imgsz=imgsz, half=False)))
+                exported_path = Path(str(pt_model.export(format="openvino", imgsz=export_imgsz, half=False)))
                 if exported_path.exists() and exported_path.resolve() != ov_dir.resolve():
                     if ov_dir.exists():
                         shutil.rmtree(ov_dir)
@@ -1292,6 +1888,22 @@ class ObjectDetector:
         new_thresh = round(min(0.90, max(high_conf + 0.05, high_conf)), 3)
         low_track = min(0.12, round(low_conf * 0.9, 3))
 
+        if self._dfine_runner is not None:
+            raw_dfine = self._dfine_runner.track(
+                frame=frame,
+                low_conf=low_conf,
+                high_conf=high_conf,
+                low_track=low_track,
+                new_thresh=new_thresh,
+            )
+            return self.stabilizer.stabilize(
+                raw_tracks=raw_dfine,
+                frame_w=frame_w,
+                frame_h=frame_h,
+                now_ts=ts,
+                conf_threshold=conf,
+            )
+
         predictor = getattr(self.model, "predictor", None)
         for tr in getattr(predictor, "trackers", None) or []:
             tr_args = getattr(tr, "args", None)
@@ -1300,7 +1912,19 @@ class ObjectDetector:
                 tr_args.track_low_thresh = low_track
                 tr_args.new_track_thresh = new_thresh
 
-        run_imgsz = self.imgsz if self.backend in ("onnx", "openvino", "openvino_gpu") else imgsz
+        if self.backend in ("onnx", "openvino", "openvino_gpu"):
+            run_imgsz: int | tuple[int, int] = (
+                self.input_hw[0] if self.input_hw[0] == self.input_hw[1] else self.input_hw
+            )
+        else:
+            if frame_w >= 160 and frame_h >= 160:
+                dyn_hw = compute_optimal_input_hw(frame_w, frame_h, imgsz)
+            else:
+                side = max(32, int(imgsz))
+                dyn_hw = (side, side)
+            self.input_hw = dyn_hw
+            run_imgsz = dyn_hw[0] if dyn_hw[0] == dyn_hw[1] else dyn_hw
+
         results = self.model.track(
             frame,
             persist=True,

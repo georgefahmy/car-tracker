@@ -1146,7 +1146,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.18"
+    assert expected_ver == "1.0.19"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1385,6 +1385,312 @@ def test_source_summary_labels_for_protocols_and_streams(tmp_path: Path) -> None
         assert "source_label" in stats
         assert "stream_protocol" in stats
         assert "stream_quality" in stats
+
+
+def test_stream_matched_input_sizing_and_resolution_hot_reload(tmp_path: Path, monkeypatch) -> None:
+    import app.detector as detector_mod
+    import app.stream as stream_mod
+    import ultralytics
+    from app.config import RuntimeConfig
+    from app.database import Database
+    from app.detector import ObjectDetector, TrackStabilizer, compute_optimal_input_hw
+    from app.stream import StreamWorker
+
+    assert compute_optimal_input_hw(640, 360, 960) == (384, 640)
+    assert compute_optimal_input_hw(3840, 2160, 960) == (544, 960)
+    assert compute_optimal_input_hw(3840, 2160, 1280) == (736, 1280)
+    assert compute_optimal_input_hw(0, 0, 960) == (960, 960)
+
+    export_calls: list[Any] = []
+    loaded_sources: list[str] = []
+
+    class _FakeYOLOExport:
+        def __init__(self, src: str, task: str | None = None) -> None:
+            self.src = src
+            self.task = task
+            self.predictor = None
+            loaded_sources.append(src)
+
+        def export(self, format: str, imgsz: Any, half: bool = False, simplify: bool = False) -> str:
+            export_calls.append((self.src, format, imgsz))
+            out = tmp_path / "exported_tmp.onnx"
+            out.write_bytes(b"fake-onnx")
+            return str(out)
+
+        def add_callback(self, *_args, **_kwargs) -> None:
+            return None
+
+    monkeypatch.setattr(ultralytics, "YOLO", _FakeYOLOExport)
+    monkeypatch.setattr(detector_mod, "_ensure_tracker_yaml", lambda *_a, **_kw: "bytetrack.yaml")
+    monkeypatch.setattr(detector_mod, "_resolve_model_source", lambda m, *_a: m)
+
+    models_dir = tmp_path / "models"
+    det_rect = ObjectDetector(
+        model_name="yolo26n.pt",
+        imgsz=960,
+        inference_backend="onnx",
+        models_dir=models_dir,
+        input_hw=(384, 640),
+    )
+    assert det_rect.backend == "onnx"
+    assert det_rect.input_hw == (384, 640)
+    assert det_rect.input_resolution_label == "640x384"
+    assert export_calls == [("yolo26n.pt", "onnx", (384, 640))]
+    assert (models_dir / "yolo26n_384x640.onnx").exists()
+    assert str(models_dir / "yolo26n_384x640.onnx") in loaded_sources
+
+    # Verify StreamWorker reloads static ONNX detector when stream resolution changes
+    init_calls: list[tuple[str, int, str, tuple[int, int] | None]] = []
+
+    class _StubResDetector:
+        def __init__(
+            self,
+            model_name: str,
+            imgsz: int,
+            inference_backend: str,
+            models_dir=None,
+            input_hw: tuple[int, int] | None = None,
+        ) -> None:
+            init_calls.append((model_name, imgsz, inference_backend, input_hw))
+            self.model_name = model_name
+            self.imgsz = imgsz
+            self.requested_backend = inference_backend
+            self.backend = "onnx"
+            self.fallback_note = ""
+            self.input_hw = input_hw or (imgsz, imgsz)
+            self.stabilizer = TrackStabilizer()
+
+        @property
+        def input_resolution_label(self) -> str:
+            return f"{self.input_hw[1]}x{self.input_hw[0]}"
+
+        def reset(self) -> None:
+            self.stabilizer.reset()
+
+    monkeypatch.setattr(stream_mod, "ObjectDetector", _StubResDetector)
+    settings = Settings(data_dir=str(tmp_path / "res_worker"))
+    worker = StreamWorker(settings=settings, db=Database(settings.db_path))
+    worker.update_config(
+        RuntimeConfig(yolo_model="yolo26n.pt", inference_backend="onnx", yolo_imgsz=960)
+    )
+
+    d_sub = worker._ensure_detector(frame_wh=(640, 360))
+    assert d_sub is not None
+    assert init_calls[-1] == ("yolo26n.pt", 960, "onnx", (384, 640))
+    assert worker.get_live_state()["input_resolution"] == "640x384"
+
+    # Switching to 4K main stream triggers automatic rectangular ONNX size reload (544x960)
+    d_main = worker._ensure_detector(frame_wh=(3840, 2160))
+    assert d_main is not d_sub
+    assert init_calls[-1] == ("yolo26n.pt", 960, "onnx", (544, 960))
+    assert worker.get_live_state()["input_resolution"] == "960x544"
+
+    # D-FINE stays fixed at (640, 640) regardless of stream resolution
+    worker.update_config(
+        RuntimeConfig(yolo_model="dfine_n.onnx", inference_backend="onnx", yolo_imgsz=960)
+    )
+    d_dfine = worker._ensure_detector(frame_wh=(640, 360))
+    assert d_dfine is not None
+    assert init_calls[-1] == ("dfine_n.onnx", 960, "onnx", (640, 640))
+    assert worker.get_live_state()["input_resolution"] == "640x640"
+
+
+def test_dfine_postprocess_and_bytetrack_integration(tmp_path: Path, monkeypatch) -> None:
+    import types
+    import onnxruntime as ort
+    import app.detector as detector_mod
+    from app.detector import ObjectDetector, _DFineRunner, is_dfine_model
+
+    assert is_dfine_model("dfine_n.onnx") is True
+    assert is_dfine_model("dfine_s.onnx") is True
+    assert is_dfine_model("yolo26n.pt") is False
+
+    # 1. Verify logit decoding: sigmoid + 80-class argmax rejects non-target objects with secondary vehicle logit
+    logits = np.full((1, 4, 80), -6.0, dtype=np.float32)
+    logits[0, 0, 2] = 2.5   # car (~0.924) -> kept
+    logits[0, 1, 0] = 1.8   # person (~0.858) -> kept
+    logits[0, 2, 56] = 3.0  # chair (~0.953) primary, even with car secondary (+0.5) -> rejected
+    logits[0, 2, 2] = 0.5
+    logits[0, 3, 2] = -3.0  # below low_conf -> rejected
+
+    pred_boxes = np.array(
+        [
+            [
+                [0.50, 0.50, 0.20, 0.20],  # car -> [256, 144, 384, 216] on 640x360
+                [0.25, 0.50, 0.05, 0.10],  # person -> [144, 162, 176, 198] on 640x360
+                [0.80, 0.80, 0.10, 0.10],
+                [0.10, 0.10, 0.10, 0.10],
+            ]
+        ],
+        dtype=np.float32,
+    )
+    decoded = _DFineRunner._decode_dfine_outputs([logits, pred_boxes], frame_w=640, frame_h=360, low_conf=0.15)
+    assert decoded.shape == (2, 6)
+    assert [int(decoded[0, 5]), int(decoded[1, 5])] == [2, 0]
+    assert np.allclose(decoded[0, :4], [256.0, 144.0, 384.0, 216.0], atol=1e-2)
+    assert np.allclose(decoded[1, :4], [144.0, 162.0, 176.0, 198.0], atol=1e-2)
+
+    # 2. End-to-end ObjectDetector + _DFineRunner + BYTETracker + TrackStabilizer using offline fake ORT session
+    dummy_onnx = tmp_path / "dfine_n.onnx"
+    dummy_onnx.write_bytes(b"dummy")
+    monkeypatch.setattr(
+        detector_mod,
+        "_ensure_dfine_onnx",
+        lambda *_a, **_kw: (dummy_onnx, {"size": {"height": 640, "width": 640}, "do_rescale": True, "do_normalize": False}),
+    )
+
+    feed_inputs: list[tuple[str, tuple[int, ...], float]] = []
+
+    class _FakeORTSession:
+        def __init__(self, path: str, sess_options=None, providers=None) -> None:
+            self.path = path
+
+        def get_inputs(self):
+            return [types.SimpleNamespace(name="pixel_values", shape=[1, 3, 640, 640], type="tensor(float)")]
+
+        def run(self, _out_names, feed: dict[str, np.ndarray]):
+            arr = feed["pixel_values"]
+            feed_inputs.append(("pixel_values", tuple(arr.shape), float(arr.max())))
+            return [logits[:, :1, :], pred_boxes[:, :1, :]]
+
+    monkeypatch.setattr(ort, "InferenceSession", _FakeORTSession)
+
+    det = ObjectDetector(
+        model_name="dfine_n.onnx",
+        imgsz=960,
+        inference_backend="auto",
+        models_dir=tmp_path / "models",
+    )
+    assert det.backend == "onnx"
+    assert det.input_hw == (640, 640)
+    assert det.input_resolution_label == "640x640"
+
+    frame = np.full((360, 640, 3), 255, dtype=np.uint8)
+    t_ids: list[int] = []
+    for i in range(3):
+        tracks = det.detect_and_track(frame, imgsz=960, conf=0.35, now_ts=100.0 + i)
+        assert len(tracks) == 1
+        assert tracks[0].class_name == "car"
+        t_ids.append(tracks[0].track_id)
+
+    assert len(set(t_ids)) == 1
+    assert feed_inputs[0][1] == (1, 3, 640, 640)
+    assert abs(feed_inputs[0][2] - 1.0) <= 1e-3
+    det.reset()
+
+
+def test_motion_gate_throttles_static_and_preserves_red_zone_dwell(tmp_path: Path, monkeypatch) -> None:
+    import app.stream as stream_mod
+    from app.config import RuntimeConfig
+    from app.database import Database, ZoneModel
+    from app.detector import MotionGate, TrackStabilizer
+    from app.stream import StreamWorker
+
+    base = np.full((360, 640, 3), 60, dtype=np.uint8)
+    excl_zone = ZoneModel(
+        id="ex1",
+        name="Tree Sway",
+        points=[[0.0, 0.0], [0.4, 0.0], [0.4, 0.4], [0.0, 0.4]],
+        enabled=True,
+        zone_type="exclusion",
+    )
+    red_zone = ZoneModel(
+        id="rz1",
+        name="Curb Red Zone",
+        points=[[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]],
+        enabled=True,
+        zone_type="red_zone",
+    )
+
+    gate = MotionGate(cooldown_seconds=2.5)
+    # First frame always infers (active)
+    assert gate.should_infer(base, zones=[excl_zone, red_zone], now_mono=0.0, idle_interval=2.0) == (True, "active")
+    # During cooldown window -> active
+    assert gate.should_infer(base, zones=[excl_zone, red_zone], now_mono=1.5, idle_interval=2.0) == (True, "active")
+    # Static frame after cooldown before idle_interval -> gated (False, "idle")
+    assert gate.should_infer(base, zones=[excl_zone, red_zone], now_mono=2.6, idle_interval=2.0) == (False, "idle")
+    # Periodic idle heartbeat at t=3.6 (>= 2.0s since last_infer_mono=1.5)
+    assert gate.should_infer(base, zones=[excl_zone, red_zone], now_mono=3.6, idle_interval=2.0) == (True, "idle")
+    assert gate.should_infer(base, zones=[excl_zone, red_zone], now_mono=4.1, idle_interval=2.0) == (False, "idle")
+
+    # Motion exclusively inside exclusion zone must stay idle
+    excl_motion = base.copy()
+    excl_motion[20:100, 20:100] = 240
+    assert gate.should_infer(excl_motion, zones=[excl_zone, red_zone], now_mono=4.5, idle_interval=2.0) == (False, "idle")
+
+    # Motion in active area wakes immediately
+    street_motion = base.copy()
+    street_motion[180:300, 350:550] = 240
+    assert gate.should_infer(street_motion, zones=[excl_zone, red_zone], now_mono=4.8, idle_interval=2.0) == (True, "active")
+
+    # Integration with StreamWorker._process_single_frame: red-zone dwell + snapshot refresh continue while gated
+    settings = Settings(data_dir=str(tmp_path / "mg_data"))
+    db = Database(settings.db_path)
+    db.replace_zones([red_zone])
+    worker = StreamWorker(settings=settings, db=db)
+    worker.update_config(
+        RuntimeConfig(
+            motion_gate_enabled=True,
+            motion_idle_interval=5.0,
+            dwell_seconds=30.0,
+            movement_threshold=0.015,
+            min_track_frames=1,
+            ha_enabled=False,
+        )
+    )
+    worker.motion_gate = MotionGate(cooldown_seconds=1.0)
+
+    infer_calls = 0
+    fake_now = {"wall": 1000.0, "mono": 100.0}
+    monkeypatch.setattr(stream_mod.time, "time", lambda: fake_now["wall"])
+    monkeypatch.setattr(stream_mod.time, "monotonic", lambda: fake_now["mono"])
+
+    class _CountingDetector:
+        model_name = "yolo26n.pt"
+        imgsz = 640
+        requested_backend = "onnx"
+        backend = "onnx"
+        fallback_note = ""
+        input_resolution_label = "640x384"
+        stabilizer = TrackStabilizer()
+
+        def detect_and_track(self, _frame, imgsz=640, conf=0.35, now_ts=None):
+            nonlocal infer_calls
+            infer_calls += 1
+            return [_make_car(1, cx=0.5, y2=0.5, w=640, h=360)]
+
+    det = _CountingDetector()
+    cfg = worker.config
+
+    # t=1000.0 (first frame -> infers, car enters red zone)
+    worker._process_single_frame(base, det, cfg, dt=0.5, publish_preview=False)
+    assert infer_calls == 1
+
+    # t=1030.0 (after idle_interval=5.0 -> runs heartbeat inference, crosses 30s -> triggers violation)
+    fake_now["wall"] = 1030.0
+    fake_now["mono"] = 130.0
+    worker._process_single_frame(base, det, cfg, dt=0.5, publish_preview=False)
+    assert infer_calls == 2
+    viols = db.get_violations(limit=10)
+    assert len(viols) == 1
+    assert viols[0].dwell_seconds == 30.0
+    snap_path = worker.snapshots_dir / viols[0].snapshot_filename
+    bytes_30s = snap_path.read_bytes()
+
+    # t=1036.0 (only 6s later, before cooldown expired? No: at t=130 heartbeat didn't set motion_until! Wait: set idle_interval=10s for clean skip)
+    cfg_long_idle = cfg.model_copy(update={"motion_idle_interval": 10.0})
+    fake_now["wall"] = 1036.0
+    fake_now["mono"] = 136.0
+    worker._process_single_frame(base, det, cfg_long_idle, dt=0.5, publish_preview=False)
+
+    # Inference skipped on static scene, yet dwell updated to 36s in live state, SQLite, and snapshot!
+    assert infer_calls == 2
+    live = worker.get_live_state()
+    assert live["motion_state"] == "idle"
+    assert live["active_dwells"][0]["dwell_seconds"] == 36.0
+    assert db.get_violations(limit=10)[0].dwell_seconds == 36.0
+    assert snap_path.read_bytes() != bytes_30s
+
 
 
 

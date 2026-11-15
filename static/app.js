@@ -794,8 +794,17 @@ function updateCvRuntimeHint() {
   const activeBackend = latestLiveStats.inference_backend
     ? String(latestLiveStats.inference_backend).toUpperCase()
     : "—";
-  const activeImgsz = latestLiveStats.yolo_imgsz ? ` @ ${latestLiveStats.yolo_imgsz}px` : "";
-  const parts = [`Active: ${activeModel} (${activeBackend}${activeImgsz})`];
+  const activeSize = latestLiveStats.input_resolution
+    ? ` @ ${latestLiveStats.input_resolution}`
+    : (latestLiveStats.yolo_imgsz ? ` @ ${latestLiveStats.yolo_imgsz}px` : "");
+  const parts = [`Active: ${activeModel} (${activeBackend}${activeSize})`];
+  if (latestLiveStats.motion_gate_enabled) {
+    parts.push(
+      latestLiveStats.motion_state === "idle"
+        ? "Motion Gate: Idle (0.5 FPS)"
+        : "Motion Gate: Active"
+    );
+  }
   if (latestLiveStats.backend_fallback) {
     parts.push(`⚠️ ${latestLiveStats.backend_fallback}`);
   }
@@ -855,8 +864,11 @@ async function refreshStats() {
 
     const modelStr = data.yolo_model ? ` • ${data.yolo_model}` : "";
     const backendLabel = data.inference_backend ? String(data.inference_backend).toUpperCase() : "";
-    const imgszLabel = data.yolo_imgsz ? `@${data.yolo_imgsz}` : "";
-    const backendStr = backendLabel ? ` • ${backendLabel}${imgszLabel}` : "";
+    const sizeLabel = data.input_resolution
+      ? `@${data.input_resolution}`
+      : (data.yolo_imgsz ? `@${data.yolo_imgsz}` : "");
+    const motionSuffix = data.motion_state === "idle" ? " (Idle)" : "";
+    const backendStr = backendLabel ? ` • ${backendLabel}${sizeLabel}${motionSuffix}` : "";
     let modelNoteStr = "";
     if (data.model_loading && data.model_loading_target) {
       modelNoteStr = ` • LOADING ${data.model_loading_target}`;
@@ -1333,6 +1345,7 @@ function formToPayload() {
     target_fps: Number(fd.get("target_fps")),
     yolo_imgsz: Number(fd.get("yolo_imgsz")),
     confidence_threshold: Number(fd.get("confidence_threshold")),
+    motion_gate_enabled: Boolean(settingsForm.elements["motion_gate_enabled"]?.checked),
     preview_max_width: Number(fd.get("preview_max_width")),
     dwell_seconds: Number(fd.get("dwell_seconds")),
     movement_threshold: Number(fd.get("movement_threshold")),

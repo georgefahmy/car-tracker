@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.19
+- **YOLO26 & D-FINE Model Options**: Added `yolo26n.pt`, `yolo26s.pt` (end-to-end NMS-free YOLO via Ultralytics 8.4), `dfine_n.onnx`, and `dfine_s.onnx` (HuggingFace `onnx-community` D-FINE transformers with standalone ByteTrack + `TrackStabilizer`) in Settings and `ObjectDetector`, supporting live hot-reloading and ONNX Runtime / OpenVINO execution.
+- **Stream-Matched Rectangular Input Sizing**: Automatically computes `(in_h, in_w)` matching the camera's stream aspect ratio without upscaling low-resolution sub-streams (e.g. `640x360` sub-stream runs at `640x384` instead of `960x960`), caches rectangular ONNX/OpenVINO exports by `(in_h, in_w)`, and surfaces the active `WxH` inference geometry in the UI.
+- **Smart Motion-Gated Inference**: Adds a lightweight OpenCV `MotionGate` (excluding configured Exclusion Masks) that runs neural-network inference at full `target_fps` on motion and throttles static scenes down to a `0.5 FPS` (`2.0s`) verification heartbeat while keeping active Red-Zone dwell timers and snapshots ticking continuously.
+
 ## 1.0.18
 - **Compact Header Stream Label**: Replaced the full masked stream URL in `#streamInfo` with a concise protocol and stream-quality label (`RTMP • Sub Stream`, `RTSP • Main Stream`, `HTTP Snap`, or `File (<filename>)`) backed by `StreamWorker.get_source_summary()` and structured `stream_protocol` / `stream_quality` / `source_label` fields in `GET /api/stats` (while keeping `source` for API compatibility).
 

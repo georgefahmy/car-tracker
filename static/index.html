@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Car Tracker & Red-Zone Monitor</title>
-  <link rel="stylesheet" href="static/styles.css?v=16" />
+  <link rel="stylesheet" href="static/styles.css?v=17" />
 </head>
 <body>
   <header class="topbar">
@@ -209,12 +209,16 @@
           <h3>Computer Vision & Red-Zone Rules</h3>
           <p class="small muted runtime-hint" id="cvRuntimeHint"></p>
           <div class="form-grid">
-            <label>YOLO Model
+            <label>Detection Model
               <select name="yolo_model">
                 <option value="yolov8n.pt">YOLOv8n (Fast baseline)</option>
-                <option value="yolo11n.pt">YOLO11n (Faster + better accuracy)</option>
+                <option value="yolo11n.pt">YOLO11n (Fast + accurate)</option>
+                <option value="yolo26n.pt">YOLO26n (NMS-free CPU optimized)</option>
+                <option value="yolo26s.pt">YOLO26s (NMS-free high accuracy)</option>
                 <option value="yolo11s.pt">YOLO11s (High accuracy — x86 ONNX/iGPU)</option>
                 <option value="yolov8s.pt">YOLOv8s (High accuracy)</option>
+                <option value="dfine_n.onnx">D-FINE Nano (Transformer NMS-free — ONNX)</option>
+                <option value="dfine_s.onnx">D-FINE Small (Transformer high accuracy — ONNX)</option>
               </select>
             </label>
             <label>Inference Backend
@@ -229,11 +233,11 @@
             <label>Processing FPS (1–15)
               <input type="number" name="target_fps" step="0.5" min="0.5" max="30" required />
             </label>
-            <label>YOLO Inference Size
+            <label>Max Inference Size (Auto Aspect)
               <select name="yolo_imgsz">
-                <option value="640">640 (Fastest)</option>
-                <option value="960">960 (Balanced — 4K friendly)</option>
-                <option value="1280">1280 (Distant curbs / Small cars)</option>
+                <option value="640">640 (Fastest — auto stream aspect)</option>
+                <option value="960">960 (Balanced — auto stream aspect)</option>
+                <option value="1280">1280 (Distant curbs / 4K detail)</option>
               </select>
             </label>
             <label>Confidence Threshold
@@ -260,6 +264,10 @@
               <input type="number" name="speed_limit_mph" step="1" min="1" max="150" required />
             </label>
           </div>
+          <label class="checkbox-row">
+            <input type="checkbox" name="motion_gate_enabled" />
+            <span>Smart Motion Gate — throttle neural-net inference on static scenes (~0.5 FPS idle check, instant full FPS on motion)</span>
+          </label>
           <label class="checkbox-row">
             <input type="checkbox" name="speed_capture_enabled" />
             <span>Capture high-res snapshot (and webhook alert) when a vehicle exceeds the Speed Limit</span>
@@ -372,6 +380,6 @@
     </div>
   </div>
 
-  <script src="static/app.js?v=16"></script>
+  <script src="static/app.js?v=17"></script>
 </body>
 </html>

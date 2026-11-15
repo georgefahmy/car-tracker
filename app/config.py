@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     yolo_imgsz: int = 960
     confidence_threshold: float = 0.35
     target_fps: float = 3.0
+    motion_gate_enabled: bool = True
+    motion_idle_interval: float = 2.0
     preview_max_width: int = 1280
 
     dwell_seconds: float = 15.0
@@ -87,6 +89,8 @@ class RuntimeConfig(BaseModel):
     yolo_imgsz: int = Field(default=960, ge=320, le=1920)
     confidence_threshold: float = Field(default=0.35, ge=0.05, le=0.95)
     target_fps: float = Field(default=3.0, ge=0.5, le=30.0)
+    motion_gate_enabled: bool = True
+    motion_idle_interval: float = Field(default=2.0, ge=0.5, le=10.0)
     preview_max_width: int = Field(default=1280, ge=320, le=3840)
 
     dwell_seconds: float = Field(default=15.0, ge=1.0, le=3600.0)
@@ -125,6 +129,8 @@ class RuntimeConfig(BaseModel):
             yolo_imgsz=s.yolo_imgsz,
             confidence_threshold=s.confidence_threshold,
             target_fps=s.target_fps,
+            motion_gate_enabled=s.motion_gate_enabled,
+            motion_idle_interval=s.motion_idle_interval,
             preview_max_width=s.preview_max_width,
             dwell_seconds=s.dwell_seconds,
             movement_threshold=s.movement_threshold,

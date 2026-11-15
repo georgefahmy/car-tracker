@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import os
 import threading
 import time
@@ -30,11 +31,14 @@ from app.detector import (
     EmergencyVehicleClassifier,
     HotspotTracker,
     LineCrossingMonitor,
+    MotionGate,
     ObjectDetector,
     RedZoneMonitor,
     TrackedDetection,
     annotate_frame,
+    compute_optimal_input_hw,
     filter_excluded_tracks,
+    is_dfine_model,
 )
 from app.ha_integration import HomeAssistantPublisher
 
@@ -177,8 +181,8 @@ class StreamWorker:
         self._ha_thread: threading.Thread | None = None
 
         self._detector: ObjectDetector | None = None
-        self._detector_key: tuple[str, int, str] | None = None
-        self._failed_detector_key: tuple[str, int, str] | None = None
+        self._detector_key: tuple[str, Any, str] | None = None
+        self._failed_detector_key: tuple[str, Any, str] | None = None
         self._model_loading: bool = False
         self._model_loading_target: str = ""
         self._model_error: str = ""
@@ -186,6 +190,9 @@ class StreamWorker:
         self.line_monitor = LineCrossingMonitor()
         self.hotspot = HotspotTracker()
         self.emergency_classifier = EmergencyVehicleClassifier()
+        self.motion_gate = MotionGate()
+        self._motion_state: str = "off"
+        self._has_inferred_frame: bool = False
         self.alpr = LicensePlateReader()
         self.ha_publisher = HomeAssistantPublisher(db=db)
 
@@ -284,32 +291,54 @@ class StreamWorker:
             self._ha_thread.join(timeout=2.0)
 
     @staticmethod
-    def _desired_detector_key(cfg: RuntimeConfig) -> tuple[str, int, str]:
+    def _desired_detector_key(
+        cfg: RuntimeConfig, frame_wh: tuple[int, int] | None = None
+    ) -> tuple[str, tuple[int, int], str]:
         backend = (cfg.inference_backend or "auto").strip().lower()
-        imgsz_key = cfg.yolo_imgsz if backend in ("onnx", "openvino", "openvino_gpu") else 0
-        return (cfg.yolo_model, imgsz_key, backend)
+        if is_dfine_model(cfg.yolo_model):
+            hw_key = (640, 640)
+        elif backend in ("onnx", "openvino", "openvino_gpu"):
+            w, h = frame_wh if frame_wh is not None else (0, 0)
+            hw_key = compute_optimal_input_hw(w, h, cfg.yolo_imgsz)
+        else:
+            hw_key = (0, 0)
+        return (cfg.yolo_model, hw_key, backend)
+
+    @staticmethod
+    def _format_detector_target(
+        cfg: RuntimeConfig, desired_key: tuple[str, tuple[int, int], str]
+    ) -> str:
+        hw = desired_key[1]
+        size_str = f"{hw[1]}x{hw[0]}" if hw != (0, 0) else f"{cfg.yolo_imgsz}px"
+        return f"{cfg.yolo_model} ({desired_key[2].upper()} @ {size_str})"
 
     def update_config(self, new_cfg: RuntimeConfig) -> None:
         old_source = self.get_source_url(self.config)
         old_mode = self.config.stream_mode
-        desired_key = self._desired_detector_key(new_cfg)
         worker_alive = self._thread is not None and self._thread.is_alive()
         with self._lock:
+            eff_wh = self._resolution
+            desired_key = self._desired_detector_key(new_cfg, eff_wh)
             self.config = new_cfg
             self.db.save_config(new_cfg.model_dump())
             self._failed_detector_key = None
             self._model_error = ""
             if worker_alive and (self._detector is None or desired_key != self._detector_key):
                 self._model_loading = True
-                self._model_loading_target = f"{new_cfg.yolo_model} ({desired_key[2].upper()} @ {new_cfg.yolo_imgsz}px)"
+                self._model_loading_target = self._format_detector_target(new_cfg, desired_key)
         self.emergency_classifier.reset()
+        self.motion_gate.reset()
         self._snap_client = None
         self._config_wake_event.set()
         self._ha_wake_event.set()
         new_source = self.get_source_url(new_cfg)
         if old_source != new_source or old_mode != new_cfg.stream_mode:
-            if old_source != new_source and self._detector is not None:
-                self._detector.reset()
+            if old_source != new_source:
+                if self._detector is not None:
+                    self._detector.reset()
+                self._has_inferred_frame = False
+                with self._lock:
+                    self._resolution = (0, 0)
             self._reconnect_event.set()
 
     def toggle_heatmap(self, enabled: bool | None = None) -> bool:
@@ -467,17 +496,40 @@ class StreamWorker:
                     if self._detector is not None
                     else self.config.yolo_imgsz
                 ),
+                "input_resolution": (
+                    getattr(self._detector, "input_resolution_label", "")
+                    if self._detector is not None
+                    else ""
+                ),
+                "motion_gate_enabled": self.config.motion_gate_enabled,
+                "motion_state": self._motion_state if self.config.motion_gate_enabled else "off",
                 "model_loading": self._model_loading,
                 "model_loading_target": self._model_loading_target,
                 "model_error": self._model_error,
             }
 
-    def _ensure_detector(self) -> ObjectDetector | None:
+    def _ensure_detector(self, frame_wh: tuple[int, int] | None = None) -> ObjectDetector | None:
         cfg = self.config
-        desired_key = self._desired_detector_key(cfg)
+        with self._lock:
+            eff_wh = (
+                (int(frame_wh[0]), int(frame_wh[1]))
+                if (frame_wh is not None and frame_wh[0] > 0 and frame_wh[1] > 0)
+                else self._resolution
+            )
+        desired_key = self._desired_detector_key(cfg, eff_wh)
         if self._detector is not None and self._detector_key == desired_key:
-            if getattr(self._detector, "backend", "") not in ("onnx", "openvino", "openvino_gpu"):
+            if not is_dfine_model(cfg.yolo_model) and getattr(self._detector, "backend", "") not in (
+                "onnx",
+                "openvino",
+                "openvino_gpu",
+            ):
                 self._detector.imgsz = cfg.yolo_imgsz
+                if eff_wh[0] > 0 and eff_wh[1] > 0:
+                    self._detector.input_hw = compute_optimal_input_hw(
+                        eff_wh[0], eff_wh[1], cfg.yolo_imgsz
+                    )
+                else:
+                    self._detector.input_hw = (cfg.yolo_imgsz, cfg.yolo_imgsz)
             with self._lock:
                 self._model_loading = False
                 self._model_loading_target = ""
@@ -494,7 +546,7 @@ class StreamWorker:
             prev_status = self._stream_status
             prev_error = self._last_error
             self._model_loading = True
-            self._model_loading_target = f"{cfg.yolo_model} ({desired_key[2].upper()} @ {cfg.yolo_imgsz}px)"
+            self._model_loading_target = self._format_detector_target(cfg, desired_key)
             self._model_error = ""
             if prev_status != "loading_model":
                 self._stream_status = "loading_model"
@@ -502,18 +554,25 @@ class StreamWorker:
             if prev_detector is None:
                 self._latest_jpeg = self._render_placeholder(f"Loading {cfg.yolo_model}...")
 
+        det_kwargs: dict[str, Any] = {
+            "model_name": cfg.yolo_model,
+            "imgsz": cfg.yolo_imgsz,
+            "inference_backend": cfg.inference_backend,
+            "models_dir": self.settings.data_path / "models",
+        }
         try:
-            new_detector = ObjectDetector(
-                model_name=cfg.yolo_model,
-                imgsz=cfg.yolo_imgsz,
-                inference_backend=cfg.inference_backend,
-                models_dir=self.settings.data_path / "models",
-            )
+            if desired_key[1] != (0, 0) and "input_hw" in inspect.signature(ObjectDetector).parameters:
+                det_kwargs["input_hw"] = desired_key[1]
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            new_detector = ObjectDetector(**det_kwargs)
         except Exception as exc:
             with self._lock:
                 self._failed_detector_key = desired_key
                 self._model_error = f"Failed to load {cfg.yolo_model}: {exc}"
-                if self._desired_detector_key(self.config) == desired_key:
+                if self._desired_detector_key(self.config, eff_wh) == desired_key:
                     self._model_loading = False
                     self._model_loading_target = ""
                 if prev_detector is not None:
@@ -528,13 +587,22 @@ class StreamWorker:
         if prev_detector is not None:
             prev_detector.stabilizer.clear_raw_bindings()
             new_detector.stabilizer = prev_detector.stabilizer
+        if (
+            not is_dfine_model(cfg.yolo_model)
+            and eff_wh[0] > 0
+            and eff_wh[1] > 0
+            and desired_key[1] == (0, 0)
+        ):
+            new_detector.input_hw = compute_optimal_input_hw(eff_wh[0], eff_wh[1], cfg.yolo_imgsz)
 
+        self.motion_gate.reset()
+        self._has_inferred_frame = False
         with self._lock:
             self._detector = new_detector
             self._detector_key = desired_key
             self._failed_detector_key = None
             self._model_error = ""
-            if self._desired_detector_key(self.config) == desired_key:
+            if self._desired_detector_key(self.config, eff_wh) == desired_key:
                 self._model_loading = False
                 self._model_loading_target = ""
             if prev_status in ("connected", "connected_http"):
@@ -693,6 +761,189 @@ class StreamWorker:
                 self._latest_jpeg = jpg
                 self._last_preview_ts = now
 
+    def _handle_step_events(
+        self,
+        frame: np.ndarray,
+        w: int,
+        h: int,
+        tracks: list[TrackedDetection],
+        step: Any,
+        zones: list[Any],
+        counting_lines: list[Any],
+        cfg: RuntimeConfig,
+        speeding_events: list[dict[str, Any]],
+    ) -> None:
+        if step.new_violations or speeding_events:
+            snap_base = self._get_highres_violation_frame(frame, cfg)
+            sh, sw = snap_base.shape[:2]
+            snap_tracks = self._scale_tracks(tracks, w, h, sw, sh)
+            track_bbox_map = {t.track_id: t.bbox_xyxy for t in snap_tracks}
+            plates_by_tid: dict[int, tuple[str, float]] = {}
+
+            if cfg.alpr_enabled:
+                event_tids = {v.track_id for v in step.new_violations} | {
+                    int(sp["track_id"]) for sp in speeding_events
+                }
+                for tid in event_tids:
+                    plate, plate_conf = self.alpr.read_plate(snap_base, track_bbox_map.get(tid))
+                    if plate:
+                        plates_by_tid[tid] = (plate, plate_conf)
+                        step.track_statuses.setdefault(tid, {})["license_plate"] = plate
+                        with self._lock:
+                            self._last_plate = {
+                                "plate": plate,
+                                "confidence": plate_conf,
+                                "updated_at": datetime.now(timezone.utc).isoformat(),
+                            }
+
+            clean_jpeg = b""
+            if step.new_violations:
+                clean_source = (
+                    self.hotspot.render_overlay(snap_base, alpha=0.45)
+                    if cfg.heatmap_enabled and self.hotspot is not None
+                    else snap_base
+                )
+                ok_clean, clean_buf = cv2.imencode(
+                    ".jpg", clean_source, [cv2.IMWRITE_JPEG_QUALITY, 94]
+                )
+                if ok_clean:
+                    clean_jpeg = clean_buf.tobytes()
+
+            annotated_full = annotate_frame(
+                frame=snap_base,
+                tracks=snap_tracks,
+                track_statuses=step.track_statuses,
+                zones=zones,
+                dwell_threshold=cfg.dwell_seconds,
+                hotspot=self.hotspot,
+                show_heatmap=cfg.heatmap_enabled,
+                counting_lines=counting_lines,
+                annotation_scale=cfg.annotation_scale,
+            )
+            for v in step.new_violations:
+                ts_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                fname = f"violation_{ts_slug}_t{v.track_id}.jpg"
+                snap_path = self.snapshots_dir / fname
+                self._write_jpeg_atomic(snap_path, annotated_full, quality=92)
+                plate_text = plates_by_tid.get(v.track_id, ("", 0.0))[0]
+                rec = self.db.add_violation(
+                    track_id=v.track_id,
+                    zone_id=v.zone_id,
+                    zone_name=v.zone_name,
+                    vehicle_class=v.vehicle_class,
+                    started_at=v.started_at,
+                    flagged_at=v.flagged_at,
+                    dwell_seconds=v.dwell_seconds,
+                    snapshot_filename=fname,
+                    license_plate=plate_text,
+                )
+                if clean_jpeg:
+                    now_mono = time.monotonic()
+                    snap_entry: dict[str, Any] = {
+                        "violation_id": rec.id,
+                        "orig_track_id": int(v.track_id),
+                        "zone_id": v.zone_id,
+                        "snap_path": snap_path,
+                        "clean_jpeg": clean_jpeg,
+                        "tracks": copy.deepcopy(snap_tracks),
+                        "track_statuses": copy.deepcopy(step.track_statuses),
+                        "zones": copy.deepcopy(zones),
+                        "counting_lines": copy.deepcopy(counting_lines),
+                        "dwell_threshold": float(cfg.dwell_seconds),
+                        "annotation_scale": float(cfg.annotation_scale),
+                        "created_ts": now_mono,
+                        "last_update_ts": now_mono,
+                        "last_rendered_dwell": round(float(v.dwell_seconds), 1),
+                    }
+                    with self._lock:
+                        expired_keys = [
+                            k
+                            for k, val in self._active_violation_snaps.items()
+                            if (now_mono - float(val["created_ts"])) > 14400.0
+                        ]
+                        for ek in expired_keys:
+                            self._active_violation_snaps.pop(ek, None)
+                        while len(self._active_violation_snaps) >= 16:
+                            oldest_key = min(
+                                self._active_violation_snaps,
+                                key=lambda k: float(self._active_violation_snaps[k]["created_ts"]),
+                            )
+                            self._active_violation_snaps.pop(oldest_key, None)
+                        self._active_violation_snaps[(int(v.track_id), v.zone_id)] = snap_entry
+                with self._lock:
+                    self._last_violation = rec.model_dump()
+                if cfg.webhook_url.strip():
+                    self._dispatch_webhook(cfg.webhook_url.strip(), rec.model_dump(), snap_path)
+                if cfg.ha_enabled:
+                    threading.Thread(
+                        target=self.ha_publisher.fire_event,
+                        args=("car_tracker_violation", rec.model_dump(), cfg.ha_url, cfg.ha_token),
+                        daemon=True,
+                    ).start()
+
+            for sp in speeding_events:
+                now_iso = datetime.now(timezone.utc).isoformat()
+                ts_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                fname = f"speeding_{ts_slug}_t{sp['track_id']}.jpg"
+                snap_path = self.snapshots_dir / fname
+                self._write_jpeg_atomic(snap_path, annotated_full, quality=92)
+                plate_text = plates_by_tid.get(int(sp["track_id"]), ("", 0.0))[0]
+                rec = self.db.add_violation(
+                    track_id=sp["track_id"],
+                    zone_id="speeding",
+                    zone_name=f"Speeding {sp['speed_mph']:.1f} mph (limit {cfg.speed_limit_mph:g} mph)",
+                    vehicle_class=sp["vehicle_class"],
+                    started_at=now_iso,
+                    flagged_at=now_iso,
+                    dwell_seconds=float(sp["speed_mph"]),
+                    snapshot_filename=fname,
+                    license_plate=plate_text,
+                )
+                with self._lock:
+                    self._last_violation = rec.model_dump()
+                if cfg.webhook_url.strip():
+                    self._dispatch_webhook(cfg.webhook_url.strip(), rec.model_dump(), snap_path)
+                if cfg.ha_enabled:
+                    event_payload = {**rec.model_dump(), "speed_mph": float(sp["speed_mph"])}
+                    threading.Thread(
+                        target=self.ha_publisher.fire_event,
+                        args=("car_tracker_speeding", event_payload, cfg.ha_url, cfg.ha_token),
+                        daemon=True,
+                    ).start()
+
+            self._ha_wake_event.set()
+
+        if step.dwell_updates:
+            now_mono = time.monotonic()
+            any_completed = False
+            for upd in step.dwell_updates:
+                with self._lock:
+                    snap_entry = self._active_violation_snaps.get(upd.violation_key)
+                if snap_entry is None:
+                    continue
+                rounded_dwell = round(float(upd.dwell_seconds), 1)
+                should_refresh = upd.completed or (
+                    (now_mono - float(snap_entry["last_update_ts"])) >= 5.0
+                    and int(round(rounded_dwell)) != int(round(float(snap_entry["last_rendered_dwell"])))
+                )
+                if should_refresh:
+                    self.db.update_violation_dwell(snap_entry["violation_id"], rounded_dwell)
+                    self._refresh_violation_snapshot(snap_entry, rounded_dwell)
+                    snap_entry["last_update_ts"] = now_mono
+                    snap_entry["last_rendered_dwell"] = rounded_dwell
+                    with self._lock:
+                        if (
+                            self._last_violation is not None
+                            and self._last_violation.get("id") == snap_entry["violation_id"]
+                        ):
+                            self._last_violation["dwell_seconds"] = rounded_dwell
+                if upd.completed:
+                    with self._lock:
+                        self._active_violation_snaps.pop(upd.violation_key, None)
+                    any_completed = True
+            if any_completed:
+                self._ha_wake_event.set()
+
     def _process_single_frame(
         self,
         frame: np.ndarray,
@@ -706,246 +957,150 @@ class StreamWorker:
             zones = self.db.get_zones()
             counting_lines = self.db.get_counting_lines()
             now_ts = time.time()
-            tracks = detector.detect_and_track(
-                frame, imgsz=cfg.yolo_imgsz, conf=cfg.confidence_threshold, now_ts=now_ts
-            )
-            tracks = filter_excluded_tracks(tracks, w, h, zones)
-            if cfg.exempt_emergency_vehicles:
-                self.emergency_classifier.update_detections(
-                    frame,
-                    tracks,
-                    min_saturation=cfg.emergency_min_saturation,
-                    min_value=cfg.emergency_min_value,
-                    strobe_swing=cfg.emergency_strobe_swing,
-                    fire_red_ratio=cfg.emergency_fire_red_ratio,
+
+            with self._lock:
+                prev_tracks, prev_statuses, _, _ = self._latest_overlay
+                has_active_dwells = bool(self._active_dwells)
+                prev_active_cars = self._active_cars
+                prev_active_people = self._active_people
+                prev_res = self._resolution
+                has_inferred = self._has_inferred_frame
+
+            has_unconfirmed = any(t.track_id not in self.monitor._counted_tracks for t in prev_tracks)
+            res_changed = prev_res != (0, 0) and prev_res != (int(w), int(h))
+
+            if cfg.motion_gate_enabled:
+                gate_infer, motion_state = self.motion_gate.should_infer(
+                    frame, zones=zones, idle_interval=cfg.motion_idle_interval
                 )
-            self.hotspot.update(tracks, w, h)
+            else:
+                gate_infer, motion_state = True, "off"
 
-            step = self.monitor.process_tracks(
-                tracks=tracks,
-                frame_w=w,
-                frame_h=h,
-                zones=zones,
-                now_ts=now_ts,
-                dwell_seconds=cfg.dwell_seconds,
-                movement_threshold=cfg.movement_threshold,
-                min_track_frames=cfg.min_track_frames,
-                exempt_emergency_vehicles=cfg.exempt_emergency_vehicles,
-            )
-            calib = self.db.get_ground_calibration()
-            line_incs = self.line_monitor.process_tracks(
-                tracks=tracks,
-                frame_w=w,
-                frame_h=h,
-                lines=counting_lines,
-                now_ts=now_ts,
-                calib=calib,
-                movement_threshold=cfg.movement_threshold,
-            )
-            track_speeds = self.line_monitor.get_track_speeds()
-            for tid, mph in track_speeds.items():
-                if tid in step.track_statuses:
-                    step.track_statuses[tid]["speed_mph"] = mph
-            if line_incs:
-                self.db.increment_line_counts(line_incs)
-                counting_lines = self.db.get_counting_lines()
+            run_infer = gate_infer or (not has_inferred) or has_unconfirmed or res_changed
 
-            if (
-                step.new_unique_cars
-                or step.new_total_cars
-                or step.new_unique_people
-                or step.new_total_people
-            ):
-                self.db.increment_stats(
-                    unique_cars=step.new_unique_cars,
-                    total_cars=step.new_total_cars,
-                    unique_people=step.new_unique_people,
-                    total_people=step.new_total_people,
+            if run_infer:
+                tracks = detector.detect_and_track(
+                    frame, imgsz=cfg.yolo_imgsz, conf=cfg.confidence_threshold, now_ts=now_ts
                 )
-
-            new_speeds = self.line_monitor.consume_new_speeds()
-            speeding_events = (
-                [sp for sp in new_speeds if sp["speed_mph"] > cfg.speed_limit_mph]
-                if cfg.speed_capture_enabled
-                else []
-            )
-
-            if step.new_violations or speeding_events:
-                snap_base = self._get_highres_violation_frame(frame, cfg)
-                sh, sw = snap_base.shape[:2]
-                snap_tracks = self._scale_tracks(tracks, w, h, sw, sh)
-                track_bbox_map = {t.track_id: t.bbox_xyxy for t in snap_tracks}
-                plates_by_tid: dict[int, tuple[str, float]] = {}
-
-                if cfg.alpr_enabled:
-                    event_tids = {v.track_id for v in step.new_violations} | {
-                        int(sp["track_id"]) for sp in speeding_events
-                    }
-                    for tid in event_tids:
-                        plate, plate_conf = self.alpr.read_plate(snap_base, track_bbox_map.get(tid))
-                        if plate:
-                            plates_by_tid[tid] = (plate, plate_conf)
-                            step.track_statuses.setdefault(tid, {})["license_plate"] = plate
-                            with self._lock:
-                                self._last_plate = {
-                                    "plate": plate,
-                                    "confidence": plate_conf,
-                                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                                }
-
-                clean_jpeg = b""
-                if step.new_violations:
-                    clean_source = (
-                        self.hotspot.render_overlay(snap_base, alpha=0.45)
-                        if cfg.heatmap_enabled and self.hotspot is not None
-                        else snap_base
+                tracks = filter_excluded_tracks(tracks, w, h, zones)
+                if cfg.exempt_emergency_vehicles:
+                    self.emergency_classifier.update_detections(
+                        frame,
+                        tracks,
+                        min_saturation=cfg.emergency_min_saturation,
+                        min_value=cfg.emergency_min_value,
+                        strobe_swing=cfg.emergency_strobe_swing,
+                        fire_red_ratio=cfg.emergency_fire_red_ratio,
                     )
-                    ok_clean, clean_buf = cv2.imencode(
-                        ".jpg", clean_source, [cv2.IMWRITE_JPEG_QUALITY, 94]
-                    )
-                    if ok_clean:
-                        clean_jpeg = clean_buf.tobytes()
+                self.hotspot.update(tracks, w, h)
 
-                annotated_full = annotate_frame(
-                    frame=snap_base,
-                    tracks=snap_tracks,
-                    track_statuses=step.track_statuses,
+                step = self.monitor.process_tracks(
+                    tracks=tracks,
+                    frame_w=w,
+                    frame_h=h,
                     zones=zones,
-                    dwell_threshold=cfg.dwell_seconds,
-                    hotspot=self.hotspot,
-                    show_heatmap=cfg.heatmap_enabled,
-                    counting_lines=counting_lines,
-                    annotation_scale=cfg.annotation_scale,
+                    now_ts=now_ts,
+                    dwell_seconds=cfg.dwell_seconds,
+                    movement_threshold=cfg.movement_threshold,
+                    min_track_frames=cfg.min_track_frames,
+                    exempt_emergency_vehicles=cfg.exempt_emergency_vehicles,
                 )
-                for v in step.new_violations:
-                    ts_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                    fname = f"violation_{ts_slug}_t{v.track_id}.jpg"
-                    snap_path = self.snapshots_dir / fname
-                    self._write_jpeg_atomic(snap_path, annotated_full, quality=92)
-                    plate_text = plates_by_tid.get(v.track_id, ("", 0.0))[0]
-                    rec = self.db.add_violation(
-                        track_id=v.track_id,
-                        zone_id=v.zone_id,
-                        zone_name=v.zone_name,
-                        vehicle_class=v.vehicle_class,
-                        started_at=v.started_at,
-                        flagged_at=v.flagged_at,
-                        dwell_seconds=v.dwell_seconds,
-                        snapshot_filename=fname,
-                        license_plate=plate_text,
-                    )
-                    if clean_jpeg:
-                        now_mono = time.monotonic()
-                        snap_entry: dict[str, Any] = {
-                            "violation_id": rec.id,
-                            "orig_track_id": int(v.track_id),
-                            "zone_id": v.zone_id,
-                            "snap_path": snap_path,
-                            "clean_jpeg": clean_jpeg,
-                            "tracks": copy.deepcopy(snap_tracks),
-                            "track_statuses": copy.deepcopy(step.track_statuses),
-                            "zones": copy.deepcopy(zones),
-                            "counting_lines": copy.deepcopy(counting_lines),
-                            "dwell_threshold": float(cfg.dwell_seconds),
-                            "annotation_scale": float(cfg.annotation_scale),
-                            "created_ts": now_mono,
-                            "last_update_ts": now_mono,
-                            "last_rendered_dwell": round(float(v.dwell_seconds), 1),
-                        }
-                        with self._lock:
-                            expired_keys = [
-                                k
-                                for k, val in self._active_violation_snaps.items()
-                                if (now_mono - float(val["created_ts"])) > 14400.0
-                            ]
-                            for ek in expired_keys:
-                                self._active_violation_snaps.pop(ek, None)
-                            while len(self._active_violation_snaps) >= 16:
-                                oldest_key = min(
-                                    self._active_violation_snaps,
-                                    key=lambda k: float(self._active_violation_snaps[k]["created_ts"]),
-                                )
-                                self._active_violation_snaps.pop(oldest_key, None)
-                            self._active_violation_snaps[(int(v.track_id), v.zone_id)] = snap_entry
-                    with self._lock:
-                        self._last_violation = rec.model_dump()
-                    if cfg.webhook_url.strip():
-                        self._dispatch_webhook(cfg.webhook_url.strip(), rec.model_dump(), snap_path)
-                    if cfg.ha_enabled:
-                        threading.Thread(
-                            target=self.ha_publisher.fire_event,
-                            args=("car_tracker_violation", rec.model_dump(), cfg.ha_url, cfg.ha_token),
-                            daemon=True,
-                        ).start()
+                calib = self.db.get_ground_calibration()
+                line_incs = self.line_monitor.process_tracks(
+                    tracks=tracks,
+                    frame_w=w,
+                    frame_h=h,
+                    lines=counting_lines,
+                    now_ts=now_ts,
+                    calib=calib,
+                    movement_threshold=cfg.movement_threshold,
+                )
+                track_speeds = self.line_monitor.get_track_speeds()
+                for tid, mph in track_speeds.items():
+                    if tid in step.track_statuses:
+                        step.track_statuses[tid]["speed_mph"] = mph
+                if line_incs:
+                    self.db.increment_line_counts(line_incs)
+                    counting_lines = self.db.get_counting_lines()
 
-                for sp in speeding_events:
-                    now_iso = datetime.now(timezone.utc).isoformat()
-                    ts_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                    fname = f"speeding_{ts_slug}_t{sp['track_id']}.jpg"
-                    snap_path = self.snapshots_dir / fname
-                    self._write_jpeg_atomic(snap_path, annotated_full, quality=92)
-                    plate_text = plates_by_tid.get(int(sp["track_id"]), ("", 0.0))[0]
-                    rec = self.db.add_violation(
-                        track_id=sp["track_id"],
-                        zone_id="speeding",
-                        zone_name=f"Speeding {sp['speed_mph']:.1f} mph (limit {cfg.speed_limit_mph:g} mph)",
-                        vehicle_class=sp["vehicle_class"],
-                        started_at=now_iso,
-                        flagged_at=now_iso,
-                        dwell_seconds=float(sp["speed_mph"]),
-                        snapshot_filename=fname,
-                        license_plate=plate_text,
+                if (
+                    step.new_unique_cars
+                    or step.new_total_cars
+                    or step.new_unique_people
+                    or step.new_total_people
+                ):
+                    self.db.increment_stats(
+                        unique_cars=step.new_unique_cars,
+                        total_cars=step.new_total_cars,
+                        unique_people=step.new_unique_people,
+                        total_people=step.new_total_people,
                     )
-                    with self._lock:
-                        self._last_violation = rec.model_dump()
-                    if cfg.webhook_url.strip():
-                        self._dispatch_webhook(cfg.webhook_url.strip(), rec.model_dump(), snap_path)
-                    if cfg.ha_enabled:
-                        event_payload = {**rec.model_dump(), "speed_mph": float(sp["speed_mph"])}
-                        threading.Thread(
-                            target=self.ha_publisher.fire_event,
-                            args=("car_tracker_speeding", event_payload, cfg.ha_url, cfg.ha_token),
-                            daemon=True,
-                        ).start()
 
-                self._ha_wake_event.set()
-
-            if step.dwell_updates:
-                now_mono = time.monotonic()
-                any_completed = False
-                for upd in step.dwell_updates:
-                    with self._lock:
-                        snap_entry = self._active_violation_snaps.get(upd.violation_key)
-                    if snap_entry is None:
-                        continue
-                    rounded_dwell = round(float(upd.dwell_seconds), 1)
-                    should_refresh = upd.completed or (
-                        (now_mono - float(snap_entry["last_update_ts"])) >= 5.0
-                        and int(round(rounded_dwell)) != int(round(float(snap_entry["last_rendered_dwell"])))
+                new_speeds = self.line_monitor.consume_new_speeds()
+                speeding_events = (
+                    [sp for sp in new_speeds if sp["speed_mph"] > cfg.speed_limit_mph]
+                    if cfg.speed_capture_enabled
+                    else []
+                )
+                self._handle_step_events(
+                    frame=frame,
+                    w=w,
+                    h=h,
+                    tracks=tracks,
+                    step=step,
+                    zones=zones,
+                    counting_lines=counting_lines,
+                    cfg=cfg,
+                    speeding_events=speeding_events,
+                )
+                track_statuses = step.track_statuses
+                active_cars = step.active_cars
+                active_people = step.active_people
+                self._has_inferred_frame = True
+            else:
+                tracks = filter_excluded_tracks(list(prev_tracks), w, h, zones)
+                track_statuses = dict(prev_statuses)
+                active_cars = prev_active_cars
+                active_people = prev_active_people
+                has_red_zones = any(
+                    z.enabled and getattr(z, "zone_type", "red_zone") == "red_zone" for z in zones
+                )
+                if tracks and (has_active_dwells or has_red_zones):
+                    step = self.monitor.process_tracks(
+                        tracks=tracks,
+                        frame_w=w,
+                        frame_h=h,
+                        zones=zones,
+                        now_ts=now_ts,
+                        dwell_seconds=cfg.dwell_seconds,
+                        movement_threshold=cfg.movement_threshold,
+                        min_track_frames=cfg.min_track_frames,
+                        exempt_emergency_vehicles=cfg.exempt_emergency_vehicles,
                     )
-                    if should_refresh:
-                        self.db.update_violation_dwell(snap_entry["violation_id"], rounded_dwell)
-                        self._refresh_violation_snapshot(snap_entry, rounded_dwell)
-                        snap_entry["last_update_ts"] = now_mono
-                        snap_entry["last_rendered_dwell"] = rounded_dwell
-                        with self._lock:
-                            if (
-                                self._last_violation is not None
-                                and self._last_violation.get("id") == snap_entry["violation_id"]
-                            ):
-                                self._last_violation["dwell_seconds"] = rounded_dwell
-                    if upd.completed:
-                        with self._lock:
-                            self._active_violation_snaps.pop(upd.violation_key, None)
-                        any_completed = True
-                if any_completed:
-                    self._ha_wake_event.set()
+                    track_speeds = self.line_monitor.get_track_speeds()
+                    for tid, mph in track_speeds.items():
+                        if tid in step.track_statuses:
+                            step.track_statuses[tid]["speed_mph"] = mph
+                    self._handle_step_events(
+                        frame=frame,
+                        w=w,
+                        h=h,
+                        tracks=tracks,
+                        step=step,
+                        zones=zones,
+                        counting_lines=counting_lines,
+                        cfg=cfg,
+                        speeding_events=[],
+                    )
+                    track_statuses = step.track_statuses
+                    active_cars = step.active_cars
+                    active_people = step.active_people
 
             jpg_bytes = (
                 self._render_preview_jpeg(
                     frame=frame,
                     tracks=tracks,
-                    track_statuses=step.track_statuses,
+                    track_statuses=track_statuses,
                     zones=zones,
                     counting_lines=counting_lines,
                     cfg=cfg,
@@ -956,20 +1111,21 @@ class StreamWorker:
 
             dwells = [
                 {"track_id": tid, **st}
-                for tid, st in step.track_statuses.items()
+                for tid, st in track_statuses.items()
                 if st.get("in_red_zone")
             ]
 
             with self._lock:
                 self._latest_raw_frame = frame
-                self._latest_overlay = (list(tracks), dict(step.track_statuses), list(zones), list(counting_lines))
+                self._latest_overlay = (list(tracks), dict(track_statuses), list(zones), list(counting_lines))
                 if jpg_bytes is not None:
                     self._latest_jpeg = jpg_bytes
                     self._last_preview_ts = time.monotonic()
                 self._resolution = (int(w), int(h))
                 self._measured_fps = 1.0 / max(dt, 1e-3)
-                self._active_cars = step.active_cars
-                self._active_people = step.active_people
+                self._motion_state = motion_state
+                self._active_cars = active_cars
+                self._active_people = active_people
                 self._active_dwells = dwells
 
             red_zone_occupied = len(dwells) > 0
@@ -1031,9 +1187,10 @@ class StreamWorker:
                     time.sleep(0.01)
                     continue
                 last_seq = seq
-                detector = self._ensure_detector()
+                detector = self._ensure_detector(frame_wh=(frame.shape[1], frame.shape[0]))
                 if detector is None:
-                    time.sleep(0.25)
+                    self._config_wake_event.wait(timeout=1.0)
+                    self._config_wake_event.clear()
                     continue
                 t0 = time.monotonic()
                 dt = t0 - last_infer_ts if last_infer_ts > 0 else interval
@@ -1186,10 +1343,6 @@ class StreamWorker:
             self._reconnect_event.clear()
             self._config_wake_event.clear()
             cfg = self.config
-            detector = self._ensure_detector()
-            if detector is None:
-                self._config_wake_event.wait(timeout=2.0)
-                continue
 
             source = self.get_source_url(cfg)
             is_file = bool(cfg.test_video_path.strip())
@@ -1293,9 +1446,6 @@ class StreamWorker:
             last_seq = 0
             while not self._stop_event.is_set() and not self._reconnect_event.is_set():
                 cfg = self.config
-                detector = self._ensure_detector()
-                if detector is None:
-                    break
                 interval = 1.0 / max(cfg.target_fps, 0.5)
 
                 if is_file:
@@ -1303,7 +1453,10 @@ class StreamWorker:
                     if not ok:
                         # Loop test video seamlessly
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        detector.reset()
+                        if self._detector is not None:
+                            self._detector.reset()
+                        self.motion_gate.reset()
+                        self._has_inferred_frame = False
                         ok, frame = cap.read()
                         if not ok:
                             break
@@ -1327,6 +1480,12 @@ class StreamWorker:
                         time.sleep(0.01)
                         continue
                     last_seq = seq
+
+                detector = self._ensure_detector(frame_wh=(frame.shape[1], frame.shape[0]))
+                if detector is None:
+                    self._config_wake_event.wait(timeout=1.0)
+                    self._config_wake_event.clear()
+                    continue
 
                 if not first_frame_seen:
                     first_frame_seen = True

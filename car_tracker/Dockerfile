@@ -1,0 +1,23 @@
+ARG BUILD_FROM=python:3.12-slim
+FROM ${BUILD_FROM}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    jq \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+RUN git clone --depth 1 --branch main https://github.com/georgefahmy/car-tracker.git /app \
+    && uv sync --frozen --no-dev
+
+COPY run.sh /run.sh
+RUN chmod a+x /run.sh
+
+EXPOSE 8000
+
+CMD ["/run.sh"]

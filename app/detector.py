@@ -756,3 +756,123 @@ def render_birdseye_jpeg(
     )
     ok, buf = cv2.imencode(".jpg", bev, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return buf.tobytes() if ok else None
+
+
+def detect_red_curb_zones(
+    frame: np.ndarray,
+    calib: GroundCalibrationModel | None = None,
+    lane_width_ft: float = 7.5,
+) -> dict[str, Any]:
+    """Detect painted red curbs in a frame and project them into parking-lane polygons."""
+    if frame is None or frame.size == 0:
+        return {"detected": False, "used_ground_calibration": calib is not None, "zones": [], "message": "Empty frame."}
+
+    h, w = frame.shape[:2]
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask1 = cv2.inRange(hsv, np.array([0, 65, 45]), np.array([12, 255, 255]))
+    mask2 = cv2.inRange(hsv, np.array([166, 65, 45]), np.array([179, 255, 255]))
+    mask = cv2.bitwise_or(mask1, mask2)
+    mask[: int(h * 0.12), :] = 0
+
+    k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k_open)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    min_area = max(80.0, float(w * h) * 0.0004)
+    min_len = 0.07 * min(w, h)
+
+    candidates: list[tuple[float, float, np.ndarray]] = []
+    for cnt in contours:
+        area = float(cv2.contourArea(cnt))
+        if area < min_area:
+            continue
+        _, (rw, rh), _ = cv2.minAreaRect(cnt)
+        long_side = max(rw, rh)
+        short_side = max(min(rw, rh), 1.0)
+        if long_side < min_len or (long_side / short_side) < 2.0:
+            continue
+        candidates.append((area, short_side, cnt))
+
+    if not candidates:
+        return {
+            "detected": False,
+            "used_ground_calibration": calib is not None,
+            "zones": [],
+            "message": "No painted red curb detected in the current frame (works best in daylight with an unobstructed curb).",
+        }
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    best_area = candidates[0][0]
+    selected = [c for c in candidates if c[0] >= best_area * 0.3][:2]
+
+    tf = compute_ground_transforms(calib) if calib is not None else None
+    zones: list[dict[str, Any]] = []
+
+    for idx, (_, short_side, cnt) in enumerate(selected, start=1):
+        eps = 0.015 * cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, eps, True)
+        if len(approx) < 2:
+            continue
+        curb_norm = np.array([[float(p[0][0]) / w, float(p[0][1]) / h] for p in approx], dtype=np.float32)
+
+        if tf is not None and calib is not None:
+            g_pts = np.array(project_points(curb_norm.tolist(), tf["img_norm_to_ground"]), dtype=np.float32)
+            vx, vy, x0, y0 = [float(v) for v in cv2.fitLine(g_pts, cv2.DIST_L2, 0, 0.01, 0.01).flatten()]
+            dir_v = np.array([vx, vy], dtype=np.float32)
+            origin = np.array([x0, y0], dtype=np.float32)
+            proj = (g_pts - origin) @ dir_v
+            g_a = origin + float(proj.min()) * dir_v
+            g_b = origin + float(proj.max()) * dir_v
+            normal = np.array([-vy, vx], dtype=np.float32)
+            g_mid = 0.5 * (g_a + g_b)
+            road_ref = np.array([float(calib.width_ft) * 0.5, float(calib.length_ft) * 0.5], dtype=np.float32)
+            if float(np.dot(road_ref - g_mid, normal)) < 0.0:
+                normal = -normal
+            ground_poly = [
+                (g_a - 0.5 * normal).tolist(),
+                (g_b - 0.5 * normal).tolist(),
+                (g_b + float(lane_width_ft) * normal).tolist(),
+                (g_a + float(lane_width_ft) * normal).tolist(),
+            ]
+            img_poly = project_points(ground_poly, tf["ground_to_img_norm"])
+        else:
+            vx, vy, x0, y0 = [float(v) for v in cv2.fitLine(curb_norm, cv2.DIST_L2, 0, 0.01, 0.01).flatten()]
+            dir_v = np.array([vx, vy], dtype=np.float32)
+            origin = np.array([x0, y0], dtype=np.float32)
+            proj = (curb_norm - origin) @ dir_v
+            p_a = origin + float(proj.min()) * dir_v
+            p_b = origin + float(proj.max()) * dir_v
+            normal = np.array([-vy, vx], dtype=np.float32)
+            mid = 0.5 * (p_a + p_b)
+            road_ref = np.array([0.5, 0.72], dtype=np.float32)
+            if float(np.dot(road_ref - mid, normal)) < 0.0:
+                normal = -normal
+            offset = max(0.06, min(0.12, (short_side / float(max(h, 1))) * 3.0))
+            img_poly = [
+                (p_a - 0.01 * normal).tolist(),
+                (p_b - 0.01 * normal).tolist(),
+                (p_b + offset * normal).tolist(),
+                (p_a + offset * normal).tolist(),
+            ]
+
+        clamped = [[round(max(0.0, min(1.0, float(px))), 4), round(max(0.0, min(1.0, float(py))), 4)] for px, py in img_poly]
+        zones.append(
+            {
+                "name": f"Auto Red Zone {idx}",
+                "points": clamped,
+                "color": "#ef4444",
+                "zone_type": "red_zone",
+            }
+        )
+
+    return {
+        "detected": len(zones) > 0,
+        "used_ground_calibration": tf is not None,
+        "zones": zones,
+        "message": (
+            f"Detected {len(zones)} red curb zone(s)"
+            + (" using 3D ground lane offset." if tf is not None else " (approximate 2D offset; calibrate 3D Ground Grid for perspective-accurate width).")
+        ),
+    }

@@ -370,3 +370,37 @@ def test_ground_calibration_and_birdseye(tmp_path: Path) -> None:
         assert client.get("/api/calibration").json()["calibration"] is None
 
 
+def test_detect_red_curb_zones() -> None:
+    import cv2
+    from app.database import GroundCalibrationModel
+    from app.detector import detect_red_curb_zones
+
+    # Blank gray street -> no red curb detected
+    gray_frame = np.full((360, 640, 3), 120, dtype=np.uint8)
+    empty_res = detect_red_curb_zones(gray_frame)
+    assert empty_res["detected"] is False
+    assert empty_res["zones"] == []
+
+    # Draw a painted red curb strip along the lower-left/bottom edge
+    curb_frame = gray_frame.copy()
+    cv2.line(curb_frame, (120, 260), (500, 240), (20, 20, 210), thickness=12)
+
+    res_2d = detect_red_curb_zones(curb_frame, calib=None)
+    assert res_2d["detected"] is True
+    assert res_2d["used_ground_calibration"] is False
+    assert len(res_2d["zones"]) == 1
+    assert len(res_2d["zones"][0]["points"]) == 4
+
+    calib = GroundCalibrationModel(
+        points=[[0.3, 0.45], [0.7, 0.45], [0.85, 0.85], [0.15, 0.85]],
+        width_ft=20.0,
+        length_ft=15.0,
+    )
+    res_3d = detect_red_curb_zones(curb_frame, calib=calib)
+    assert res_3d["detected"] is True
+    assert res_3d["used_ground_calibration"] is True
+    assert len(res_3d["zones"]) == 1
+    assert len(res_3d["zones"][0]["points"]) == 4
+
+
+

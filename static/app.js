@@ -226,6 +226,7 @@ function setDrawingMode(mode, target = null) {
     hint.textContent = 'Click on the video to place polygon corners around the red zone. Double-click or press "Finish & Save" when done.';
   }
   document.getElementById("btnDrawZone").classList.toggle("hidden", active);
+  document.getElementById("btnAutoRedZone").classList.toggle("hidden", active);
   document.getElementById("btnDrawExclusion").classList.toggle("hidden", active);
   document.getElementById("btnDrawLine").classList.toggle("hidden", active);
   document.getElementById("btnCalibrateGround").classList.toggle("hidden", active);
@@ -359,6 +360,7 @@ zoneCanvas.addEventListener("dblclick", () => {
 });
 
 document.getElementById("btnDrawZone").addEventListener("click", () => setDrawingMode("zone"));
+document.getElementById("btnAutoRedZone").addEventListener("click", autoDetectRedCurb);
 document.getElementById("btnDrawExclusion").addEventListener("click", () => setDrawingMode("exclusion"));
 document.getElementById("btnDrawLine").addEventListener("click", () => setDrawingMode("line"));
 document.getElementById("btnCalibrateGround").addEventListener("click", () => setDrawingMode("calibrate"));
@@ -476,11 +478,23 @@ async function finishZone() {
       alert("Please keep at least 3 points for a zone.");
       return;
     }
-    const updated = savedZones.map((item) =>
-      item.id === editingTarget.id
-        ? { ...item, name: editingTarget.name, points: draftPoints }
-        : item
-    );
+    const updated = editingTarget.id
+      ? savedZones.map((item) =>
+          item.id === editingTarget.id
+            ? { ...item, name: editingTarget.name, points: draftPoints }
+            : item
+        )
+      : [
+          ...savedZones,
+          {
+            id: `zone_${Date.now()}`,
+            name: editingTarget.name,
+            points: draftPoints,
+            enabled: true,
+            color: "#ef4444",
+            zone_type: "red_zone",
+          },
+        ];
     await saveZones(updated);
     setDrawingMode(null);
     return;
@@ -507,6 +521,39 @@ async function finishZone() {
   ];
   await saveZones(updated);
   setDrawingMode(null);
+}
+
+async function autoDetectRedCurb() {
+  const btn = document.getElementById("btnAutoRedZone");
+  const prevText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Scanning curb...";
+  try {
+    const res = await fetch("/api/zones/auto-detect", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.detail || "Auto-detect failed.");
+      return;
+    }
+    if (!data.detected || !data.zones?.length) {
+      alert(data.message || "No red curb detected in current frame.");
+      return;
+    }
+    const first = data.zones[0];
+    draftPoints = first.points.map((pt) => [...pt]);
+    setDrawingMode("edit", {
+      kind: "zone",
+      id: null,
+      name: `${first.name || "Auto Red Zone"} ${savedZones.length + 1}`,
+    });
+    const hint = document.getElementById("drawHint");
+    hint.textContent = `${data.message} Drag any corner to adjust, then click Finish & Save.`;
+  } catch (err) {
+    alert(`Auto-detect error: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prevText;
+  }
 }
 
 async function saveZones(zones) {

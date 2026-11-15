@@ -14,7 +14,12 @@ from pydantic import BaseModel
 
 from app.config import RuntimeConfig, Settings, build_rtmp_url, build_rtsp_url
 from app.database import CountingLineModel, Database, GroundCalibrationModel, ViolationRecord, ZoneModel
-from app.detector import compute_ground_transforms, project_points, render_birdseye_jpeg
+from app.detector import (
+    compute_ground_transforms,
+    detect_red_curb_zones,
+    project_points,
+    render_birdseye_jpeg,
+)
 from app.stream import StreamWorker, test_stream_connection
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -297,6 +302,14 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
             media_type="image/jpeg",
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
+
+    @app.post("/api/zones/auto-detect")
+    async def auto_detect_red_zones() -> dict:
+        frame = worker.get_latest_raw_frame()
+        if frame is None:
+            raise HTTPException(status_code=503, detail="No camera frame available yet")
+        calib = db.get_ground_calibration()
+        return await asyncio.to_thread(detect_red_curb_zones, frame, calib)
 
     @app.post("/api/calibration/project")
     async def project_bev_points(payload: BevProjectPayload) -> dict:

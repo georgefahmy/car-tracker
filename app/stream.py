@@ -308,6 +308,7 @@ class StreamWorker:
                 "heatmap_enabled": self.config.heatmap_enabled,
                 "last_violation": self._last_violation,
                 "system": system_metrics,
+                "speed": self.line_monitor.get_speed_summary(),
             }
 
     def _ensure_detector(self) -> ObjectDetector:
@@ -450,13 +451,19 @@ class StreamWorker:
                 min_track_frames=cfg.min_track_frames,
                 exempt_emergency_vehicles=cfg.exempt_emergency_vehicles,
             )
+            calib = self.db.get_ground_calibration()
             line_incs = self.line_monitor.process_tracks(
                 tracks=tracks,
                 frame_w=w,
                 frame_h=h,
                 lines=counting_lines,
                 now_ts=now_ts,
+                calib=calib,
             )
+            track_speeds = self.line_monitor.get_track_speeds()
+            for tid, mph in track_speeds.items():
+                if tid in step.track_statuses:
+                    step.track_statuses[tid]["speed_mph"] = mph
             if line_incs:
                 self.db.increment_line_counts(line_incs)
                 counting_lines = self.db.get_counting_lines()

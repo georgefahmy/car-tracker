@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -399,18 +400,63 @@ def _segments_intersect(
     )
 
 
+def _segment_intersection_point(
+    a1: tuple[float, float],
+    a2: tuple[float, float],
+    b1: tuple[float, float],
+    b2: tuple[float, float],
+) -> tuple[float, tuple[float, float]] | None:
+    """Return (t_along_a, (ix, iy)) if segments a1-a2 and b1-b2 intersect, else None."""
+    if not _segments_intersect(a1, a2, b1, b2):
+        return None
+    dx_a = a2[0] - a1[0]
+    dy_a = a2[1] - a1[1]
+    dx_b = b2[0] - b1[0]
+    dy_b = b2[1] - b1[1]
+    denom = dx_a * dy_b - dy_a * dx_b
+    if abs(denom) < 1e-9:
+        return 0.5, (0.5 * (a1[0] + a2[0]), 0.5 * (a1[1] + a2[1]))
+    t = ((b1[0] - a1[0]) * dy_b - (b1[1] - a1[1]) * dx_b) / denom
+    t = max(0.0, min(1.0, t))
+    return t, (a1[0] + t * dx_a, a1[1] + t * dy_a)
+
+
 class LineCrossingMonitor:
-    """Counts vehicles crossing user-defined traffic flow lines in either direction."""
+    """Counts vehicles crossing user-defined traffic flow lines and estimates two-line speed."""
 
     def __init__(self) -> None:
         self._prev_pos: dict[int, tuple[float, float]] = {}
+        self._prev_ts: dict[int, float] = {}
         self._last_seen_ts: dict[int, float] = {}
         self._crossed_pairs: set[tuple[int, str]] = set()
+        self._first_crossing: dict[int, tuple[str, str, float, tuple[float, float]]] = {}
+        self._track_speeds_mph: dict[int, float] = {}
+        self._recent_speeds: deque[dict[str, Any]] = deque(maxlen=25)
+        self._calibrated: bool = False
 
     def reset(self) -> None:
         self._prev_pos.clear()
+        self._prev_ts.clear()
         self._last_seen_ts.clear()
         self._crossed_pairs.clear()
+        self._first_crossing.clear()
+        self._track_speeds_mph.clear()
+        self._recent_speeds.clear()
+
+    def get_track_speeds(self) -> dict[int, float]:
+        return dict(self._track_speeds_mph)
+
+    def get_speed_summary(self) -> dict[str, Any]:
+        recent = list(self._recent_speeds)
+        speeds = [item["speed_mph"] for item in recent]
+        return {
+            "calibrated": self._calibrated,
+            "last_speed_mph": speeds[-1] if speeds else None,
+            "avg_speed_mph": round(sum(speeds) / len(speeds), 1) if speeds else None,
+            "max_speed_mph": max(speeds) if speeds else None,
+            "samples_count": len(speeds),
+            "recent": list(reversed(recent[-8:])),
+        }
 
     def process_tracks(
         self,
@@ -419,10 +465,13 @@ class LineCrossingMonitor:
         frame_h: int,
         lines: list[CountingLineModel],
         now_ts: float,
+        calib: GroundCalibrationModel | None = None,
     ) -> dict[str, tuple[int, int]]:
-        """Return {line_id: (new_a_to_b, new_b_to_a)} for vehicles crossing enabled lines."""
+        """Return {line_id: (new_a_to_b, new_b_to_a)} and estimate two-line speed when calibrated."""
         enabled_lines = [ln for ln in lines if ln.enabled]
         increments: dict[str, tuple[int, int]] = {}
+        self._calibrated = calib is not None
+        tf = compute_ground_transforms(calib) if calib is not None else None
 
         for det in tracks:
             if not det.is_vehicle:
@@ -430,7 +479,9 @@ class LineCrossingMonitor:
             tid = det.track_id
             curr = det.bottom_center_norm(frame_w, frame_h)
             prev = self._prev_pos.get(tid)
+            prev_ts = self._prev_ts.get(tid, now_ts)
             self._prev_pos[tid] = curr
+            self._prev_ts[tid] = now_ts
             self._last_seen_ts[tid] = now_ts
 
             if prev is None or not enabled_lines:
@@ -441,19 +492,53 @@ class LineCrossingMonitor:
                     continue
                 p1 = (ln.p1[0], ln.p1[1])
                 p2 = (ln.p2[0], ln.p2[1])
-                if _segments_intersect(prev, curr, p1, p2):
-                    self._crossed_pairs.add((tid, ln.id))
-                    side_prev = _ccw(p1[0], p1[1], p2[0], p2[1], prev[0], prev[1])
-                    a_inc, b_inc = increments.get(ln.id, (0, 0))
-                    if side_prev < 0:
-                        increments[ln.id] = (a_inc + 1, b_inc)
-                    else:
-                        increments[ln.id] = (a_inc, b_inc + 1)
+                hit = _segment_intersection_point(prev, curr, p1, p2)
+                if hit is None:
+                    continue
+                t_frac, cross_pt = hit
+                cross_ts = prev_ts + t_frac * max(0.0, now_ts - prev_ts)
+
+                self._crossed_pairs.add((tid, ln.id))
+                side_prev = _ccw(p1[0], p1[1], p2[0], p2[1], prev[0], prev[1])
+                a_inc, b_inc = increments.get(ln.id, (0, 0))
+                if side_prev < 0:
+                    increments[ln.id] = (a_inc + 1, b_inc)
+                else:
+                    increments[ln.id] = (a_inc, b_inc + 1)
+
+                first = self._first_crossing.get(tid)
+                if first is None:
+                    self._first_crossing[tid] = (ln.id, ln.name, cross_ts, cross_pt)
+                elif first[0] != ln.id and tf is not None and tid not in self._track_speeds_mph:
+                    _, first_name, t1, pt1 = first
+                    dt_cross = cross_ts - t1
+                    g_pts = project_points([[pt1[0], pt1[1]], [cross_pt[0], cross_pt[1]]], tf["img_norm_to_ground"])
+                    if len(g_pts) == 2 and dt_cross >= 0.05:
+                        dist_ft = math.hypot(g_pts[1][0] - g_pts[0][0], g_pts[1][1] - g_pts[0][1])
+                        if dist_ft >= 1.0:
+                            mph = (dist_ft / dt_cross) * 0.681818
+                            if 0.5 <= mph <= 120.0:
+                                mph_rounded = round(mph, 1)
+                                self._track_speeds_mph[tid] = mph_rounded
+                                self._recent_speeds.append(
+                                    {
+                                        "track_id": tid,
+                                        "vehicle_class": det.class_name,
+                                        "speed_mph": mph_rounded,
+                                        "from_line": first_name,
+                                        "to_line": ln.name,
+                                        "distance_ft": round(dist_ft, 1),
+                                        "dt_s": round(dt_cross, 2),
+                                    }
+                                )
 
         stale_tids = [tid for tid, ts in self._last_seen_ts.items() if (now_ts - ts) > 60.0]
         for tid in stale_tids:
             self._last_seen_ts.pop(tid, None)
             self._prev_pos.pop(tid, None)
+            self._prev_ts.pop(tid, None)
+            self._first_crossing.pop(tid, None)
+            self._track_speeds_mph.pop(tid, None)
             self._crossed_pairs = {pair for pair in self._crossed_pairs if pair[0] != tid}
 
         return increments
@@ -601,6 +686,8 @@ def annotate_frame(
         else:
             color = (113, 204, 46)  # Emerald green
             label = f"#{det.track_id} {det.class_name}"
+        if det.is_vehicle and st.get("speed_mph") is not None:
+            label = f"{label} | {st['speed_mph']:.0f} mph"
 
         cv2.rectangle(out, (x1, y1), (x2, y2), color, box_thick)
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_thick)

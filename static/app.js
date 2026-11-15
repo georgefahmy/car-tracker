@@ -642,6 +642,22 @@ async function refreshStats() {
     heatmapEnabled = Boolean(data.heatmap_enabled);
     document.getElementById("btnHeatmapToggle").textContent = `Heatmap: ${heatmapEnabled ? "ON" : "OFF"}`;
 
+    const speedEl = document.getElementById("speedSummary");
+    if (speedEl) {
+      const sp = data.speed || {};
+      if (!sp.calibrated) {
+        speedEl.textContent = "Speed (2-line): Calibrate 3D Ground Grid and enable 2 traffic lines to measure mph.";
+      } else if (sp.samples_count > 0) {
+        const recentText = (sp.recent || [])
+          .slice(0, 4)
+          .map((r) => `#${r.track_id} ${r.vehicle_class} ${r.speed_mph} mph`)
+          .join(" • ");
+        speedEl.textContent = `Speed (2-line): Last ${sp.last_speed_mph} mph • Avg ${sp.avg_speed_mph} mph • Max ${sp.max_speed_mph} mph` + (recentText ? ` — ${recentText}` : "");
+      } else {
+        speedEl.textContent = "Speed (2-line): Waiting for a vehicle to cross 2 enabled traffic lines.";
+      }
+    }
+
     drawTrafficChart(data.hourly_traffic || []);
   } catch (err) {
     console.error("Stats poll error:", err);

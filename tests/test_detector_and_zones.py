@@ -403,4 +403,33 @@ def test_detect_red_curb_zones() -> None:
     assert len(res_3d["zones"][0]["points"]) == 4
 
 
+def test_two_line_speed_estimation() -> None:
+    from app.database import GroundCalibrationModel
+
+    # Calibrate 20 ft wide rectangle aligned with normalized [0.0..1.0] -> 20 ft
+    calib = GroundCalibrationModel(
+        points=[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        width_ft=20.0,
+        length_ft=20.0,
+    )
+    lm = LineCrossingMonitor()
+    ln1 = CountingLineModel(id="ln1", name="Line A", p1=[0.25, 0.0], p2=[0.25, 1.0], enabled=True)
+    ln2 = CountingLineModel(id="ln2", name="Line B", p1=[0.75, 0.0], p2=[0.75, 1.0], enabled=True)
+
+    # Car moves from x=0.1 to x=0.4 across ln1 (x=0.25) between t=0.0 and t=1.0 -> t_cross_1 = 0.5s
+    lm.process_tracks([_make_car(7, 0.1, 0.5)], 1000, 1000, [ln1, ln2], now_ts=0.0, calib=calib)
+    lm.process_tracks([_make_car(7, 0.4, 0.5)], 1000, 1000, [ln1, ln2], now_ts=1.0, calib=calib)
+    # Car moves from x=0.4 to x=0.9 across ln2 (x=0.75) between t=1.0 and t=2.0 -> t_cross_2 = 1.7s
+    # Distance = 0.5 * 20 ft = 10 ft, dt = 1.2s -> 10 / 1.2 * 0.681818 = 5.68 -> 5.7 mph
+    lm.process_tracks([_make_car(7, 0.9, 0.5)], 1000, 1000, [ln1, ln2], now_ts=2.0, calib=calib)
+
+    speeds = lm.get_track_speeds()
+    assert 7 in speeds
+    assert abs(speeds[7] - 5.7) <= 0.2
+    summary = lm.get_speed_summary()
+    assert summary["calibrated"] is True
+    assert summary["samples_count"] == 1
+    assert summary["last_speed_mph"] == speeds[7]
+
+
 

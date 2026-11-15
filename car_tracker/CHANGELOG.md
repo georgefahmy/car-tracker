@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.15
+- **Continuous Red-Zone Parked Timer**: Keeps counting parked duration continuously after a vehicle passes the dwell threshold (`30s` → `45s` → `2m 15s`) for the entire time it remains parked in a red zone—across the live video overlay (`ILLEGAL PARK`), Home Assistant's `max_dwell_seconds` attribute, and the Violations log (`Parked:` duration)—with seamless track-ID handover and clean finalization when the car departs.
+- **Live Start-of-Violation Snapshot Updates**: Retains a lightweight compressed JPEG of the clean start-of-violation high-res frame in memory (~300 KB per active violator, instead of a heavy MP4 video ring buffer) and atomically re-renders the initial violation snapshot every 5 seconds and upon vehicle departure so the captured start-of-violation photo always shows the updated total parked duration.
+
 ## 1.0.14
 - **Single "Car Tracker" Home Assistant Device**: Registers a native `"Car Tracker"` device in Home Assistant's Device Registry and attaches all 8 entities (`sensor.car_tracker_vehicles_today`, `sensor.car_tracker_people_today`, `sensor.car_tracker_active_vehicles`, `sensor.car_tracker_last_speed`, `sensor.car_tracker_avg_speed`, `sensor.car_tracker_violations_total`, `sensor.car_tracker_last_plate`, and `binary_sensor.car_tracker_red_zone_occupied`) under that single device with persistent `unique_id`s, automatic cleanup of legacy standalone `/api/states` entities, batch webhook updates, and automatic re-registration if the device is ever deleted.
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 import threading
 import time
@@ -193,6 +194,7 @@ class StreamWorker:
         self._last_preview_ts: float = 0.0
         self._last_viewer_ts: float = 0.0
         self._snap_client: ReolinkHTTPSnapClient | None = None
+        self._active_violation_snaps: dict[tuple[int, str], dict[str, Any]] = {}
 
     def get_source_url(self, cfg: RuntimeConfig | None = None) -> str:
         c = cfg or self.config
@@ -448,6 +450,57 @@ class StreamWorker:
             pass
         return fallback_frame
 
+    @staticmethod
+    def _write_jpeg_atomic(snap_path: Path, frame: np.ndarray, quality: int = 92) -> bool:
+        """Encode and atomically replace a JPEG snapshot file so readers never observe partial bytes."""
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if not ok:
+            return False
+        snap_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = snap_path.with_name(f".{snap_path.name}.tmp")
+        with open(tmp_path, "wb") as f:
+            f.write(buf.tobytes())
+        os.replace(tmp_path, snap_path)
+        return True
+
+    def _refresh_violation_snapshot(self, entry: dict[str, Any], dwell_seconds: float) -> bool:
+        """Re-render the initial violation snapshot using the updated parked dwell duration."""
+        clean_bytes: bytes = entry.get("clean_jpeg", b"")
+        if not clean_bytes:
+            return False
+        base_img = cv2.imdecode(np.frombuffer(clean_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if base_img is None:
+            return False
+
+        orig_tid = int(entry["orig_track_id"])
+        statuses = {k: dict(val) for k, val in entry["track_statuses"].items()}
+        target_status = statuses.setdefault(
+            orig_tid,
+            {
+                "in_red_zone": True,
+                "dwell_seconds": round(float(dwell_seconds), 1),
+                "violation": True,
+                "zone_name": None,
+                "emergency": False,
+            },
+        )
+        target_status["in_red_zone"] = True
+        target_status["violation"] = True
+        target_status["dwell_seconds"] = round(float(dwell_seconds), 1)
+
+        updated_img = annotate_frame(
+            frame=base_img,
+            tracks=entry["tracks"],
+            track_statuses=statuses,
+            zones=entry["zones"],
+            dwell_threshold=float(entry["dwell_threshold"]),
+            hotspot=None,
+            show_heatmap=False,
+            counting_lines=entry["counting_lines"],
+            annotation_scale=float(entry["annotation_scale"]),
+        )
+        return self._write_jpeg_atomic(entry["snap_path"], updated_img, quality=92)
+
     def _render_preview_jpeg(
         self,
         frame: np.ndarray,
@@ -600,6 +653,19 @@ class StreamWorker:
                                     "updated_at": datetime.now(timezone.utc).isoformat(),
                                 }
 
+                clean_jpeg = b""
+                if step.new_violations:
+                    clean_source = (
+                        self.hotspot.render_overlay(snap_base, alpha=0.45)
+                        if cfg.heatmap_enabled and self.hotspot is not None
+                        else snap_base
+                    )
+                    ok_clean, clean_buf = cv2.imencode(
+                        ".jpg", clean_source, [cv2.IMWRITE_JPEG_QUALITY, 94]
+                    )
+                    if ok_clean:
+                        clean_jpeg = clean_buf.tobytes()
+
                 annotated_full = annotate_frame(
                     frame=snap_base,
                     tracks=snap_tracks,
@@ -615,7 +681,7 @@ class StreamWorker:
                     ts_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                     fname = f"violation_{ts_slug}_t{v.track_id}.jpg"
                     snap_path = self.snapshots_dir / fname
-                    cv2.imwrite(str(snap_path), annotated_full, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    self._write_jpeg_atomic(snap_path, annotated_full, quality=92)
                     plate_text = plates_by_tid.get(v.track_id, ("", 0.0))[0]
                     rec = self.db.add_violation(
                         track_id=v.track_id,
@@ -628,6 +694,39 @@ class StreamWorker:
                         snapshot_filename=fname,
                         license_plate=plate_text,
                     )
+                    if clean_jpeg:
+                        now_mono = time.monotonic()
+                        snap_entry: dict[str, Any] = {
+                            "violation_id": rec.id,
+                            "orig_track_id": int(v.track_id),
+                            "zone_id": v.zone_id,
+                            "snap_path": snap_path,
+                            "clean_jpeg": clean_jpeg,
+                            "tracks": copy.deepcopy(snap_tracks),
+                            "track_statuses": copy.deepcopy(step.track_statuses),
+                            "zones": copy.deepcopy(zones),
+                            "counting_lines": copy.deepcopy(counting_lines),
+                            "dwell_threshold": float(cfg.dwell_seconds),
+                            "annotation_scale": float(cfg.annotation_scale),
+                            "created_ts": now_mono,
+                            "last_update_ts": now_mono,
+                            "last_rendered_dwell": round(float(v.dwell_seconds), 1),
+                        }
+                        with self._lock:
+                            expired_keys = [
+                                k
+                                for k, val in self._active_violation_snaps.items()
+                                if (now_mono - float(val["created_ts"])) > 14400.0
+                            ]
+                            for ek in expired_keys:
+                                self._active_violation_snaps.pop(ek, None)
+                            while len(self._active_violation_snaps) >= 16:
+                                oldest_key = min(
+                                    self._active_violation_snaps,
+                                    key=lambda k: float(self._active_violation_snaps[k]["created_ts"]),
+                                )
+                                self._active_violation_snaps.pop(oldest_key, None)
+                            self._active_violation_snaps[(int(v.track_id), v.zone_id)] = snap_entry
                     with self._lock:
                         self._last_violation = rec.model_dump()
                     if cfg.webhook_url.strip():
@@ -644,7 +743,7 @@ class StreamWorker:
                     ts_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                     fname = f"speeding_{ts_slug}_t{sp['track_id']}.jpg"
                     snap_path = self.snapshots_dir / fname
-                    cv2.imwrite(str(snap_path), annotated_full, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    self._write_jpeg_atomic(snap_path, annotated_full, quality=92)
                     plate_text = plates_by_tid.get(int(sp["track_id"]), ("", 0.0))[0]
                     rec = self.db.add_violation(
                         track_id=sp["track_id"],
@@ -670,6 +769,37 @@ class StreamWorker:
                         ).start()
 
                 self._ha_wake_event.set()
+
+            if step.dwell_updates:
+                now_mono = time.monotonic()
+                any_completed = False
+                for upd in step.dwell_updates:
+                    with self._lock:
+                        snap_entry = self._active_violation_snaps.get(upd.violation_key)
+                    if snap_entry is None:
+                        continue
+                    rounded_dwell = round(float(upd.dwell_seconds), 1)
+                    should_refresh = upd.completed or (
+                        (now_mono - float(snap_entry["last_update_ts"])) >= 5.0
+                        and int(round(rounded_dwell)) != int(round(float(snap_entry["last_rendered_dwell"])))
+                    )
+                    if should_refresh:
+                        self.db.update_violation_dwell(snap_entry["violation_id"], rounded_dwell)
+                        self._refresh_violation_snapshot(snap_entry, rounded_dwell)
+                        snap_entry["last_update_ts"] = now_mono
+                        snap_entry["last_rendered_dwell"] = rounded_dwell
+                        with self._lock:
+                            if (
+                                self._last_violation is not None
+                                and self._last_violation.get("id") == snap_entry["violation_id"]
+                            ):
+                                self._last_violation["dwell_seconds"] = rounded_dwell
+                    if upd.completed:
+                        with self._lock:
+                            self._active_violation_snaps.pop(upd.violation_key, None)
+                        any_completed = True
+                if any_completed:
+                    self._ha_wake_event.set()
 
             jpg_bytes = (
                 self._render_preview_jpeg(
@@ -839,6 +969,8 @@ class StreamWorker:
         self.db.reset_line_counts()
         self.monitor.reset()
         self.line_monitor.reset()
+        with self._lock:
+            self._active_violation_snaps.clear()
         self._ha_wake_event.set()
 
     def send_daily_report(

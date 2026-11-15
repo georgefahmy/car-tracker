@@ -306,6 +306,15 @@ class Database:
             license_plate=license_plate,
         )
 
+    def update_violation_dwell(self, violation_id: int, dwell_seconds: float) -> None:
+        """Update the recorded parked duration (dwell_seconds) for an existing violation."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE violations SET dwell_seconds = ? WHERE id = ?",
+                (round(float(dwell_seconds), 1), int(violation_id)),
+            )
+            self._conn.commit()
+
     def get_violations(self, limit: int = 50, offset: int = 0) -> list[ViolationRecord]:
         with self._lock:
             rows = self._conn.execute(

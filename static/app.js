@@ -931,6 +931,43 @@ trafficChartEl.addEventListener("pointerleave", () => {
 });
 
 let lastViolationItems = [];
+let lastViolationsSignature = "";
+let openSnapshotViolationId = null;
+
+const durationFmt =
+  typeof Intl !== "undefined" && typeof Intl.DurationFormat === "function"
+    ? new Intl.DurationFormat(undefined, { style: "narrow" })
+    : null;
+
+function formatDurationSeconds(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (durationFmt) {
+    const dur = {};
+    if (hours > 0) dur.hours = hours;
+    if (minutes > 0 || hours > 0) dur.minutes = minutes;
+    dur.seconds = secs;
+    return durationFmt.format(dur);
+  }
+  if (hours > 0) return `${hours}h ${minutes}m ${secs}s`;
+  if (minutes > 0) return `${minutes}m ${secs}s`;
+  return `${secs}s`;
+}
+
+function violationImageUrl(v) {
+  const rev = v.zone_id === "speeding"
+    ? Math.round((Number(v.dwell_seconds) || 0) * 10)
+    : Math.round(Number(v.dwell_seconds) || 0);
+  return `snapshots/${encodeURIComponent(v.snapshot_filename)}?t=${rev}`;
+}
+
+function formatSnapshotTitle(v) {
+  const plateSuffix = v.license_plate ? ` [${v.license_plate}]` : "";
+  const base = `${v.vehicle_class.toUpperCase()} #${v.track_id}${plateSuffix} — ${v.zone_name}`;
+  return v.zone_id === "speeding" ? base : `${base} (${formatDurationSeconds(v.dwell_seconds)})`;
+}
 
 function renderViolationsList() {
   const list = document.getElementById("violationsList");
@@ -963,27 +1000,32 @@ function renderViolationsList() {
     const timeStr = new Date(v.flagged_at).toLocaleString();
     const detailLine = v.zone_id === "speeding"
       ? `Speed: ${v.dwell_seconds.toFixed(1)} mph`
-      : `Dwell: ${v.dwell_seconds.toFixed(0)}s`;
+      : `Parked: ${escapeHtml(formatDurationSeconds(v.dwell_seconds))}`;
     const plateBadge = v.license_plate
       ? `<div class="plate-badge">🪪 ${escapeHtml(v.license_plate)}</div>`
       : "";
+    const imgUrl = violationImageUrl(v);
     card.innerHTML = `
-      <img src="snapshots/${encodeURIComponent(v.snapshot_filename)}" alt="Snapshot" />
+      <img src="${imgUrl}" alt="Snapshot" width="96" height="60" loading="lazy" />
       <div class="violation-meta">
         <div class="violation-title">${escapeHtml(v.vehicle_class.toUpperCase())} #${v.track_id} • ${escapeHtml(v.zone_name)}</div>
         ${plateBadge}
         <div class="muted">${detailLine}</div>
         <div class="muted">${escapeHtml(timeStr)}</div>
       </div>
-      <button class="btn btn-ghost" title="Delete">✕</button>
+      <button class="btn btn-ghost" type="button" title="Delete" aria-label="Delete violation #${v.id}">✕</button>
     `;
     card.querySelector("img").addEventListener("click", () => {
-      const plateSuffix = v.license_plate ? ` [${v.license_plate}]` : "";
-      document.getElementById("snapshotTitle").textContent = `${v.vehicle_class.toUpperCase()} #${v.track_id}${plateSuffix} — ${v.zone_name}`;
-      document.getElementById("snapshotFullImg").src = `snapshots/${encodeURIComponent(v.snapshot_filename)}`;
+      openSnapshotViolationId = v.id;
+      document.getElementById("snapshotTitle").textContent = formatSnapshotTitle(v);
+      document.getElementById("snapshotFullImg").src = violationImageUrl(v);
       document.getElementById("snapshotModal").classList.remove("hidden");
     });
     card.querySelector("button").addEventListener("click", async () => {
+      if (openSnapshotViolationId === v.id) {
+        openSnapshotViolationId = null;
+        document.getElementById("snapshotModal")?.classList.add("hidden");
+      }
       await fetch(`api/violations/${v.id}`, { method: "DELETE" });
       refreshViolations();
       refreshStats();
@@ -997,8 +1039,27 @@ document.getElementById("violationFilter")?.addEventListener("input", renderViol
 async function refreshViolations() {
   try {
     const res = await fetch("api/violations?limit=30");
-    lastViolationItems = await res.json();
+    const items = await res.json();
+    const sig = JSON.stringify(
+      items.map((v) => [v.id, v.dwell_seconds, v.license_plate, v.snapshot_filename])
+    );
+    if (sig === lastViolationsSignature) return;
+    lastViolationsSignature = sig;
+    lastViolationItems = items;
     renderViolationsList();
+
+    const modal = document.getElementById("snapshotModal");
+    if (openSnapshotViolationId !== null && modal && !modal.classList.contains("hidden")) {
+      const openItem = items.find((v) => v.id === openSnapshotViolationId);
+      if (openItem) {
+        document.getElementById("snapshotTitle").textContent = formatSnapshotTitle(openItem);
+        const fullImg = document.getElementById("snapshotFullImg");
+        const nextUrl = violationImageUrl(openItem);
+        if (fullImg.getAttribute("src") !== nextUrl) {
+          fullImg.src = nextUrl;
+        }
+      }
+    }
   } catch (err) {
     console.error("Violations poll error:", err);
   }
@@ -1050,7 +1111,10 @@ document.getElementById("btnSettings").addEventListener("click", async () => {
 
 document.getElementById("btnCloseSettings").addEventListener("click", () => settingsModal.classList.add("hidden"));
 document.getElementById("btnCancelSettings").addEventListener("click", () => settingsModal.classList.add("hidden"));
-document.getElementById("btnCloseSnapshot").addEventListener("click", () => document.getElementById("snapshotModal").classList.add("hidden"));
+document.getElementById("btnCloseSnapshot").addEventListener("click", () => {
+  openSnapshotViolationId = null;
+  document.getElementById("snapshotModal").classList.add("hidden");
+});
 
 document.getElementById("btnTestStream").addEventListener("click", async () => {
   const out = document.getElementById("testStreamResult");

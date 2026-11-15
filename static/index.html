@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Car Tracker & Red-Zone Monitor</title>
-  <link rel="stylesheet" href="static/styles.css?v=12" />
+  <link rel="stylesheet" href="static/styles.css?v=13" />
 </head>
 <body>
   <header class="topbar">
@@ -114,7 +114,7 @@
         </div>
 
         <div class="video-stage" id="videoStage">
-          <img id="videoStream" alt="Live Camera Stream" />
+          <img id="videoStream" alt="Live Camera Stream" fetchpriority="high" />
           <canvas id="zoneCanvas"></canvas>
           <div class="draw-hint hidden" id="drawHint">
             Click on the video to place polygon corners around the red zone. Double-click or press "Finish & Save" when done.
@@ -368,6 +368,6 @@
     </div>
   </div>
 
-  <script src="static/app.js?v=12"></script>
+  <script src="static/app.js?v=13"></script>
 </body>
 </html>

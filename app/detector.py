@@ -63,6 +63,7 @@ class DwellState:
     anchor_pos: tuple[float, float]
     stationary_seconds: float = 0.0
     flagged: bool = False
+    violation_key: tuple[int, str] | None = None
 
 
 @dataclass
@@ -79,6 +80,17 @@ class ViolationEvent:
 
 
 @dataclass
+class ViolationDwellUpdate:
+    """Live or final dwell duration update for an already-flagged red-zone violation."""
+
+    violation_key: tuple[int, str]
+    track_id: int
+    zone_id: str
+    dwell_seconds: float
+    completed: bool = False
+
+
+@dataclass
 class MonitorStepResult:
     """Output of a single frame update in RedZoneMonitor."""
 
@@ -89,6 +101,7 @@ class MonitorStepResult:
     new_unique_people: int = 0
     new_total_people: int = 0
     new_violations: list[ViolationEvent] = field(default_factory=list)
+    dwell_updates: list[ViolationDwellUpdate] = field(default_factory=list)
     track_statuses: dict[int, dict[str, Any]] = field(default_factory=dict)
 
 
@@ -351,31 +364,72 @@ class RedZoneMonitor:
                     active_pairs.add(pair)
                     state = self._dwell_states.get(pair)
                     if state is None:
-                        state = DwellState(
-                            zone_id=zone.id,
-                            zone_name=zone.name,
-                            entered_at=now_ts,
-                            last_seen_at=now_ts,
-                            anchor_pos=(nx, ny),
-                            stationary_seconds=0.0,
-                            flagged=(pair in self._flagged_pairs),
-                        )
-                        self._dwell_states[pair] = state
+                        # Recover an active flagged dwell session if tracker reassigned the vehicle's track ID at the same spot
+                        transfer_radius = max(movement_threshold * 3.0, 0.05)
+                        transfer_grace = max(dwell_grace_seconds, 15.0)
+                        best_prev_pair: tuple[int, str] | None = None
+                        best_prev_dist = transfer_radius
+                        for prev_pair, prev_state in self._dwell_states.items():
+                            if (
+                                prev_pair[1] != zone.id
+                                or prev_pair in active_pairs
+                                or prev_pair[0] in active_vehicle_ids
+                                or not prev_state.flagged
+                                or prev_state.violation_key is None
+                                or (now_ts - prev_state.last_seen_at) > transfer_grace
+                            ):
+                                continue
+                            dist_prev = math.hypot(nx - prev_state.anchor_pos[0], ny - prev_state.anchor_pos[1])
+                            if dist_prev <= best_prev_dist:
+                                best_prev_dist = dist_prev
+                                best_prev_pair = prev_pair
+
+                        if best_prev_pair is not None:
+                            state = self._dwell_states.pop(best_prev_pair)
+                            self._flagged_pairs.discard(best_prev_pair)
+                            self._flagged_pairs.add(pair)
+                            dt = max(0.0, now_ts - state.last_seen_at)
+                            state.stationary_seconds = max(
+                                state.stationary_seconds + dt, now_ts - state.entered_at
+                            )
+                            state.anchor_pos = (nx, ny)
+                            state.last_seen_at = now_ts
+                            self._dwell_states[pair] = state
+                        else:
+                            state = DwellState(
+                                zone_id=zone.id,
+                                zone_name=zone.name,
+                                entered_at=now_ts,
+                                last_seen_at=now_ts,
+                                anchor_pos=(nx, ny),
+                                stationary_seconds=0.0,
+                                flagged=(pair in self._flagged_pairs),
+                            )
+                            self._dwell_states[pair] = state
                     else:
                         dt = max(0.0, now_ts - state.last_seen_at)
                         dist = math.hypot(nx - state.anchor_pos[0], ny - state.anchor_pos[1])
-                        if dist <= movement_threshold:
+                        if state.flagged:
+                            # Keep counting continuously once a red-zone violation is active
+                            state.stationary_seconds = max(
+                                state.stationary_seconds + dt, now_ts - state.entered_at
+                            )
+                            state.anchor_pos = (nx, ny)
+                        elif dist <= movement_threshold:
                             state.stationary_seconds += dt
                         else:
-                            # Vehicle is actively moving; reset stationary timer
+                            # Vehicle is actively moving before threshold; reset stationary timer
                             state.anchor_pos = (nx, ny)
                             state.stationary_seconds = 0.0
                             state.entered_at = now_ts
                         state.last_seen_at = now_ts
 
+                    newly_flagged = False
                     if state.stationary_seconds >= dwell_seconds and not state.flagged:
                         state.flagged = True
+                        state.violation_key = (tid, zone.id)
                         self._flagged_pairs.add(pair)
+                        newly_flagged = True
                         started_iso = datetime.fromtimestamp(state.entered_at, tz=timezone.utc).astimezone().isoformat()
                         flagged_iso = datetime.fromtimestamp(now_ts, tz=timezone.utc).astimezone().isoformat()
                         res.new_violations.append(
@@ -390,6 +444,17 @@ class RedZoneMonitor:
                             )
                         )
 
+                    if state.flagged and not newly_flagged and state.violation_key is not None:
+                        res.dwell_updates.append(
+                            ViolationDwellUpdate(
+                                violation_key=state.violation_key,
+                                track_id=tid,
+                                zone_id=zone.id,
+                                dwell_seconds=round(state.stationary_seconds, 1),
+                                completed=False,
+                            )
+                        )
+
                     status["in_red_zone"] = True
                     status["zone_name"] = zone.name
                     status["dwell_seconds"] = max(status["dwell_seconds"], round(state.stationary_seconds, 1))
@@ -397,12 +462,31 @@ class RedZoneMonitor:
 
             res.track_statuses[tid] = status
 
-        # Clear dwell states only after exceeding the dropout grace period
+        # Clear dwell states only after exceeding the dropout grace period; finalize flagged duration on departure
         for pair in list(self._dwell_states.keys()):
-            if (
-                pair not in active_pairs
-                and (now_ts - self._dwell_states[pair].last_seen_at) > dwell_grace_seconds
-            ):
+            if pair in active_pairs:
+                continue
+            st = self._dwell_states[pair]
+            if st.flagged:
+                grace = (
+                    min(dwell_grace_seconds, 2.0)
+                    if pair[0] in active_vehicle_ids
+                    else max(dwell_grace_seconds, 15.0)
+                )
+            else:
+                grace = dwell_grace_seconds
+            if (now_ts - st.last_seen_at) > grace:
+                if st.flagged and st.violation_key is not None:
+                    res.dwell_updates.append(
+                        ViolationDwellUpdate(
+                            violation_key=st.violation_key,
+                            track_id=pair[0],
+                            zone_id=pair[1],
+                            dwell_seconds=round(st.stationary_seconds, 1),
+                            completed=True,
+                        )
+                    )
+                self._flagged_pairs.discard(pair)
                 del self._dwell_states[pair]
 
         # Retain track metadata for 15 minutes so brief dropouts never inflate unique vehicle counts
@@ -1236,6 +1320,18 @@ def _hex_to_bgr(hex_color: str) -> tuple[int, int, int]:
     return (b, g, r)
 
 
+def format_dwell_duration(seconds: float) -> str:
+    """Format parked dwell seconds cleanly as '45s', '2m 15s', or '1h 5m 12s'."""
+    total = max(0, int(round(seconds)))
+    if total < 60:
+        return f"{total}s"
+    mins, secs = divmod(total, 60)
+    if mins < 60:
+        return f"{mins}m {secs}s"
+    hours, mins = divmod(mins, 60)
+    return f"{hours}h {mins}m {secs}s"
+
+
 def annotate_frame(
     frame: np.ndarray,
     tracks: list[TrackedDetection],
@@ -1300,7 +1396,8 @@ def annotate_frame(
             label = f"EMERGENCY (EXEMPT) #{det.track_id} {det.class_name}"
         elif st.get("violation"):
             color = (48, 48, 255)  # Bright Red
-            label = f"ILLEGAL PARK #{det.track_id} {det.class_name} ({st.get('dwell_seconds', 0):.0f}s)"
+            dur_label = format_dwell_duration(st.get("dwell_seconds", 0.0))
+            label = f"ILLEGAL PARK #{det.track_id} {det.class_name} ({dur_label})"
         elif st.get("in_red_zone"):
             color = (0, 165, 255)  # Orange
             label = f"#{det.track_id} {det.class_name} {st.get('dwell_seconds', 0):.0f}/{dwell_threshold:.0f}s"

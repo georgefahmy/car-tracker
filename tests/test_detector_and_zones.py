@@ -965,5 +965,167 @@ def test_line_crossing_ignores_stationary_jitter() -> None:
     assert inc_fast == {"ln1": (0, 1)}
 
 
+def test_continuous_red_zone_dwell_and_snapshot_update(tmp_path: Path) -> None:
+    import cv2
+
+    from app.database import Database
+    from app.detector import format_dwell_duration
+    from app.stream import StreamWorker
+
+    assert format_dwell_duration(0) == "0s"
+    assert format_dwell_duration(45) == "45s"
+    assert format_dwell_duration(135) == "2m 15s"
+    assert format_dwell_duration(3912) == "1h 5m 12s"
+
+    monitor = RedZoneMonitor()
+    zone = ZoneModel(
+        id="z1",
+        name="Fire Lane",
+        points=[[0.3, 0.3], [0.7, 0.3], [0.7, 0.7], [0.3, 0.7]],
+        enabled=True,
+    )
+
+    # Car enters at t=100.0 and triggers violation at t=130.0 (30s)
+    monitor.process_tracks(
+        [_make_car(1, 0.5, 0.5)],
+        1000,
+        1000,
+        [zone],
+        now_ts=100.0,
+        dwell_seconds=30.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+    )
+    r_flag = monitor.process_tracks(
+        [_make_car(1, 0.5, 0.5)],
+        1000,
+        1000,
+        [zone],
+        now_ts=130.0,
+        dwell_seconds=30.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+    )
+    assert len(r_flag.new_violations) == 1
+    assert r_flag.new_violations[0].dwell_seconds == 30.0
+    assert r_flag.track_statuses[1]["dwell_seconds"] == 30.0
+    assert r_flag.track_statuses[1]["violation"] is True
+
+    # Keeps counting continuously at t=145.0 (45s) and t=235.0 (135s) despite small drift inside zone
+    r_45 = monitor.process_tracks(
+        [_make_car(1, 0.51, 0.51)],
+        1000,
+        1000,
+        [zone],
+        now_ts=145.0,
+        dwell_seconds=30.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+    )
+    assert r_45.new_violations == []
+    assert r_45.track_statuses[1]["dwell_seconds"] == 45.0
+    assert len(r_45.dwell_updates) == 1
+    assert r_45.dwell_updates[0].completed is False
+    assert r_45.dwell_updates[0].dwell_seconds == 45.0
+
+    r_135 = monitor.process_tracks(
+        [_make_car(1, 0.54, 0.52)],
+        1000,
+        1000,
+        [zone],
+        now_ts=235.0,
+        dwell_seconds=30.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+    )
+    assert r_135.track_statuses[1]["dwell_seconds"] == 135.0
+    assert len(r_135.dwell_updates) == 1
+    assert r_135.dwell_updates[0].violation_key == (1, "z1")
+    assert r_135.dwell_updates[0].dwell_seconds == 135.0
+    assert r_135.dwell_updates[0].completed is False
+
+    # Car moves outside the red zone at t=236.0 (grace) then t=239.0 (>2s visible-outside grace) -> completed with 135.0s
+    r_exit1 = monitor.process_tracks(
+        [_make_car(1, 0.1, 0.1)],
+        1000,
+        1000,
+        [zone],
+        now_ts=236.0,
+        dwell_seconds=30.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+        dwell_grace_seconds=5.0,
+    )
+    assert r_exit1.dwell_updates == []
+
+    r_exit2 = monitor.process_tracks(
+        [_make_car(1, 0.1, 0.1)],
+        1000,
+        1000,
+        [zone],
+        now_ts=239.0,
+        dwell_seconds=30.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+        dwell_grace_seconds=5.0,
+    )
+    assert len(r_exit2.dwell_updates) == 1
+    assert r_exit2.dwell_updates[0].violation_key == (1, "z1")
+    assert r_exit2.dwell_updates[0].dwell_seconds == 135.0
+    assert r_exit2.dwell_updates[0].completed is True
+
+    # SQLite dwell update + atomic snapshot re-render from clean start-of-violation JPEG buffer
+    settings = Settings(data_dir=str(tmp_path / "data"))
+    db = Database(settings.db_path)
+    worker = StreamWorker(settings=settings, db=db)
+
+    snap_fname = "violation_test_t1.jpg"
+    snap_path = worker.snapshots_dir / snap_fname
+    rec = db.add_violation(
+        track_id=1,
+        zone_id="z1",
+        zone_name="Fire Lane",
+        vehicle_class="car",
+        started_at="2026-11-15T10:00:00+00:00",
+        flagged_at="2026-11-15T10:00:30+00:00",
+        dwell_seconds=30.0,
+        snapshot_filename=snap_fname,
+    )
+    db.update_violation_dwell(rec.id, 135.0)
+    rows = db.get_violations(limit=10)
+    assert len(rows) == 1
+    assert rows[0].dwell_seconds == 135.0
+
+    clean_frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    ok_clean, clean_buf = cv2.imencode(".jpg", clean_frame, [cv2.IMWRITE_JPEG_QUALITY, 94])
+    assert ok_clean
+    snap_tracks = [_make_car(1, 0.5, 0.5, w=640, h=360)]
+    entry = {
+        "violation_id": rec.id,
+        "orig_track_id": 1,
+        "zone_id": "z1",
+        "snap_path": snap_path,
+        "clean_jpeg": clean_buf.tobytes(),
+        "tracks": snap_tracks,
+        "track_statuses": {1: {"in_red_zone": True, "dwell_seconds": 30.0, "violation": True, "zone_name": "Fire Lane"}},
+        "zones": [zone],
+        "counting_lines": [],
+        "dwell_threshold": 30.0,
+        "annotation_scale": 1.0,
+    }
+
+    assert worker._refresh_violation_snapshot(entry, 30.0) is True
+    bytes_30s = snap_path.read_bytes()
+    assert worker._refresh_violation_snapshot(entry, 135.0) is True
+    bytes_135s = snap_path.read_bytes()
+
+    assert snap_path.exists()
+    assert bytes_135s != bytes_30s
+    rendered = cv2.imread(str(snap_path))
+    assert rendered is not None
+    assert rendered.shape == (360, 640, 3)
+    assert [p for p in worker.snapshots_dir.iterdir() if p.name.endswith(".tmp")] == []
+
+
 
 

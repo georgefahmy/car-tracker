@@ -497,7 +497,14 @@ class StreamWorker:
                     total_people=step.new_total_people,
                 )
 
-            if step.new_violations:
+            new_speeds = self.line_monitor.consume_new_speeds()
+            speeding_events = (
+                [sp for sp in new_speeds if sp["speed_mph"] > cfg.speed_limit_mph]
+                if cfg.speed_capture_enabled
+                else []
+            )
+
+            if step.new_violations or speeding_events:
                 snap_base = self._get_highres_violation_frame(frame, cfg)
                 sh, sw = snap_base.shape[:2]
                 snap_tracks = self._scale_tracks(tracks, w, h, sw, sh)
@@ -525,6 +532,27 @@ class StreamWorker:
                         started_at=v.started_at,
                         flagged_at=v.flagged_at,
                         dwell_seconds=v.dwell_seconds,
+                        snapshot_filename=fname,
+                    )
+                    with self._lock:
+                        self._last_violation = rec.model_dump()
+                    if cfg.webhook_url.strip():
+                        self._dispatch_webhook(cfg.webhook_url.strip(), rec.model_dump(), snap_path)
+
+                for sp in speeding_events:
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    ts_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                    fname = f"speeding_{ts_slug}_t{sp['track_id']}.jpg"
+                    snap_path = self.snapshots_dir / fname
+                    cv2.imwrite(str(snap_path), annotated_full, [cv2.IMWRITE_JPEG_QUALITY, 92])
+                    rec = self.db.add_violation(
+                        track_id=sp["track_id"],
+                        zone_id="speeding",
+                        zone_name=f"Speeding {sp['speed_mph']:.1f} mph (limit {cfg.speed_limit_mph:g} mph)",
+                        vehicle_class=sp["vehicle_class"],
+                        started_at=now_iso,
+                        flagged_at=now_iso,
+                        dwell_seconds=float(sp["speed_mph"]),
                         snapshot_filename=fname,
                     )
                     with self._lock:
@@ -636,10 +664,16 @@ class StreamWorker:
             try:
                 import requests
 
-                msg = (
-                    f"🚨 Red-Zone Violation: {record['vehicle_class'].upper()} #{record['track_id']} "
-                    f"in {record['zone_name']} (dwell: {record['dwell_seconds']:.0f}s)"
-                )
+                if record.get("zone_id") == "speeding":
+                    msg = (
+                        f"🚨 Speeding Alert: {record['vehicle_class'].upper()} #{record['track_id']} "
+                        f"— {record['zone_name']}"
+                    )
+                else:
+                    msg = (
+                        f"🚨 Red-Zone Violation: {record['vehicle_class'].upper()} #{record['track_id']} "
+                        f"in {record['zone_name']} (dwell: {record['dwell_seconds']:.0f}s)"
+                    )
                 if "discord.com/api/webhooks" in url:
                     with open(snap_path, "rb") as f:
                         requests.post(

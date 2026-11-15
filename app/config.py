@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     emergency_strobe_swing: float = 0.015
     emergency_fire_red_ratio: float = 0.35
     annotation_scale: float = 1.0
+    speed_capture_enabled: bool = True
+    speed_limit_mph: float = 25.0
     webhook_url: str = ""
     daily_report_enabled: bool = True
     daily_report_time: str = "23:55"
@@ -87,6 +89,8 @@ class RuntimeConfig(BaseModel):
     emergency_strobe_swing: float = Field(default=0.015, ge=0.002, le=0.15)
     emergency_fire_red_ratio: float = Field(default=0.35, ge=0.10, le=0.80)
     annotation_scale: float = Field(default=1.0, ge=0.4, le=3.0)
+    speed_capture_enabled: bool = True
+    speed_limit_mph: float = Field(default=25.0, ge=1.0, le=150.0)
     webhook_url: str = ""
     daily_report_enabled: bool = True
     daily_report_time: str = "23:55"
@@ -118,6 +122,8 @@ class RuntimeConfig(BaseModel):
             emergency_strobe_swing=s.emergency_strobe_swing,
             emergency_fire_red_ratio=s.emergency_fire_red_ratio,
             annotation_scale=s.annotation_scale,
+            speed_capture_enabled=s.speed_capture_enabled,
+            speed_limit_mph=s.speed_limit_mph,
             webhook_url=s.webhook_url,
             daily_report_enabled=s.daily_report_enabled,
             daily_report_time=s.daily_report_time,

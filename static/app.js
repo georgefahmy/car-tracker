@@ -782,11 +782,14 @@ async function refreshViolations() {
       const card = document.createElement("div");
       card.className = "violation-card";
       const timeStr = new Date(v.flagged_at).toLocaleString();
+      const detailLine = v.zone_id === "speeding"
+        ? `Speed: ${v.dwell_seconds.toFixed(1)} mph`
+        : `Dwell: ${v.dwell_seconds.toFixed(0)}s`;
       card.innerHTML = `
         <img src="/snapshots/${encodeURIComponent(v.snapshot_filename)}" alt="Snapshot" />
         <div class="violation-meta">
           <div class="violation-title">${escapeHtml(v.vehicle_class.toUpperCase())} #${v.track_id} • ${escapeHtml(v.zone_name)}</div>
-          <div class="muted">Dwell: ${v.dwell_seconds.toFixed(0)}s</div>
+          <div class="muted">${detailLine}</div>
           <div class="muted">${escapeHtml(timeStr)}</div>
         </div>
         <button class="btn btn-ghost" title="Delete">✕</button>
@@ -950,6 +953,8 @@ function formToPayload() {
     dwell_seconds: Number(fd.get("dwell_seconds")),
     movement_threshold: Number(fd.get("movement_threshold")),
     annotation_scale: Number(fd.get("annotation_scale")),
+    speed_capture_enabled: Boolean(settingsForm.elements["speed_capture_enabled"]?.checked),
+    speed_limit_mph: Number(fd.get("speed_limit_mph")) || 25,
     exempt_emergency_vehicles: Boolean(settingsForm.elements["exempt_emergency_vehicles"]?.checked),
     emergency_min_saturation: Number(fd.get("emergency_min_saturation")),
     emergency_min_value: Number(fd.get("emergency_min_value")),

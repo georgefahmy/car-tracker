@@ -438,6 +438,7 @@ class LineCrossingMonitor:
         self._speed_anchor: dict[int, tuple[float, float]] = {}
         self._stationary_since: dict[int, float] = {}
         self._recent_speeds: deque[dict[str, Any]] = deque(maxlen=25)
+        self._new_speed_events: list[dict[str, Any]] = []
         self._calibrated: bool = False
 
     def reset(self) -> None:
@@ -450,6 +451,12 @@ class LineCrossingMonitor:
         self._speed_anchor.clear()
         self._stationary_since.clear()
         self._recent_speeds.clear()
+        self._new_speed_events.clear()
+
+    def consume_new_speeds(self) -> list[dict[str, Any]]:
+        events = list(self._new_speed_events)
+        self._new_speed_events.clear()
+        return events
 
     def get_track_speeds(self) -> dict[int, float]:
         return dict(self._track_speeds_mph)
@@ -532,17 +539,17 @@ class LineCrossingMonitor:
                                 self._track_speeds_mph[tid] = mph_rounded
                                 self._speed_anchor[tid] = curr
                                 self._stationary_since[tid] = now_ts
-                                self._recent_speeds.append(
-                                    {
-                                        "track_id": tid,
-                                        "vehicle_class": det.class_name,
-                                        "speed_mph": mph_rounded,
-                                        "from_line": first_name,
-                                        "to_line": ln.name,
-                                        "distance_ft": round(dist_ft, 1),
-                                        "dt_s": round(dt_cross, 2),
-                                    }
-                                )
+                                speed_event = {
+                                    "track_id": tid,
+                                    "vehicle_class": det.class_name,
+                                    "speed_mph": mph_rounded,
+                                    "from_line": first_name,
+                                    "to_line": ln.name,
+                                    "distance_ft": round(dist_ft, 1),
+                                    "dt_s": round(dt_cross, 2),
+                                }
+                                self._recent_speeds.append(speed_event)
+                                self._new_speed_events.append(speed_event)
 
             if tid in self._track_speeds_mph:
                 anchor = self._speed_anchor.get(tid, curr)

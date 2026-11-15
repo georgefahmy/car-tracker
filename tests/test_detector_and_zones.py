@@ -430,6 +430,10 @@ def test_two_line_speed_estimation() -> None:
     assert summary["calibrated"] is True
     assert summary["samples_count"] == 1
     assert summary["last_speed_mph"] == speeds[7]
+    new_events = lm.consume_new_speeds()
+    assert len(new_events) == 1
+    assert new_events[0]["track_id"] == 7
+    assert lm.consume_new_speeds() == []
 
     # Holding the vehicle stationary for >= 3s clears its live speed badge while keeping summary history
     lm.process_tracks([_make_car(7, 0.9, 0.5)], 1000, 1000, [ln1, ln2], now_ts=5.5, calib=calib)

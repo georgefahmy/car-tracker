@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.8
+- Added high-res snapshot capture & Discord/webhook alerting when a vehicle exceeds the configurable Speed Limit (default `25 mph`) between two traffic lines.
+
 ## 1.0.7
 - Switched `Auto` inference backend back to PyTorch CPU (OpenVINO's oneTBB runtime caused 75–100% CPU spin-waiting vs ~42% on PyTorch; OpenVINO remains selectable manually in Settings).
 - Skipped preview annotation & JPEG encoding whenever no browser viewer has polled in the last 5 seconds, and capped active preview encoding to ~12 FPS instead of 25 FPS.

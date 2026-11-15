@@ -765,6 +765,24 @@ function renderZonesList() {
   restoreRowFocus(el, focusMeta, document.getElementById("btnDrawZone"));
 }
 
+function formatSourceSummary(data) {
+  if (data.source_label) return String(data.source_label);
+  const raw = String(data.source || "").trim();
+  if (!raw) return "";
+  const lower = raw.toLowerCase();
+  if (lower.startsWith("rtmp://") || lower.startsWith("rtsp://")) {
+    const proto = lower.startsWith("rtmp://") ? "RTMP" : "RTSP";
+    if (/([_=/])sub\b|stream=1\b/i.test(raw)) return `${proto} • Sub Stream`;
+    if (/([_=/])main\b|stream=0\b/i.test(raw)) return `${proto} • Main Stream`;
+    return proto;
+  }
+  if (lower.startsWith("http://") || lower.startsWith("https://")) {
+    return "HTTP Snap";
+  }
+  const fname = raw.split(/[\\/]/).pop() || "video";
+  return `File (${fname})`;
+}
+
 function updateCvRuntimeHint() {
   const hintEl = document.getElementById("cvRuntimeHint");
   if (!hintEl) return;
@@ -847,8 +865,9 @@ async function refreshStats() {
     } else if (data.backend_fallback) {
       modelNoteStr = ` • ${data.backend_fallback}`;
     }
+    const sourceLabel = formatSourceSummary(data);
     document.getElementById("streamInfo").textContent =
-      `${data.stream_status.toUpperCase()} • ${resStr} • ${data.fps} FPS${modelStr}${backendStr}${modelNoteStr}${sysStr} • ${data.source}`;
+      `${data.stream_status.toUpperCase()} • ${resStr} • ${data.fps} FPS${modelStr}${backendStr}${modelNoteStr}${sysStr}${sourceLabel ? ` • ${sourceLabel}` : ""}`;
     if (settingsModal && !settingsModal.classList.contains("hidden")) {
       updateCvRuntimeHint();
     }

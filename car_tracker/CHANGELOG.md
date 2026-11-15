@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.18
+- **Compact Header Stream Label**: Replaced the full masked stream URL in `#streamInfo` with a concise protocol and stream-quality label (`RTMP • Sub Stream`, `RTSP • Main Stream`, `HTTP Snap`, or `File (<filename>)`) backed by `StreamWorker.get_source_summary()` and structured `stream_protocol` / `stream_quality` / `source_label` fields in `GET /api/stats` (while keeping `source` for API compatibility).
+
 ## 1.0.17
 - **Live YOLO Model, Inference Backend & Image Size Hot-Reload**: Changing `yolo_model`, `inference_backend`, or static `yolo_imgsz` (`onnx`/`openvino`/`openvino_gpu`) in Settings now reloads the `ObjectDetector` dynamically inside the live processing loop without restarting the container or dropping active RTSP / HTTP Snap connections.
 - **Explicit Backend Honors on GPU Hosts**: Fixed `ObjectDetector` initialization so explicit `onnx`, `openvino`, `openvino_gpu`, and `pytorch` selections are honored even on hosts with Apple MPS or CUDA GPUs, recorded with fallback reasons when a requested runtime is unavailable, and enforced static `imgsz` on ONNX/OpenVINO inference calls.

@@ -230,6 +230,32 @@ class StreamWorker:
             password=c.nvr_pass,
         )
 
+    def get_source_summary(
+        self, cfg: RuntimeConfig | None = None, stream_status: str | None = None
+    ) -> dict[str, str]:
+        c = cfg or self.config
+        status = self._stream_status if stream_status is None else stream_status
+        if c.test_video_path.strip():
+            fname = Path(c.test_video_path.strip()).name or "video"
+            return {
+                "protocol": "File",
+                "stream_quality": fname,
+                "source_label": f"File ({fname})",
+            }
+        if c.stream_mode == "http_snap" or status == "connected_http":
+            return {
+                "protocol": "HTTP Snap",
+                "stream_quality": "",
+                "source_label": "HTTP Snap",
+            }
+        protocol = "RTMP" if c.stream_mode == "rtmp" else "RTSP"
+        quality_label = "Main Stream" if c.nvr_stream_type == "main" else "Sub Stream"
+        return {
+            "protocol": protocol,
+            "stream_quality": quality_label,
+            "source_label": f"{protocol} • {quality_label}",
+        }
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
@@ -392,11 +418,15 @@ class StreamWorker:
         system_metrics = self._get_system_metrics()
         ha_status = self.ha_publisher.get_status()
         with self._lock:
+            source_summary = self.get_source_summary(self.config, self._stream_status)
             return {
                 "version": get_app_version(),
                 "stream_status": self._stream_status,
                 "last_error": self._last_error,
                 "source": mask_rtsp_url(self.get_source_url()),
+                "stream_protocol": source_summary["protocol"],
+                "stream_quality": source_summary["stream_quality"],
+                "source_label": source_summary["source_label"],
                 "resolution": {"width": self._resolution[0], "height": self._resolution[1]},
                 "fps": round(self._measured_fps, 2),
                 "active_cars": self._active_cars,

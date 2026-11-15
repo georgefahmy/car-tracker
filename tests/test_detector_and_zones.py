@@ -1146,7 +1146,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.17"
+    assert expected_ver == "1.0.18"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1328,6 +1328,64 @@ def test_live_model_and_backend_hot_reload(tmp_path: Path, monkeypatch) -> None:
     assert len(created_calls) == 5
     assert worker.get_live_state()["yolo_model"] == "yolo11s.pt"
     assert worker.get_live_state()["model_error"] == ""
+
+
+def test_source_summary_labels_for_protocols_and_streams(tmp_path: Path) -> None:
+    from app.config import RuntimeConfig
+    from app.database import Database
+    from app.stream import StreamWorker
+
+    settings = Settings(data_dir=str(tmp_path / "data"), nvr_pass="pw")
+    db = Database(settings.db_path)
+    worker = StreamWorker(settings=settings, db=db)
+
+    # RTMP sub stream
+    worker.update_config(RuntimeConfig(stream_mode="rtmp", nvr_stream_type="sub", nvr_pass="pw"))
+    rtmp_state = worker.get_live_state()
+    assert rtmp_state["stream_protocol"] == "RTMP"
+    assert rtmp_state["stream_quality"] == "Sub Stream"
+    assert rtmp_state["source_label"] == "RTMP • Sub Stream"
+    assert rtmp_state["source"].startswith("rtmp://")
+    assert "password=***" in rtmp_state["source"]
+
+    # RTSP main stream
+    worker.update_config(RuntimeConfig(stream_mode="rtsp", nvr_stream_type="main"))
+    rtsp_state = worker.get_live_state()
+    assert rtsp_state["stream_protocol"] == "RTSP"
+    assert rtsp_state["stream_quality"] == "Main Stream"
+    assert rtsp_state["source_label"] == "RTSP • Main Stream"
+
+    # Auto mode: RTSP when connected, HTTP Snap when connected_http
+    worker.update_config(RuntimeConfig(stream_mode="auto", nvr_stream_type="sub"))
+    worker._set_status("connected", "")
+    auto_rtsp_state = worker.get_live_state()
+    assert auto_rtsp_state["source_label"] == "RTSP • Sub Stream"
+
+    worker._set_status("connected_http", "Using HTTP Snap fallback")
+    auto_http_state = worker.get_live_state()
+    assert auto_http_state["stream_protocol"] == "HTTP Snap"
+    assert auto_http_state["stream_quality"] == ""
+    assert auto_http_state["source_label"] == "HTTP Snap"
+
+    # Explicit HTTP Snap mode
+    worker.update_config(RuntimeConfig(stream_mode="http_snap"))
+    worker._set_status("connected_http", "")
+    assert worker.get_live_state()["source_label"] == "HTTP Snap"
+
+    # Local test video file
+    worker.update_config(RuntimeConfig(test_video_path="/tmp/samples/driveway_clip.mp4"))
+    file_state = worker.get_live_state()
+    assert file_state["stream_protocol"] == "File"
+    assert file_state["source_label"] == "File (driveway_clip.mp4)"
+
+    # FastAPI GET /api/stats exposure
+    app = create_app(settings=Settings(data_dir=str(tmp_path / "api_data")), start_worker=False)
+    with TestClient(app) as client:
+        stats = client.get("/api/stats").json()
+        assert "source_label" in stats
+        assert "stream_protocol" in stats
+        assert "stream_quality" in stats
+
 
 
 

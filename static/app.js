@@ -799,6 +799,15 @@ async function refreshStats() {
     if (sys.memory_percent != null) sysParts.push(`RAM ${sys.memory_percent}%`);
     if (sys.cpu_temp_c != null) sysParts.push(`${sys.cpu_temp_c}°C`);
     const sysStr = sysParts.length ? ` • ${sysParts.join(" • ")}` : "";
+    const verBadge = document.getElementById("appVersionBadge");
+    if (verBadge && data.version) {
+      const verLabel = `v${String(data.version).replace(/^v/i, "")}`;
+      if (verBadge.textContent !== verLabel) {
+        verBadge.textContent = verLabel;
+      }
+      verBadge.classList.remove("hidden");
+    }
+
     const backendStr = data.inference_backend ? ` • ${String(data.inference_backend).toUpperCase()}` : "";
     document.getElementById("streamInfo").textContent =
       `${data.stream_status.toUpperCase()} • ${resStr} • ${data.fps} FPS${backendStr}${sysStr} • ${data.source}`;

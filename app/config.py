@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import functools
+import os
+import re
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
+
+APP_ROOT = Path(__file__).resolve().parent.parent
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -193,3 +198,39 @@ def mask_rtsp_url(url: str) -> str:
         user, _ = creds.split(":", 1)
         return f"{scheme}://{user}:***@{host_part}"
     return url
+
+
+def parse_version_from_config_yaml(config_yaml_path: Path) -> str | None:
+    """Extract the top-level `version:` value from a Home Assistant add-on config.yaml."""
+    try:
+        text = config_yaml_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(
+        r'^\s*version\s*:\s*["\']?([^"\'#\r\n]+?)["\']?\s*(?:#.*)?$',
+        text,
+        re.MULTILINE,
+    )
+    return match.group(1).strip() if match else None
+
+
+@functools.lru_cache(maxsize=1)
+def get_app_version() -> str:
+    """Return the current add-on/application version string."""
+    addon_tmp = Path("/tmp/addon_config.yaml")
+    repo_cfg = APP_ROOT / "car_tracker" / "config.yaml"
+    in_supervisor = bool(os.environ.get("SUPERVISOR_TOKEN") or os.environ.get("HASSIO_TOKEN"))
+    candidates = [addon_tmp, repo_cfg] if in_supervisor else [repo_cfg, addon_tmp]
+    for path in candidates:
+        ver = parse_version_from_config_yaml(path)
+        if ver:
+            return ver
+    pyproject = APP_ROOT / "pyproject.toml"
+    try:
+        text = pyproject.read_text(encoding="utf-8")
+        m = re.search(r'^\s*version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+        if m:
+            return m.group(1).strip()
+    except OSError:
+        pass
+    return "0.0.0"

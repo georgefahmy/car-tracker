@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app.config import RuntimeConfig, Settings, build_rtmp_url, build_rtsp_url
+from app.config import RuntimeConfig, Settings, build_rtmp_url, build_rtsp_url, get_app_version
 from app.database import CountingLineModel, Database, GroundCalibrationModel, ViolationRecord, ZoneModel
 from app.detector import (
     compute_ground_transforms,
@@ -74,7 +74,7 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
             worker.stop()
             db.close()
 
-    app = FastAPI(title="Reolink Car & Red-Zone Tracker", lifespan=lifespan)
+    app = FastAPI(title="Reolink Car & Red-Zone Tracker", version=get_app_version(), lifespan=lifespan)
     app.state.db = db
     app.state.worker = worker
     app.state.settings = cfg_settings

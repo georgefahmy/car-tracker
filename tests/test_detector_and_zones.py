@@ -1127,5 +1127,36 @@ def test_continuous_red_zone_dwell_and_snapshot_update(tmp_path: Path) -> None:
     assert [p for p in worker.snapshots_dir.iterdir() if p.name.endswith(".tmp")] == []
 
 
+def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
+    from app.config import get_app_version, parse_version_from_config_yaml
+    from app.ha_integration import HomeAssistantPublisher
+
+    cfg_dq = tmp_path / "dq.yaml"
+    cfg_dq.write_text('name: "Car Tracker"\nversion: "1.2.3"\n', encoding="utf-8")
+    assert parse_version_from_config_yaml(cfg_dq) == "1.2.3"
+
+    cfg_sq = tmp_path / "sq.yaml"
+    cfg_sq.write_text("version: '1.2.4'\n", encoding="utf-8")
+    assert parse_version_from_config_yaml(cfg_sq) == "1.2.4"
+
+    cfg_uq = tmp_path / "uq.yaml"
+    cfg_uq.write_text("version: 1.2.5 # release\n", encoding="utf-8")
+    assert parse_version_from_config_yaml(cfg_uq) == "1.2.5"
+
+    assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
+
+    get_app_version.cache_clear()
+    assert get_app_version() == "1.0.16"
+    assert HomeAssistantPublisher.APP_VERSION == "1.0.16"
+
+    settings = Settings(data_dir=str(tmp_path / "data"))
+    app = create_app(settings=settings, start_worker=False)
+    with TestClient(app) as client:
+        stats = client.get("/api/stats").json()
+        assert stats["version"] == "1.0.16"
+        index_html = client.get("/").text
+        assert 'id="appVersionBadge"' in index_html
+
+
 
 

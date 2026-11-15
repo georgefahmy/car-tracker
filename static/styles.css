@@ -60,7 +60,39 @@ h1, h2, h3 { text-wrap: balance; }
   min-inline-size: 0;
 }
 .brand > div { min-inline-size: 0; }
-.brand h1 { margin: 0; font-size: 1.15rem; }
+.brand-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.brand h1 {
+  margin: 0;
+  font-size: 1.15rem;
+  text-box: trim-both cap alphabetic;
+}
+.version-badge {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.74rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  text-box: trim-both cap alphabetic;
+  color: #93c5fd;
+  background: #1a2639;
+  border: 1px solid #4b6790;
+  white-space: nowrap;
+}
+@media (forced-colors: active) {
+  .version-badge {
+    color: CanvasText;
+    background: Canvas;
+    border-color: CanvasText;
+  }
+}
 .subtitle { margin: 2px 0 0; font-size: 0.82rem; color: var(--muted); }
 
 .dot {

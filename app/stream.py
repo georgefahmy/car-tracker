@@ -17,7 +17,14 @@ except ImportError:  # pragma: no cover
     psutil = None
 
 from app.alpr import LicensePlateReader
-from app.config import RuntimeConfig, Settings, build_rtmp_url, build_rtsp_url, mask_rtsp_url
+from app.config import (
+    RuntimeConfig,
+    Settings,
+    build_rtmp_url,
+    build_rtsp_url,
+    get_app_version,
+    mask_rtsp_url,
+)
 from app.database import Database
 from app.detector import (
     EmergencyVehicleClassifier,
@@ -365,6 +372,7 @@ class StreamWorker:
         ha_status = self.ha_publisher.get_status()
         with self._lock:
             return {
+                "version": get_app_version(),
                 "stream_status": self._stream_status,
                 "last_error": self._last_error,
                 "source": mask_rtsp_url(self.get_source_url()),

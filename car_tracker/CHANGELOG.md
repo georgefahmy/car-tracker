@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.16
+- **UI Header Version Badge**: Displays the running add-on version (e.g. `v1.0.16`) as a pill badge beside the header title in the web UI, backed by a dynamic `version` field in `GET /api/stats` and FastAPI metadata sourced from `config.yaml` (and `/tmp/addon_config.yaml` inside the Home Assistant add-on container), keeping the Web UI, API, and Home Assistant `"Car Tracker"` device software version automatically in sync.
+
 ## 1.0.15
 - **Continuous Red-Zone Parked Timer**: Keeps counting parked duration continuously after a vehicle passes the dwell threshold (`30s` → `45s` → `2m 15s`) for the entire time it remains parked in a red zone—across the live video overlay (`ILLEGAL PARK`), Home Assistant's `max_dwell_seconds` attribute, and the Violations log (`Parked:` duration)—with seamless track-ID handover and clean finalization when the car departs.
 - **Live Start-of-Violation Snapshot Updates**: Retains a lightweight compressed JPEG of the clean start-of-violation high-res frame in memory (~300 KB per active violator, instead of a heavy MP4 video ring buffer) and atomically re-renders the initial violation snapshot every 5 seconds and upon vehicle departure so the captured start-of-violation photo always shows the updated total parked duration.

@@ -8,6 +8,8 @@ from typing import Any
 
 import requests
 
+from app.config import get_app_version
+
 
 class HomeAssistantPublisher:
     """Publishes a single Car Tracker device, its entities, and automation events to Home Assistant."""
@@ -16,7 +18,7 @@ class HomeAssistantPublisher:
     DEVICE_ID = "car_tracker_addon"
     APP_ID = "io.github.georgefahmy.car_tracker"
     APP_NAME = "Car & Red-Zone Tracker"
-    APP_VERSION = "1.0.14"
+    APP_VERSION = get_app_version()
     REGISTRATION_META_KEY = "ha_device_registration"
     REGISTRATION_SCHEMA_VERSION = 1
 

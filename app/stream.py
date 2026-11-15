@@ -252,6 +252,8 @@ class StreamWorker:
         self._ha_wake_event.set()
         new_source = self.get_source_url(new_cfg)
         if old_source != new_source or old_mode != new_cfg.stream_mode:
+            if old_source != new_source and self._detector is not None:
+                self._detector.reset()
             self._reconnect_event.set()
 
     def toggle_heatmap(self, enabled: bool | None = None) -> bool:
@@ -510,8 +512,9 @@ class StreamWorker:
             h, w = frame.shape[:2]
             zones = self.db.get_zones()
             counting_lines = self.db.get_counting_lines()
+            now_ts = time.time()
             tracks = detector.detect_and_track(
-                frame, imgsz=cfg.yolo_imgsz, conf=cfg.confidence_threshold
+                frame, imgsz=cfg.yolo_imgsz, conf=cfg.confidence_threshold, now_ts=now_ts
             )
             tracks = filter_excluded_tracks(tracks, w, h, zones)
             if cfg.exempt_emergency_vehicles:
@@ -525,7 +528,6 @@ class StreamWorker:
                 )
             self.hotspot.update(tracks, w, h)
 
-            now_ts = time.time()
             step = self.monitor.process_tracks(
                 tracks=tracks,
                 frame_w=w,
@@ -1024,6 +1026,7 @@ class StreamWorker:
                     if not ok:
                         # Loop test video seamlessly
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        detector.reset()
                         ok, frame = cap.read()
                         if not ok:
                             break

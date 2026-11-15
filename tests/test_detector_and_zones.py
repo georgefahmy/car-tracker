@@ -646,5 +646,144 @@ def test_onnx_and_openvino_gpu_config_and_fallback() -> None:
             sys.modules["openvino"] = prev
 
 
+def test_track_stabilizer_static_id_and_class_stability() -> None:
+    from app.detector import TrackStabilizer
+
+    stabilizer = TrackStabilizer()
+    w, h = 1000, 1000
+
+    def _det(
+        tid: int,
+        cls_id: int = 2,
+        cls_name: str = "car",
+        conf: float = 0.88,
+        dx: float = 0.0,
+        dy: float = 0.0,
+    ) -> TrackedDetection:
+        return TrackedDetection(
+            track_id=tid,
+            class_id=cls_id,
+            class_name=cls_name,
+            confidence=conf,
+            bbox_xyxy=(400.0 + dx, 700.0 + dy, 540.0 + dx, 840.0 + dy),
+        )
+
+    # First 5 frames build stationary consensus with raw_id=1
+    for i in range(5):
+        out = stabilizer.stabilize([_det(1, conf=0.88, dx=float(i % 2))], w, h, now_ts=10.0 + i * 0.5, conf_threshold=0.35)
+        assert len(out) == 1
+        assert out[0].track_id == 1
+        assert out[0].class_name == "car"
+
+    # Frame with overlapping duplicate (car + truck) and class flip on raw_id=9 -> keeps track_id=1, class="car"
+    out_dup = stabilizer.stabilize(
+        [
+            _det(9, cls_id=7, cls_name="truck", conf=0.72, dx=2.0),
+            _det(10, cls_id=2, cls_name="car", conf=0.55, dx=3.0),
+        ],
+        w,
+        h,
+        now_ts=13.0,
+        conf_threshold=0.35,
+    )
+    assert len(out_dup) == 1
+    assert out_dup[0].track_id == 1
+    assert out_dup[0].class_name == "car"
+
+    # Confidence dip on raw_id=14 still stitches to canonical track 1
+    out_dip = stabilizer.stabilize(
+        [_det(14, cls_id=2, cls_name="car", conf=0.22, dx=1.0)],
+        w,
+        h,
+        now_ts=13.5,
+        conf_threshold=0.35,
+    )
+    assert len(out_dip) == 1
+    assert out_dip[0].track_id == 1
+
+    # 1-frame dropout (within 2.0s) coasts stationary car #1 without blinking out
+    out_coast = stabilizer.stabilize([], w, h, now_ts=14.0, conf_threshold=0.35)
+    assert len(out_coast) == 1
+    assert out_coast[0].track_id == 1
+
+    # After >180s absence, expired stationary track is pruned and a new vehicle gets canonical track_id=2
+    out_new = stabilizer.stabilize(
+        [_det(99, cls_id=2, cls_name="car", conf=0.90)],
+        w,
+        h,
+        now_ts=200.0,
+        conf_threshold=0.35,
+    )
+    assert len(out_new) == 1
+    assert out_new[0].track_id == 2
+
+
+def test_red_zone_monitor_dwell_grace_and_static_dedup() -> None:
+    monitor = RedZoneMonitor()
+    zone = ZoneModel(
+        id="z1",
+        name="Curb Red Zone",
+        points=[[0.3, 0.3], [0.7, 0.3], [0.7, 0.7], [0.3, 0.7]],
+        enabled=True,
+    )
+
+    # Frame 1 & 2 count car #1 inside red zone
+    r1 = monitor.process_tracks(
+        [_make_car(1, 0.5, 0.5)], 1000, 1000, [zone], now_ts=100.0, dwell_seconds=10.0, movement_threshold=0.015, min_track_frames=2
+    )
+    r2 = monitor.process_tracks(
+        [_make_car(1, 0.5, 0.5)], 1000, 1000, [zone], now_ts=104.0, dwell_seconds=10.0, movement_threshold=0.015, min_track_frames=2
+    )
+    assert (r1.new_unique_cars + r2.new_unique_cars) == 1
+    assert r2.track_statuses[1]["dwell_seconds"] == 4.0
+
+    # Brief 1-frame dropout at t=106s (2s gap <= 5s dwell grace) preserves dwell state
+    r3 = monitor.process_tracks(
+        [], 1000, 1000, [zone], now_ts=106.0, dwell_seconds=10.0, movement_threshold=0.015, min_track_frames=2
+    )
+    assert r3.active_cars == 0
+
+    # Car #1 reappears at t=111s -> total stationary elapsed 11s >= 10s -> triggers violation
+    r4 = monitor.process_tracks(
+        [_make_car(1, 0.501, 0.501)], 1000, 1000, [zone], now_ts=111.0, dwell_seconds=10.0, movement_threshold=0.015, min_track_frames=2
+    )
+    assert len(r4.new_violations) == 1
+
+    # Stationary car re-appearing with a brand-new ID (#77) at same parked location within 300s must not inflate unique_cars
+    r5 = monitor.process_tracks(
+        [_make_car(77, 0.502, 0.502)], 1000, 1000, [zone], now_ts=120.0, dwell_seconds=10.0, movement_threshold=0.015, min_track_frames=2
+    )
+    r6 = monitor.process_tracks(
+        [_make_car(77, 0.502, 0.502)], 1000, 1000, [zone], now_ts=121.0, dwell_seconds=10.0, movement_threshold=0.015, min_track_frames=2
+    )
+    assert r5.new_unique_cars == 0
+    assert r6.new_unique_cars == 0
+    assert r6.new_total_cars == 0
+
+
+def test_line_crossing_ignores_stationary_jitter() -> None:
+    lm = LineCrossingMonitor()
+    line = CountingLineModel(id="ln1", name="Curb Line", p1=[0.5, 0.2], p2=[0.5, 0.8], enabled=True)
+
+    # Parked car jittering +-0.005 back and forth across x=0.5 over 20 frames -> 0 crossings
+    for i in range(20):
+        cx = 0.495 if i % 2 == 0 else 0.505
+        inc = lm.process_tracks([_make_car(1, cx, 0.5)], 1000, 1000, [line], now_ts=float(i + 1))
+        assert inc == {}
+
+    # Car spawning right near the line (0.495 -> 0.505 -> 0.535) only counts once committed across deadband + travel
+    inc_a = lm.process_tracks([_make_car(2, 0.495, 0.5)], 1000, 1000, [line], now_ts=30.0)
+    inc_b = lm.process_tracks([_make_car(2, 0.505, 0.5)], 1000, 1000, [line], now_ts=31.0)
+    inc_c = lm.process_tracks([_make_car(2, 0.535, 0.5)], 1000, 1000, [line], now_ts=32.0)
+    assert inc_a == {}
+    assert inc_b == {}
+    assert inc_c == {"ln1": (0, 1)}
+
+    # Normal moving car (0.3 -> 0.7) counts immediately in one step
+    lm.process_tracks([_make_car(3, 0.3, 0.5)], 1000, 1000, [line], now_ts=40.0)
+    inc_fast = lm.process_tracks([_make_car(3, 0.7, 0.5)], 1000, 1000, [line], now_ts=41.0)
+    assert inc_fast == {"ln1": (0, 1)}
+
+
 
 

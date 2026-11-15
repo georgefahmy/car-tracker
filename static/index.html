@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Car Tracker & Red-Zone Monitor</title>
-  <link rel="stylesheet" href="static/styles.css?v=11" />
+  <link rel="stylesheet" href="static/styles.css?v=12" />
 </head>
 <body>
   <header class="topbar">
@@ -57,18 +57,59 @@
       <div class="panel video-panel">
         <div class="panel-header">
           <h2>Live Camera Feed</h2>
-          <div class="zone-toolbar">
-            <button class="btn btn-danger" id="btnDrawZone">+ Draw Red Zone</button>
-            <button class="btn btn-secondary" id="btnAutoRedZone">Auto-Detect Red Curb</button>
-            <button class="btn btn-ghost" id="btnDrawExclusion">+ Exclusion Mask</button>
-            <button class="btn btn-secondary" id="btnDrawLine">+ Draw Traffic Line</button>
-            <button class="btn btn-secondary" id="btnCalibrateGround">3D Ground Grid</button>
-            <button class="btn btn-ghost hidden" id="btnToggleGrid">Grid: ON</button>
-            <button class="btn btn-secondary hidden" id="btnBirdseye">Bird's-Eye View</button>
-            <button class="btn btn-secondary hidden" id="btnUndoPoint">Undo Point</button>
-            <button class="btn btn-secondary hidden" id="btnRenameEdit">Rename</button>
-            <button class="btn btn-primary hidden" id="btnFinishZone">Finish & Save</button>
-            <button class="btn btn-ghost hidden" id="btnCancelDraw">Cancel</button>
+          <div class="video-header-controls">
+            <button
+              type="button"
+              class="btn btn-secondary dropdown-trigger"
+              id="btnZonesMenu"
+              popovertarget="zonesDropdown"
+              aria-expanded="false"
+            >
+              <span>Zones &amp; Lines</span>
+              <span class="menu-badge" id="zonesMenuBadge">0</span>
+              <span class="dropdown-caret" aria-hidden="true">▾</span>
+            </button>
+            <div
+              id="zonesDropdown"
+              class="zones-dropdown"
+              popover="auto"
+              role="region"
+              aria-labelledby="btnZonesMenu"
+            >
+              <div class="dropdown-section">
+                <h3>Add &amp; Calibrate</h3>
+                <div class="dropdown-actions-grid">
+                  <button type="button" class="btn btn-danger" id="btnDrawZone">+ Draw Red Zone</button>
+                  <button type="button" class="btn btn-secondary" id="btnAutoRedZone">Auto-Detect Red Curb</button>
+                  <button type="button" class="btn btn-secondary" id="btnDrawExclusion">+ Exclusion Mask</button>
+                  <button type="button" class="btn btn-secondary" id="btnDrawLine">+ Draw Traffic Line</button>
+                  <button type="button" class="btn btn-secondary" id="btnCalibrateGround">3D Ground Grid</button>
+                  <button type="button" class="btn btn-ghost hidden" id="btnToggleGrid">Grid: ON</button>
+                  <button type="button" class="btn btn-secondary hidden" id="btnBirdseye">Bird's-Eye View</button>
+                </div>
+              </div>
+              <hr class="dropdown-divider" />
+              <div class="dropdown-section">
+                <h3>Configured Red Zones</h3>
+                <div id="zonesList" class="zones-list">
+                  <span class="muted small">No red zones defined yet.</span>
+                </div>
+              </div>
+              <hr class="dropdown-divider" />
+              <div class="dropdown-section">
+                <h3>Configured Traffic Flow Lines</h3>
+                <div id="linesList" class="zones-list">
+                  <span class="muted small">No traffic lines defined yet.</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="draw-toolbar hidden" id="drawToolbar">
+              <button type="button" class="btn btn-secondary hidden" id="btnUndoPoint">Undo Point</button>
+              <button type="button" class="btn btn-secondary hidden" id="btnRenameEdit">Rename</button>
+              <button type="button" class="btn btn-primary hidden" id="btnFinishZone">Finish &amp; Save</button>
+              <button type="button" class="btn btn-ghost" id="btnCancelDraw">Cancel</button>
+            </div>
           </div>
         </div>
 
@@ -80,20 +121,7 @@
           </div>
         </div>
 
-        <div class="zones-bar">
-          <h3>Configured Red Zones</h3>
-          <div id="zonesList" class="zones-list">
-            <span class="muted">No red zones defined yet. Click "+ Draw Red Zone" to outline one.</span>
-          </div>
-        </div>
-
-        <div class="zones-bar">
-          <h3>Configured Traffic Flow Lines</h3>
-          <div id="linesList" class="zones-list">
-            <span class="muted">No traffic lines defined yet. Click "+ Draw Traffic Line" to place a 2-point counting line.</span>
-          </div>
-          <div id="speedSummary" class="muted" style="margin-top:8px; font-size:0.85rem;"></div>
-        </div>
+        <div id="speedSummary" class="speed-footer muted"></div>
       </div>
 
       <aside class="side-column">
@@ -340,6 +368,6 @@
     </div>
   </div>
 
-  <script src="static/app.js?v=11"></script>
+  <script src="static/app.js?v=12"></script>
 </body>
 </html>

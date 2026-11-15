@@ -1,9 +1,15 @@
 const videoEl = document.getElementById("videoStream");
 const zoneCanvas = document.getElementById("zoneCanvas");
 const ctx = zoneCanvas.getContext("2d");
+const btnZonesMenu = document.getElementById("btnZonesMenu");
+const zonesDropdown = document.getElementById("zonesDropdown");
+const drawToolbar = document.getElementById("drawToolbar");
+const zonesMenuBadge = document.getElementById("zonesMenuBadge");
+const supportsPopover = Object.hasOwn(HTMLElement.prototype, "popover");
 
 let savedZones = [];
 let savedLines = [];
+let lastLinesSignature = "";
 let drawingMode = null; // null | "zone" | "exclusion" | "line" | "edit" | "calibrate"
 let draftPoints = [];
 let editingTarget = null; // null | { kind: "zone" | "line", id: string, name: string }
@@ -11,6 +17,94 @@ let dragVertexIndex = -1;
 let heatmapEnabled = false;
 let groundCalib = null;
 let groundToImgMatrix = null;
+
+function updateZonesMenuBadge() {
+  if (zonesMenuBadge) {
+    zonesMenuBadge.textContent = String(savedZones.length + savedLines.length);
+  }
+}
+
+function isZonesMenuOpen() {
+  if (!zonesDropdown) return false;
+  if (supportsPopover) {
+    return zonesDropdown.matches(":popover-open");
+  }
+  return zonesDropdown.classList.contains("is-open");
+}
+
+function positionZonesDropdownFallback() {
+  if (!zonesDropdown || !btnZonesMenu) return;
+  const usesAnchor =
+    typeof CSS !== "undefined" &&
+    typeof CSS.supports === "function" &&
+    CSS.supports("position-area: block-end");
+  if ((usesAnchor && window.innerWidth > 640) || window.innerWidth <= 640) {
+    zonesDropdown.style.top = "";
+    zonesDropdown.style.left = "";
+    return;
+  }
+  const rect = btnZonesMenu.getBoundingClientRect();
+  const menuRect = zonesDropdown.getBoundingClientRect();
+  const menuW = menuRect.width || Math.min(420, window.innerWidth - 24);
+  const menuH = menuRect.height || 360;
+  const margin = 12;
+  const left = Math.max(margin, Math.min(rect.right - menuW, window.innerWidth - menuW - margin));
+  const fitsBelow = rect.bottom + 6 + menuH <= window.innerHeight - margin;
+  const top = fitsBelow ? rect.bottom + 6 : Math.max(margin, rect.top - menuH - 6);
+  zonesDropdown.style.left = `${Math.round(left)}px`;
+  zonesDropdown.style.top = `${Math.round(top)}px`;
+}
+
+function closeZonesMenu({ restoreFocus = false } = {}) {
+  if (!zonesDropdown) return;
+  if (supportsPopover) {
+    if (zonesDropdown.matches(":popover-open")) {
+      zonesDropdown.hidePopover();
+    }
+  } else {
+    zonesDropdown.classList.remove("is-open");
+    btnZonesMenu?.setAttribute("aria-expanded", "false");
+  }
+  if (restoreFocus && btnZonesMenu && !btnZonesMenu.classList.contains("hidden")) {
+    btnZonesMenu.focus();
+  }
+}
+
+if (zonesDropdown) {
+  if (supportsPopover) {
+    zonesDropdown.addEventListener("toggle", (e) => {
+      const open = e.newState === "open";
+      btnZonesMenu?.setAttribute("aria-expanded", String(open));
+      if (open) {
+        positionZonesDropdownFallback();
+      }
+    });
+  } else {
+    btnZonesMenu?.addEventListener("click", (e) => {
+      e.preventDefault();
+      const willOpen = !zonesDropdown.classList.contains("is-open");
+      zonesDropdown.classList.toggle("is-open", willOpen);
+      btnZonesMenu.setAttribute("aria-expanded", String(willOpen));
+      if (willOpen) {
+        positionZonesDropdownFallback();
+      }
+    });
+    document.addEventListener("pointerdown", (e) => {
+      if (
+        isZonesMenuOpen() &&
+        !zonesDropdown.contains(e.target) &&
+        !btnZonesMenu?.contains(e.target)
+      ) {
+        closeZonesMenu({ restoreFocus: false });
+      }
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && isZonesMenuOpen()) {
+        closeZonesMenu({ restoreFocus: true });
+      }
+    });
+  }
+}
 
 function syncCanvasSize() {
   const rect = videoEl.getBoundingClientRect();
@@ -21,7 +115,21 @@ function syncCanvasSize() {
   }
 }
 
-window.addEventListener("resize", syncCanvasSize);
+window.addEventListener("resize", () => {
+  syncCanvasSize();
+  if (isZonesMenuOpen()) {
+    positionZonesDropdownFallback();
+  }
+});
+window.addEventListener(
+  "scroll",
+  () => {
+    if (isZonesMenuOpen()) {
+      positionZonesDropdownFallback();
+    }
+  },
+  { passive: true }
+);
 videoEl.addEventListener("load", syncCanvasSize);
 
 let currentObjectUrl = null;
@@ -204,6 +312,8 @@ function renderZoneCanvas() {
 }
 
 function setDrawingMode(mode, target = null) {
+  const focusWasInDropdown = Boolean(zonesDropdown?.contains(document.activeElement));
+  const focusWasInDrawToolbar = Boolean(drawToolbar?.contains(document.activeElement));
   drawingMode = mode;
   editingTarget = target;
   dragVertexIndex = -1;
@@ -212,6 +322,9 @@ function setDrawingMode(mode, target = null) {
   }
   const active = Boolean(mode);
   const isEdit = mode === "edit";
+  if (active) {
+    closeZonesMenu({ restoreFocus: false });
+  }
   zoneCanvas.classList.toggle("drawing", active);
   zoneCanvas.classList.toggle("editing", isEdit);
   const hint = document.getElementById("drawHint");
@@ -229,15 +342,20 @@ function setDrawingMode(mode, target = null) {
   } else {
     hint.textContent = 'Click on the video to place polygon corners around the red zone. Double-click or press "Finish & Save" when done.';
   }
-  document.getElementById("btnDrawZone").classList.toggle("hidden", active);
-  document.getElementById("btnAutoRedZone").classList.toggle("hidden", active);
-  document.getElementById("btnDrawExclusion").classList.toggle("hidden", active);
-  document.getElementById("btnDrawLine").classList.toggle("hidden", active);
-  document.getElementById("btnCalibrateGround").classList.toggle("hidden", active);
+  btnZonesMenu?.classList.toggle("hidden", active);
+  drawToolbar?.classList.toggle("hidden", !active);
   document.getElementById("btnUndoPoint").classList.toggle("hidden", !active || isEdit);
   document.getElementById("btnRenameEdit").classList.toggle("hidden", !isEdit);
-  document.getElementById("btnFinishZone").classList.toggle("hidden", mode !== "zone" && mode !== "exclusion" && !isEdit);
-  document.getElementById("btnCancelDraw").classList.toggle("hidden", !active);
+  const finishBtn = document.getElementById("btnFinishZone");
+  const showFinish = mode === "zone" || mode === "exclusion" || isEdit;
+  finishBtn.classList.toggle("hidden", !showFinish);
+  const cancelBtn = document.getElementById("btnCancelDraw");
+  cancelBtn.classList.toggle("hidden", !active);
+  if (active && focusWasInDropdown) {
+    (showFinish ? finishBtn : cancelBtn)?.focus();
+  } else if (!active && focusWasInDrawToolbar) {
+    btnZonesMenu?.focus();
+  }
   syncCanvasSize();
 }
 
@@ -434,24 +552,52 @@ function startEditZone(z) {
   setDrawingMode("edit", { kind: "zone", id: z.id, name: z.name });
 }
 
+function getFocusedRowMeta(containerEl) {
+  const activeEl = document.activeElement;
+  if (!containerEl?.contains(activeEl)) return null;
+  const id = activeEl.dataset?.id;
+  const action = activeEl.dataset?.action;
+  return id && action ? { id, action } : null;
+}
+
+function restoreRowFocus(containerEl, focusMeta, fallbackEl) {
+  if (!focusMeta) return;
+  const target = containerEl.querySelector(
+    `button[data-id="${CSS.escape(focusMeta.id)}"][data-action="${CSS.escape(focusMeta.action)}"]`
+  );
+  if (target) {
+    target.focus();
+  } else {
+    (containerEl.querySelector("button") || fallbackEl || btnZonesMenu)?.focus();
+  }
+}
+
 function renderLinesList() {
   const el = document.getElementById("linesList");
+  const focusMeta = getFocusedRowMeta(el);
+  lastLinesSignature = JSON.stringify(savedLines);
+  updateZonesMenuBadge();
   if (!savedLines.length) {
-    el.innerHTML = `<span class="muted">No traffic lines defined yet. Click "+ Draw Traffic Line" to place a 2-point counting line.</span>`;
+    el.innerHTML = `<span class="muted small">No traffic lines defined yet.</span>`;
+    if (focusMeta) {
+      document.getElementById("btnDrawLine")?.focus();
+    }
     return;
   }
   el.innerHTML = "";
   for (const ln of savedLines) {
     const total = (ln.count_a_to_b || 0) + (ln.count_b_to_a || 0);
-    const chip = document.createElement("div");
-    chip.className = "zone-chip";
-    chip.innerHTML = `
-      <span>${ln.enabled ? "🔵" : "⚪"} ${escapeHtml(ln.name)}: <strong>${total}</strong> (${ln.count_a_to_b || 0} / ${ln.count_b_to_a || 0})</span>
-      <button title="Edit">Edit</button>
-      <button title="Toggle">${ln.enabled ? "Disable" : "Enable"}</button>
-      <button title="Delete">✕</button>
+    const row = document.createElement("div");
+    row.className = "zone-menu-row";
+    row.innerHTML = `
+      <span class="zone-menu-label">${ln.enabled ? "🔵" : "⚪"} ${escapeHtml(ln.name)}: <strong>${total}</strong> (${ln.count_a_to_b || 0} / ${ln.count_b_to_a || 0})</span>
+      <div class="zone-menu-actions">
+        <button type="button" data-id="${escapeHtml(ln.id)}" data-action="edit" title="Edit">Edit</button>
+        <button type="button" data-id="${escapeHtml(ln.id)}" data-action="toggle" title="Toggle">${ln.enabled ? "Disable" : "Enable"}</button>
+        <button type="button" data-id="${escapeHtml(ln.id)}" data-action="delete" aria-label="Delete ${escapeHtml(ln.name)}" title="Delete">✕</button>
+      </div>
     `;
-    const [editBtn, toggleBtn, delBtn] = chip.querySelectorAll("button");
+    const [editBtn, toggleBtn, delBtn] = row.querySelectorAll("button");
     editBtn.addEventListener("click", () => startEditLine(ln));
     toggleBtn.addEventListener("click", () => {
       const next = savedLines.map((item) =>
@@ -462,8 +608,9 @@ function renderLinesList() {
     delBtn.addEventListener("click", () => {
       saveLines(savedLines.filter((item) => item.id !== ln.id));
     });
-    el.appendChild(chip);
+    el.appendChild(row);
   }
+  restoreRowFocus(el, focusMeta, document.getElementById("btnDrawLine"));
 }
 
 async function finishZone() {
@@ -579,22 +726,29 @@ async function loadZones() {
 
 function renderZonesList() {
   const el = document.getElementById("zonesList");
+  const focusMeta = getFocusedRowMeta(el);
+  updateZonesMenuBadge();
   if (!savedZones.length) {
-    el.innerHTML = `<span class="muted">No red zones defined yet. Click "+ Draw Red Zone" to outline one.</span>`;
+    el.innerHTML = `<span class="muted small">No red zones defined yet.</span>`;
+    if (focusMeta) {
+      document.getElementById("btnDrawZone")?.focus();
+    }
     return;
   }
   el.innerHTML = "";
   for (const z of savedZones) {
-    const chip = document.createElement("div");
-    chip.className = "zone-chip";
+    const row = document.createElement("div");
+    row.className = "zone-menu-row";
     const icon = z.zone_type === "exclusion" ? "🩶" : "🔴";
-    chip.innerHTML = `
-      <span>${z.enabled ? icon : "⚪"} ${escapeHtml(z.name)}</span>
-      <button title="Edit">Edit</button>
-      <button title="Toggle">${z.enabled ? "Disable" : "Enable"}</button>
-      <button title="Delete">✕</button>
+    row.innerHTML = `
+      <span class="zone-menu-label">${z.enabled ? icon : "⚪"} ${escapeHtml(z.name)}</span>
+      <div class="zone-menu-actions">
+        <button type="button" data-id="${escapeHtml(z.id)}" data-action="edit" title="Edit">Edit</button>
+        <button type="button" data-id="${escapeHtml(z.id)}" data-action="toggle" title="Toggle">${z.enabled ? "Disable" : "Enable"}</button>
+        <button type="button" data-id="${escapeHtml(z.id)}" data-action="delete" aria-label="Delete ${escapeHtml(z.name)}" title="Delete">✕</button>
+      </div>
     `;
-    const [editBtn, toggleBtn, delBtn] = chip.querySelectorAll("button");
+    const [editBtn, toggleBtn, delBtn] = row.querySelectorAll("button");
     editBtn.addEventListener("click", () => startEditZone(z));
     toggleBtn.addEventListener("click", () => {
       const next = savedZones.map((item) =>
@@ -605,8 +759,9 @@ function renderZonesList() {
     delBtn.addEventListener("click", () => {
       saveZones(savedZones.filter((item) => item.id !== z.id));
     });
-    el.appendChild(chip);
+    el.appendChild(row);
   }
+  restoreRowFocus(el, focusMeta, document.getElementById("btnDrawZone"));
 }
 
 async function refreshStats() {
@@ -621,7 +776,10 @@ async function refreshStats() {
     document.getElementById("kpiViolations").textContent = data.violations_total;
     if (Array.isArray(data.counting_lines)) {
       savedLines = data.counting_lines;
-      renderLinesList();
+      const sig = JSON.stringify(savedLines);
+      if (sig !== lastLinesSignature) {
+        renderLinesList();
+      }
       const totalCrossings = savedLines.reduce(
         (acc, ln) => acc + (ln.count_a_to_b || 0) + (ln.count_b_to_a || 0),
         0
@@ -1181,6 +1339,7 @@ birdseyeCanvas.addEventListener("click", (e) => {
 });
 
 document.getElementById("btnBirdseye").addEventListener("click", () => {
+  closeZonesMenu({ restoreFocus: false });
   setBevDrawing(false);
   refreshBirdseyeImage();
   birdseyeModal.classList.remove("hidden");

@@ -715,8 +715,18 @@ class StreamWorker:
         )
         return "\n".join(lines_out)
 
+    def reset_all_counts(self) -> None:
+        """Reset cumulative vehicle/people counts, hourly traffic, line crossings, and speed history."""
+        self.db.reset_stats()
+        self.db.reset_line_counts()
+        self.monitor.reset()
+        self.line_monitor.reset()
+
     def send_daily_report(
-        self, webhook_url: str | None = None, date_str: str | None = None
+        self,
+        webhook_url: str | None = None,
+        date_str: str | None = None,
+        reset_after: bool = True,
     ) -> dict[str, Any]:
         import requests
 
@@ -734,7 +744,14 @@ class StreamWorker:
         try:
             resp = requests.post(url, json=payload, timeout=10)
             if 200 <= resp.status_code < 300:
-                return {"ok": True, "status_code": resp.status_code, "summary": summary}
+                if reset_after:
+                    self.reset_all_counts()
+                return {
+                    "ok": True,
+                    "status_code": resp.status_code,
+                    "summary": summary,
+                    "reset": reset_after,
+                }
             return {"ok": False, "error": f"HTTP {resp.status_code}: {resp.text[:160]}"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}

@@ -335,6 +335,19 @@ def test_daily_report_summary_and_endpoint(tmp_path: Path) -> None:
         assert r.status_code == 200
         assert r.json()["ok"] is False
 
+        # Successful daily report automatically resets counts
+        from unittest.mock import MagicMock, patch
+
+        mock_resp = MagicMock(status_code=204)
+        with patch("requests.post", return_value=mock_resp):
+            ok_r = client.post("/api/report/daily/send", json={"webhook_url": "https://discord.com/api/webhooks/test/tok"})
+        assert ok_r.status_code == 200
+        assert ok_r.json()["ok"] is True
+        assert ok_r.json()["reset"] is True
+        after = db.get_stats_state()
+        assert after["total_cars"] == 0
+        assert after["total_people"] == 0
+
 
 def test_ground_calibration_and_birdseye(tmp_path: Path) -> None:
     from app.database import GroundCalibrationModel

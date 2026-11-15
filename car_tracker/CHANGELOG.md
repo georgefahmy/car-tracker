@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.10
+- Automatically resets all counts (vehicles, people, hourly traffic, line crossings, and speed history) after a daily report is successfully sent to the webhook.
+
 ## 1.0.9
 - Enabled Home Assistant **Ingress** (`Show in sidebar`) so you can open Car Tracker directly inside the Home Assistant left sidebar menu (`Car Tracker`).
 - Converted frontend asset, snapshot, and API URLs to relative paths so both Ingress and direct port `8000` access work seamlessly.

@@ -117,10 +117,7 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
 
     @app.post("/api/stats/reset")
     async def reset_stats() -> dict:
-        db.reset_stats()
-        db.reset_line_counts()
-        worker.monitor.reset()
-        worker.line_monitor.reset()
+        worker.reset_all_counts()
         return {"ok": True}
 
     @app.get("/api/zones", response_model=list[ZoneModel])

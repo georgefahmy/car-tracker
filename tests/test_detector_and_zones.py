@@ -1146,7 +1146,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.20"
+    assert expected_ver == "1.0.21"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1775,8 +1775,10 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         assert "role" not in attrs
         assert "aria-modal" not in attrs
 
-    assert "static/styles.css?v=18" in collector.links
-    assert "static/app.js?v=18" in collector.scripts
+    assert "static/styles.css?v=19" in collector.links
+    assert "static/app.js?v=19" in collector.scripts
+    assert 'class="settings-bento"' in html
+    assert 'class="toggle-sub"' not in html
     assert collector.buttons_inside_label == []
 
     expected_settings = [

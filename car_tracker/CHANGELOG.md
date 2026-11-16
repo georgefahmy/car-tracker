@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.21
+- **Zero-Scroll Desktop Bento Settings**: Widened the Settings dialog (`min(1520px, 100dvw - 32px)`) into a 6-track bento layout (`3 + 2` cards), moved the active runtime status summary into the modal header, placed action buttons inline in card headers, streamlined toggle rows into single-line pills (relying on `?` tooltips instead of verbose subtext), and aligned all 4 emergency vehicle thresholds in one compact row so the entire Settings menu fits on desktop without vertical scrolling.
+
 ## 1.0.20
 - **Escape Dismissal & Native Dialogs**: Migrated the Settings, Violation Snapshot, and Bird's-Eye View popups to native `<dialog closedby="any">` modals so any popup (dialogs, Zones dropdown, active tooltips, and active canvas drawing) can be dismissed with the `Escape` key or backdrop click, while ensuring `Escape` dismisses an open tooltip before closing Settings.
 - **Wide Multi-Column Settings Layout**: Expanded the Settings modal (`min(1140px, 100dvw - 32px)`), pinned the header and footer (`Cancel` / `Save & Apply`) so actions stay visible without scrolling, and organized all 32 settings into 5 grouped cards across a 2-column desktop layout that collapses cleanly on smaller screens.

@@ -811,7 +811,13 @@ input, select {
 }
 .snapshot-full { width: 100%; border-radius: 8px; display: block; }
 
-/* Setting Tooltips (Toggletips) */
+/* Setting Tooltips (Toggletips & Action Hints) */
+[interestfor] {
+  --interest-delay-start: 0.18s;
+  interest-delay-start: var(--interest-delay-start);
+  --interest-delay-end: 0.12s;
+  interest-delay-end: var(--interest-delay-end);
+}
 .help-tip-btn {
   position: relative;
   display: inline-flex;
@@ -830,10 +836,6 @@ input, select {
   font-weight: 700;
   line-height: 1;
   cursor: help;
-  --interest-delay-start: 0.18s;
-  interest-delay-start: var(--interest-delay-start);
-  --interest-delay-end: 0.12s;
-  interest-delay-end: var(--interest-delay-end);
 }
 .help-tip-btn:is(:hover, :focus-visible, :interest-source, .interest-source),
 .help-tip-btn[aria-expanded="true"] {

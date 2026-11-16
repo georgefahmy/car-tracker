@@ -128,7 +128,7 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
     @app.post("/api/stats/reset")
     async def reset_stats() -> dict:
         worker.reset_all_counts()
-        return {"ok": True}
+        return {"ok": True, "heatmap_started_at": worker.hotspot.started_at}
 
     @app.get("/api/zones", response_model=list[ZoneModel])
     async def get_zones() -> list[ZoneModel]:
@@ -281,7 +281,7 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
     @app.post("/api/heatmap/reset")
     async def reset_heatmap() -> dict:
         worker.reset_heatmap()
-        return {"ok": True}
+        return {"ok": True, "heatmap_started_at": worker.hotspot.started_at}
 
     def _calibration_response(calib: GroundCalibrationModel | None) -> dict:
         if calib is None:
@@ -316,7 +316,12 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
         if frame is None:
             raise HTTPException(status_code=503, detail="No camera frame available yet")
         jpg = await asyncio.to_thread(
-            render_birdseye_jpeg, frame, calib, db.get_zones(), db.get_counting_lines()
+            render_birdseye_jpeg,
+            frame,
+            calib,
+            db.get_zones(),
+            db.get_counting_lines(),
+            hotspot=(worker.hotspot if worker.config.heatmap_enabled else None),
         )
         if not jpg:
             raise HTTPException(status_code=500, detail="Failed to render bird's-eye view")

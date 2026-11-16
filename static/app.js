@@ -454,8 +454,11 @@ function initSettingTooltips() {
         if (!(target instanceof HTMLElement) || !target.classList.contains("setting-tooltip")) return;
         if (e.newState !== "open") return;
         hideAnyOpenSettingTooltip(target);
-        if (!supportsHintPopover) {
-          // Switch hint -> auto right before open on Safari/Firefox so Esc & light-dismiss work natively
+        const isToggletip = Boolean(
+          document.querySelector(`[popovertarget="${CSS.escape(target.id)}"]`)
+        );
+        if (!supportsHintPopover && isToggletip) {
+          // Switch toggletips hint -> auto right before open on Safari/Firefox so Esc & light-dismiss work without closing unrelated popovers
           target.popover = "auto";
         }
         const trigger = document.querySelector(`button[interestfor="${CSS.escape(target.id)}"]`);
@@ -516,6 +519,11 @@ function initSettingTooltips() {
   settingsModal?.querySelector(".settings-body")?.addEventListener("scroll", repositionOpenSettingTooltip, {
     passive: true,
   });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !isModalOpen(settingsModal) && hideAnyOpenSettingTooltip()) {
+      e.stopPropagation();
+    }
+  });
 
   // Hover + keyboard focus fallback when native interestfor is unavailable
   if (!("interestForElement" in HTMLButtonElement.prototype)) {
@@ -539,7 +547,7 @@ function initSettingTooltips() {
       }, 140);
     };
 
-    for (const trigger of document.querySelectorAll(".help-tip-btn[interestfor]")) {
+    for (const trigger of document.querySelectorAll("button[interestfor]")) {
       const tipId = trigger.getAttribute("interestfor");
       const tip = tipId ? document.getElementById(tipId) : null;
       if (!tip) continue;
@@ -575,12 +583,22 @@ function initSettingTooltips() {
         },
         { signal }
       );
-      if (!supportsPopover) {
+      const isToggletip = trigger.getAttribute("popovertarget") === tipId;
+      if (isToggletip && !supportsPopover) {
         trigger.addEventListener(
           "click",
           (e) => {
             e.preventDefault();
             showSettingTooltip(tip, trigger);
+          },
+          { signal }
+        );
+      } else if (!isToggletip) {
+        trigger.addEventListener(
+          "click",
+          () => {
+            clearTimers();
+            hideSettingTooltip(tip);
           },
           { signal }
         );
@@ -1676,6 +1694,7 @@ async function refreshStats() {
 
     heatmapEnabled = Boolean(data.heatmap_enabled);
     document.getElementById("btnHeatmapToggle").textContent = `Heatmap: ${heatmapEnabled ? "ON" : "OFF"}`;
+    updateHeatmapTooltip(data.heatmap_started_at);
 
     const speedEl = document.getElementById("speedSummary");
     if (speedEl) {
@@ -1946,6 +1965,25 @@ async function refreshViolations() {
   }
 }
 
+function updateHeatmapTooltip(startedAtIso) {
+  const tipEl = document.getElementById("tipHeatmapToggleText");
+  if (!tipEl) return;
+  let sincePart = "since last count reset";
+  if (startedAtIso) {
+    const dt = new Date(startedAtIso);
+    if (!Number.isNaN(dt.getTime())) {
+      const formatted = dt.toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      });
+      sincePart = `since ${formatted}`;
+    }
+  }
+  tipEl.textContent = `Cumulative motion-weighted traffic heatmap ${sincePart}. Persists across restarts and resets with Reset Counts or the scheduled Daily Report.`;
+}
+
 // Heatmap & Reset controls
 document.getElementById("btnHeatmapToggle").addEventListener("click", async () => {
   const res = await fetch("api/heatmap/toggle", { method: "POST" });
@@ -1955,12 +1993,20 @@ document.getElementById("btnHeatmapToggle").addEventListener("click", async () =
 });
 
 document.getElementById("btnHeatmapReset").addEventListener("click", async () => {
-  await fetch("api/heatmap/reset", { method: "POST" });
+  const res = await fetch("api/heatmap/reset", { method: "POST" });
+  if (res.ok) {
+    const data = await res.json();
+    updateHeatmapTooltip(data.heatmap_started_at);
+  }
 });
 
 document.getElementById("btnResetStats").addEventListener("click", async () => {
-  if (!confirm("Reset unique/total vehicle & people counters?")) return;
-  await fetch("api/stats/reset", { method: "POST" });
+  if (!confirm("Reset unique/total counters, line crossings, and cumulative heatmap?")) return;
+  const res = await fetch("api/stats/reset", { method: "POST" });
+  if (res.ok) {
+    const data = await res.json();
+    updateHeatmapTooltip(data.heatmap_started_at);
+  }
   refreshStats();
 });
 

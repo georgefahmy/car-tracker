@@ -7,6 +7,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import types
 from collections import deque
@@ -119,41 +120,397 @@ def point_in_normalized_polygon(nx: float, ny: float, points: list[list[float]])
     return result >= 0
 
 
-class HotspotTracker:
-    """Accumulates spatial traffic density on a fixed normalized grid."""
+@dataclass
+class _HotspotTrackState:
+    anchor_norm: tuple[float, float]
+    last_grid_pt: tuple[int, int]
+    last_seen_ts: float
+    dwell_heat: float = 0.0
+    has_moved: bool = False
 
-    def __init__(self, grid_w: int = 320, grid_h: int = 180, decay: float = 0.9985) -> None:
+
+@dataclass
+class _StationarySpot:
+    pos_norm: tuple[float, float]
+    dwell_heat: float
+    last_seen_ts: float
+
+
+class HotspotTracker:
+    """Accumulates persistent, motion-weighted traffic paths on a fixed normalized grid."""
+
+    INITIAL_POINT_HEAT: float = 0.6
+    STATIONARY_STEP_HEAT: float = 0.15
+    MAX_STATIONARY_HEAT: float = 3.0
+    PATH_WEIGHT: float = 1.0
+    MAX_JUMP_NORM: float = 0.35
+    MAX_GAP_SECONDS: float = 4.0
+    TRACK_TTL_SECONDS: float = 120.0
+    SPOT_TTL_SECONDS: float = 180.0
+
+    def __init__(
+        self,
+        grid_w: int = 320,
+        grid_h: int = 180,
+        decay: float = 1.0,
+        storage_path: Path | str | None = None,
+        save_interval_sec: float = 30.0,
+    ) -> None:
         self.grid_w = grid_w
         self.grid_h = grid_h
         self.decay = decay
+        self.storage_path: Path | None = Path(storage_path) if storage_path is not None else None
+        self._meta_path: Path | None = (
+            self.storage_path.with_suffix(".meta.json") if self.storage_path is not None else None
+        )
+        self.save_interval_sec = max(float(save_interval_sec), 0.0)
+
+        self._lock = threading.Lock()
+        self._io_lock = threading.Lock()
         self.grid = np.zeros((grid_h, grid_w), dtype=np.float32)
+        self.started_at: str = datetime.now(timezone.utc).isoformat()
+        self._tracks: dict[int, _HotspotTrackState] = {}
+        self._recent_stops: list[_StationarySpot] = []
+        self._dirty: bool = False
+        self._last_save_mono: float = time.monotonic()
 
-    def update(self, detections: list[TrackedDetection], frame_w: int, frame_h: int) -> None:
-        self.grid *= self.decay
-        for det in detections:
-            nx, ny = det.bottom_center_norm(frame_w, frame_h)
-            gx = min(max(int(nx * (self.grid_w - 1)), 0), self.grid_w - 1)
-            gy = min(max(int(ny * (self.grid_h - 1)), 0), self.grid_h - 1)
-            self.grid[gy, gx] += 1.0
+        self._version: int = 0
+        self._cached_version: int = -1
+        self._cached_colored: np.ndarray | None = None
+        self._cached_weight: np.ndarray | None = None
 
-    def reset(self) -> None:
-        self.grid.fill(0.0)
+        if self.storage_path is not None:
+            self._load_from_disk()
+
+    def _load_from_disk(self) -> None:
+        if self.storage_path is None:
+            return
+        try:
+            if self.storage_path.exists():
+                with self.storage_path.open("rb") as fh:
+                    arr = np.load(fh, allow_pickle=False)
+                arr = np.asarray(arr, dtype=np.float32)
+                arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+                arr = np.maximum(arr, 0.0)
+                if arr.ndim == 2 and arr.size > 0:
+                    if arr.shape != (self.grid_h, self.grid_w):
+                        arr = cv2.resize(arr, (self.grid_w, self.grid_h), interpolation=cv2.INTER_LINEAR)
+                        arr = np.maximum(np.asarray(arr, dtype=np.float32), 0.0)
+                    self.grid = np.ascontiguousarray(arr, dtype=np.float32)
+                    if float(self.grid.max()) > 0.0:
+                        self._version = 1
+        except Exception:
+            self.grid = np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
+
+        try:
+            if self._meta_path is not None and self._meta_path.exists():
+                meta = json.loads(self._meta_path.read_text(encoding="utf-8"))
+                started = meta.get("started_at")
+                if isinstance(started, str) and started.strip():
+                    self.started_at = started.strip()
+                    return
+            if self.storage_path.exists():
+                self.started_at = datetime.fromtimestamp(
+                    self.storage_path.stat().st_mtime, tz=timezone.utc
+                ).isoformat()
+        except Exception:
+            pass
+
+    def _write_disk_snapshot(self, grid_copy: np.ndarray, started_at: str) -> None:
+        if self.storage_path is None:
+            return
+        with self._io_lock:
+            try:
+                self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_npy = self.storage_path.with_name(f".{self.storage_path.name}.tmp")
+                # Open explicit binary handle so NumPy does not auto-append ".npy" to ".tmp"
+                with tmp_npy.open("wb") as fh:
+                    np.save(fh, grid_copy)
+                os.replace(tmp_npy, self.storage_path)
+
+                if self._meta_path is not None:
+                    tmp_meta = self._meta_path.with_name(f".{self._meta_path.name}.tmp")
+                    tmp_meta.write_text(
+                        json.dumps(
+                            {
+                                "started_at": started_at,
+                                "grid_w": self.grid_w,
+                                "grid_h": self.grid_h,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    os.replace(tmp_meta, self._meta_path)
+            except OSError:
+                pass
+
+    def save(self, force: bool = False) -> None:
+        if self.storage_path is None:
+            return
+        with self._lock:
+            if not force and not self._dirty:
+                return
+            grid_copy = self.grid.copy()
+            started_at = self.started_at
+            self._dirty = False
+            self._last_save_mono = time.monotonic()
+        self._write_disk_snapshot(grid_copy, started_at)
+
+    def _deposit_point(self, gx: int, gy: int, weight: float) -> bool:
+        if weight <= 0.0:
+            return False
+        x0 = max(0, gx - 2)
+        y0 = max(0, gy - 2)
+        x1 = min(self.grid_w, gx + 3)
+        y1 = min(self.grid_h, gy + 3)
+        if x1 <= x0 or y1 <= y0:
+            return False
+        patch = np.zeros((y1 - y0, x1 - x0), dtype=np.float32)
+        cv2.circle(patch, (gx - x0, gy - y0), 1, float(weight), thickness=-1)
+        self.grid[y0:y1, x0:x1] += patch
+        return True
+
+    def _deposit_segment(
+        self,
+        p0: tuple[int, int],
+        p1: tuple[int, int],
+        weight: float,
+        skip_start: bool,
+    ) -> bool:
+        if weight <= 0.0:
+            return False
+        x0 = max(0, min(p0[0], p1[0]) - 2)
+        y0 = max(0, min(p0[1], p1[1]) - 2)
+        x1 = min(self.grid_w, max(p0[0], p1[0]) + 3)
+        y1 = min(self.grid_h, max(p0[1], p1[1]) + 3)
+        if x1 <= x0 or y1 <= y0:
+            return False
+        patch = np.zeros((y1 - y0, x1 - x0), dtype=np.float32)
+        q0 = (p0[0] - x0, p0[1] - y0)
+        q1 = (p1[0] - x0, p1[1] - y0)
+        cv2.line(patch, q0, q1, float(weight), thickness=2)
+        if skip_start and p0 != p1:
+            # Avoid double-counting consecutive segments' shared endpoint
+            cv2.circle(patch, q0, 1, 0.0, thickness=-1)
+            if math.hypot(p1[0] - p0[0], p1[1] - p0[1]) <= 2.0:
+                patch[q1[1], q1[0]] = float(weight)
+        self.grid[y0:y1, x0:x1] += patch
+        return True
+
+    def _max_matching_dwell(
+        self, tid: int, pos: tuple[float, float], move_thresh: float
+    ) -> float:
+        best = 0.0
+        for other_tid, other_st in self._tracks.items():
+            if other_tid == tid:
+                continue
+            if (not other_st.has_moved or other_st.dwell_heat > 0.0) and math.hypot(
+                pos[0] - other_st.anchor_norm[0], pos[1] - other_st.anchor_norm[1]
+            ) <= move_thresh:
+                best = max(best, other_st.dwell_heat)
+        for spot in self._recent_stops:
+            if math.hypot(pos[0] - spot.pos_norm[0], pos[1] - spot.pos_norm[1]) <= move_thresh:
+                best = max(best, spot.dwell_heat)
+        return best
+
+    def _upsert_recent_stop(
+        self, pos: tuple[float, float], dwell_heat: float, ts: float, move_thresh: float
+    ) -> None:
+        if dwell_heat <= 0.0:
+            return
+        for spot in self._recent_stops:
+            if math.hypot(pos[0] - spot.pos_norm[0], pos[1] - spot.pos_norm[1]) <= move_thresh:
+                spot.pos_norm = pos
+                spot.dwell_heat = max(spot.dwell_heat, dwell_heat)
+                spot.last_seen_ts = max(spot.last_seen_ts, ts)
+                return
+        self._recent_stops.append(
+            _StationarySpot(pos_norm=pos, dwell_heat=dwell_heat, last_seen_ts=ts)
+        )
+
+    def _clear_recent_stops_near(self, pos: tuple[float, float], move_thresh: float) -> None:
+        self._recent_stops = [
+            spot
+            for spot in self._recent_stops
+            if math.hypot(pos[0] - spot.pos_norm[0], pos[1] - spot.pos_norm[1]) > move_thresh
+        ]
+
+    def update(
+        self,
+        detections: list[TrackedDetection],
+        frame_w: int,
+        frame_h: int,
+        *,
+        movement_threshold: float = 0.015,
+        now_ts: float | None = None,
+    ) -> None:
+        ts = float(now_ts) if now_ts is not None else time.time()
+        move_thresh = max(float(movement_threshold), 0.006)
+        save_snap: tuple[np.ndarray, str] | None = None
+
+        with self._lock:
+            changed = False
+            if self.decay < 1.0 and float(self.grid.max()) > 0.0:
+                self.grid *= self.decay
+                changed = True
+
+            expired_tids = [
+                tid
+                for tid, st in self._tracks.items()
+                if (ts - st.last_seen_ts) > self.TRACK_TTL_SECONDS
+            ]
+            for tid in expired_tids:
+                st = self._tracks.pop(tid)
+                if st.dwell_heat > 0.0:
+                    self._upsert_recent_stop(st.anchor_norm, st.dwell_heat, st.last_seen_ts, move_thresh)
+
+            self._recent_stops = [
+                spot
+                for spot in self._recent_stops
+                if (ts - spot.last_seen_ts) <= self.SPOT_TTL_SECONDS
+            ]
+
+            for det in detections:
+                nx, ny = det.bottom_center_norm(frame_w, frame_h)
+                gx = min(max(int(round(nx * (self.grid_w - 1))), 0), self.grid_w - 1)
+                gy = min(max(int(round(ny * (self.grid_h - 1))), 0), self.grid_h - 1)
+
+                st = self._tracks.get(det.track_id)
+                if (
+                    st is None
+                    or (ts - st.last_seen_ts) > self.MAX_GAP_SECONDS
+                    or math.hypot(nx - st.anchor_norm[0], ny - st.anchor_norm[1]) > self.MAX_JUMP_NORM
+                ):
+                    inherited = self._max_matching_dwell(det.track_id, (nx, ny), move_thresh)
+                    add_h = max(0.0, min(self.INITIAL_POINT_HEAT, self.MAX_STATIONARY_HEAT - inherited))
+                    if self._deposit_point(gx, gy, add_h):
+                        changed = True
+                    total_dwell = inherited + add_h
+                    self._tracks[det.track_id] = _HotspotTrackState(
+                        anchor_norm=(nx, ny),
+                        last_grid_pt=(gx, gy),
+                        last_seen_ts=ts,
+                        dwell_heat=total_dwell,
+                        has_moved=False,
+                    )
+                    self._upsert_recent_stop((nx, ny), total_dwell, ts, move_thresh)
+                    continue
+
+                dist_norm = math.hypot(nx - st.anchor_norm[0], ny - st.anchor_norm[1])
+                if dist_norm >= move_thresh:
+                    if self._deposit_segment(
+                        st.last_grid_pt, (gx, gy), self.PATH_WEIGHT, skip_start=st.has_moved
+                    ):
+                        changed = True
+                    self._clear_recent_stops_near(st.anchor_norm, move_thresh)
+                    st.anchor_norm = (nx, ny)
+                    st.last_grid_pt = (gx, gy)
+                    st.last_seen_ts = ts
+                    st.dwell_heat = 0.0
+                    st.has_moved = True
+                else:
+                    st.last_seen_ts = ts
+                    spot_dwell = max(
+                        st.dwell_heat,
+                        self._max_matching_dwell(det.track_id, st.anchor_norm, move_thresh),
+                    )
+                    if spot_dwell > st.dwell_heat:
+                        st.dwell_heat = spot_dwell
+                    if st.dwell_heat < self.MAX_STATIONARY_HEAT:
+                        add_h = min(self.STATIONARY_STEP_HEAT, self.MAX_STATIONARY_HEAT - st.dwell_heat)
+                        if self._deposit_point(st.last_grid_pt[0], st.last_grid_pt[1], add_h):
+                            changed = True
+                        st.dwell_heat += add_h
+                    self._upsert_recent_stop(st.anchor_norm, st.dwell_heat, ts, move_thresh)
+
+            if changed:
+                self._version += 1
+                self._dirty = True
+
+            if (
+                self.storage_path is not None
+                and self._dirty
+                and (time.monotonic() - self._last_save_mono) >= self.save_interval_sec
+            ):
+                save_snap = (self.grid.copy(), self.started_at)
+                self._dirty = False
+                self._last_save_mono = time.monotonic()
+
+        if save_snap is not None:
+            self._write_disk_snapshot(*save_snap)
+
+    def clear_tracks(self) -> None:
+        with self._lock:
+            self._tracks.clear()
+
+    def reset(self, preserve_stationary: bool = False) -> None:
+        save_snap: tuple[np.ndarray, str] | None = None
+        with self._lock:
+            self.grid.fill(0.0)
+            self._version += 1
+            self.started_at = datetime.now(timezone.utc).isoformat()
+            if preserve_stationary:
+                rebuilt_stops: list[_StationarySpot] = []
+                for st in self._tracks.values():
+                    st.dwell_heat = self.MAX_STATIONARY_HEAT
+                    st.has_moved = False
+                    rebuilt_stops.append(
+                        _StationarySpot(
+                            pos_norm=st.anchor_norm,
+                            dwell_heat=self.MAX_STATIONARY_HEAT,
+                            last_seen_ts=st.last_seen_ts,
+                        )
+                    )
+                self._recent_stops = rebuilt_stops
+            else:
+                self._tracks.clear()
+                self._recent_stops.clear()
+            self._dirty = False
+            self._last_save_mono = time.monotonic()
+            if self.storage_path is not None:
+                save_snap = (self.grid.copy(), self.started_at)
+
+        if save_snap is not None:
+            self._write_disk_snapshot(*save_snap)
 
     def render_overlay(self, frame: np.ndarray, alpha: float = 0.45) -> np.ndarray:
-        max_val = float(self.grid.max())
-        if max_val <= 0.05:
+        with self._lock:
+            if float(self.grid.max()) <= 0.05:
+                return frame
+            if (
+                self._cached_version != self._version
+                or self._cached_colored is None
+                or self._cached_weight is None
+            ):
+                blurred = cv2.GaussianBlur(self.grid, (15, 15), 0)
+                log_grid = np.log1p(np.maximum(blurred, 0.0) * 10.0)
+                denom = max(float(log_grid.max()), 1.6)
+                norm = np.clip((log_grid / denom) * 255.0, 0.0, 255.0).astype(np.uint8)
+                self._cached_colored = cv2.applyColorMap(norm, cv2.COLORMAP_INFERNO)
+                self._cached_weight = np.where(
+                    norm >= 14,
+                    np.clip(((norm.astype(np.float32) / 255.0) ** 0.7) * 255.0, 0.0, 255.0),
+                    0.0,
+                ).astype(np.uint8)
+                self._cached_version = self._version
+            colored_small = self._cached_colored
+            weight_small = self._cached_weight
+
+        h, w = frame.shape[:2]
+        colored_resized = cv2.resize(colored_small, (w, h), interpolation=cv2.INTER_LINEAR)
+        weight_resized = cv2.resize(weight_small, (w, h), interpolation=cv2.INTER_LINEAR)
+        mask = weight_resized >= 14
+        if not np.any(mask):
             return frame
 
-        blurred = cv2.GaussianBlur(self.grid, (15, 15), 0)
-        norm = np.clip((blurred / max(float(blurred.max()), 1e-5)) * 255.0, 0, 255).astype(np.uint8)
-        colored = cv2.applyColorMap(norm, cv2.COLORMAP_INFERNO)
-        h, w = frame.shape[:2]
-        colored_resized = cv2.resize(colored, (w, h), interpolation=cv2.INTER_LINEAR)
-        mask = cv2.resize(norm, (w, h), interpolation=cv2.INTER_LINEAR) > 12
-
         out = frame.copy()
-        blended = cv2.addWeighted(frame, 1.0 - alpha, colored_resized, alpha, 0)
-        out[mask] = blended[mask]
+        w_f = (weight_resized[mask].astype(np.float32) * (float(alpha) / 255.0))[:, None]
+        out[mask] = np.clip(
+            frame[mask].astype(np.float32) * (1.0 - w_f)
+            + colored_resized[mask].astype(np.float32) * w_f,
+            0.0,
+            255.0,
+        ).astype(np.uint8)
         return out
 
 
@@ -2911,9 +3268,11 @@ def render_birdseye_jpeg(
     lines: list[CountingLineModel],
     out_w: int = 800,
     out_h: int = 600,
+    hotspot: HotspotTracker | None = None,
 ) -> bytes | None:
     """Warp the camera frame into a top-down bird's-eye view with grid, zones, and lines."""
-    h, w = frame.shape[:2]
+    src_frame = hotspot.render_overlay(frame, alpha=0.45) if hotspot is not None else frame
+    h, w = src_frame.shape[:2]
     tf = compute_ground_transforms(calib, out_w=out_w, out_h=out_h)
 
     scale_in = np.diag([1.0 / max(w, 1), 1.0 / max(h, 1), 1.0])
@@ -2921,7 +3280,7 @@ def render_birdseye_jpeg(
     h_px = scale_out @ tf["img_norm_to_bev_norm"] @ scale_in
 
     bev = cv2.warpPerspective(
-        frame,
+        src_frame,
         h_px,
         (out_w, out_h),
         flags=cv2.INTER_LINEAR,

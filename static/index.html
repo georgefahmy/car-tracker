@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Car Tracker & Red-Zone Monitor</title>
-  <link rel="icon" type="image/png" href="static/icon.png?v=27" />
-  <link rel="stylesheet" href="static/styles.css?v=27" />
+  <link rel="icon" type="image/png" href="static/icon.png?v=28" />
+  <link rel="stylesheet" href="static/styles.css?v=28" />
 </head>
 <body>
   <header class="topbar">
@@ -20,10 +20,13 @@
       </div>
     </div>
     <div class="actions">
-      <button class="btn btn-secondary" id="btnHeatmapToggle">Heatmap: OFF</button>
-      <button class="btn btn-ghost" id="btnHeatmapReset" title="Clear accumulated hotspot data">Clear Heatmap</button>
-      <button class="btn btn-ghost" id="btnResetStats" title="Reset unique & total counters">Reset Counts</button>
-      <button class="btn btn-primary" id="btnSettings">Settings</button>
+      <button type="button" class="btn btn-secondary" id="btnHeatmapToggle" interestfor="tip-heatmap_toggle">Heatmap: OFF</button>
+      <div id="tip-heatmap_toggle" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner" id="tipHeatmapToggleText">Cumulative motion-weighted traffic heatmap since last count reset. Persists across restarts and resets with Reset Counts or the scheduled Daily Report.</div></div>
+      <button type="button" class="btn btn-ghost" id="btnHeatmapReset" interestfor="tip-heatmap_reset">Clear Heatmap</button>
+      <div id="tip-heatmap_reset" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Clears only the accumulated traffic heatmap while keeping vehicle, person, and line counters intact.</div></div>
+      <button type="button" class="btn btn-ghost" id="btnResetStats" interestfor="tip-reset_stats">Reset Counts</button>
+      <div id="tip-reset_stats" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Resets unique/total vehicle &amp; person counters, hourly chart, line crossings, speed stats, and the cumulative heatmap.</div></div>
+      <button type="button" class="btn btn-primary" id="btnSettings">Settings</button>
     </div>
   </header>
 
@@ -631,6 +634,6 @@
     </div>
   </dialog>
 
-  <script src="static/app.js?v=27"></script>
+  <script src="static/app.js?v=28"></script>
 </body>
 </html>

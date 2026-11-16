@@ -410,7 +410,7 @@ class StreamWorker:
         self._model_error: str = ""
         self.monitor = RedZoneMonitor()
         self.line_monitor = LineCrossingMonitor()
-        self.hotspot = HotspotTracker()
+        self.hotspot = HotspotTracker(storage_path=settings.data_path / "heatmap.npy")
         self.emergency_classifier = EmergencyVehicleClassifier()
         self.motion_gate = MotionGate()
         self._motion_state: str = "off"
@@ -513,6 +513,7 @@ class StreamWorker:
             self._report_thread.join(timeout=2.0)
         if self._ha_thread:
             self._ha_thread.join(timeout=2.0)
+        self.hotspot.save(force=True)
 
     @staticmethod
     def _desired_detector_key(
@@ -593,21 +594,35 @@ class StreamWorker:
             if old_source != new_source:
                 if self._detector is not None:
                     self._detector.reset()
+                self.hotspot.clear_tracks()
                 self._has_inferred_frame = False
                 with self._lock:
                     self._resolution = (0, 0)
             self._reconnect_event.set()
+
+    def _rerender_latest_preview(self) -> None:
+        with self._lock:
+            raw = None if self._latest_raw_frame is None else self._latest_raw_frame.copy()
+            tracks, statuses, zones, lines = self._latest_overlay
+            cfg = self.config
+        if raw is None:
+            return
+        jpg = self._render_preview_jpeg(raw, tracks, statuses, zones, lines, cfg)
+        if jpg is not None:
+            with self._lock:
+                self._latest_jpeg = jpg
 
     def toggle_heatmap(self, enabled: bool | None = None) -> bool:
         with self._lock:
             new_val = (not self.config.heatmap_enabled) if enabled is None else enabled
             self.config.heatmap_enabled = new_val
             self.db.save_config(self.config.model_dump())
-            return new_val
+        self._rerender_latest_preview()
+        return new_val
 
     def reset_heatmap(self) -> None:
-        with self._lock:
-            self.hotspot.reset()
+        self.hotspot.reset(preserve_stationary=True)
+        self._rerender_latest_preview()
 
     def get_latest_jpeg(self) -> bytes | None:
         self._last_viewer_ts = time.monotonic()
@@ -807,6 +822,7 @@ class StreamWorker:
                 "counting_lines": [ln.model_dump() for ln in self.db.get_counting_lines()],
                 "active_dwells": list(self._active_dwells),
                 "heatmap_enabled": self.config.heatmap_enabled,
+                "heatmap_started_at": self.hotspot.started_at,
                 "last_violation": self._last_violation,
                 "last_plate": dict(self._last_plate),
                 "ha": ha_status,
@@ -1400,7 +1416,13 @@ class StreamWorker:
                         strobe_swing=cfg.emergency_strobe_swing,
                         fire_red_ratio=cfg.emergency_fire_red_ratio,
                     )
-                self.hotspot.update(tracks, w, h)
+                self.hotspot.update(
+                    tracks,
+                    w,
+                    h,
+                    movement_threshold=cfg.movement_threshold,
+                    now_ts=now_ts,
+                )
 
                 step = self.monitor.process_tracks(
                     tracks=tracks,
@@ -1698,13 +1720,15 @@ class StreamWorker:
         return "\n".join(lines_out)
 
     def reset_all_counts(self) -> None:
-        """Reset cumulative vehicle/people counts, hourly traffic, line crossings, and speed history."""
+        """Reset cumulative vehicle/people counts, hourly traffic, line crossings, speed history, and heatmap."""
         self.db.reset_stats()
         self.db.reset_line_counts()
         self.monitor.reset()
         self.line_monitor.reset()
+        self.hotspot.reset(preserve_stationary=True)
         with self._lock:
             self._active_violation_snaps.clear()
+        self._rerender_latest_preview()
         self._ha_wake_event.set()
 
     def send_daily_report(
@@ -1967,6 +1991,7 @@ class StreamWorker:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                         if self._detector is not None:
                             self._detector.reset()
+                        self.hotspot.clear_tracks()
                         self.motion_gate.reset()
                         self._has_inferred_frame = False
                         ok, frame = cap.read()

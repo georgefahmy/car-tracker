@@ -1148,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.31"
+    assert expected_ver == "1.0.32"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1704,6 +1704,7 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
             self.dialogs: dict[str, dict[str, str | None]] = {}
             self.labels_for: list[str] = []
             self.buttons_inside_label: list[str] = []
+            self.buttons_by_id: dict[str, dict[str, str | None]] = {}
             self.controls_by_name: dict[str, dict[str, str | None]] = {}
             self.tip_buttons_by_for: dict[str, dict[str, str | None]] = {}
             self.tooltips: dict[str, str] = {}
@@ -1737,6 +1738,8 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
             if tag == "button":
                 if self._in_label:
                     self.buttons_inside_label.append(attr.get("id") or attr.get("interestfor") or "btn")
+                if attr.get("id"):
+                    self.buttons_by_id[attr["id"]] = attr
                 if "help-tip-btn" in cls_tokens and attr.get("interestfor"):
                     self.tip_buttons_by_for[attr["interestfor"]] = attr
             if tag in {"input", "select"} and attr.get("name") and attr["name"] != "violation_filter":
@@ -1796,9 +1799,19 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         assert "role" not in attrs
         assert "aria-modal" not in attrs
 
-    assert "static/icon.png?v=27" in collector.links
-    assert "static/styles.css?v=27" in collector.links
-    assert "static/app.js?v=27" in collector.scripts
+    assert "static/icon.png?v=28" in collector.links
+    assert "static/styles.css?v=28" in collector.links
+    assert "static/app.js?v=28" in collector.scripts
+    for tip_id, btn_id in (
+        ("tip-heatmap_toggle", "btnHeatmapToggle"),
+        ("tip-heatmap_reset", "btnHeatmapReset"),
+        ("tip-reset_stats", "btnResetStats"),
+    ):
+        assert tip_id in collector.tooltips
+        assert len(collector.tooltips[tip_id]) >= 30
+        btn_attrs = collector.buttons_by_id[btn_id]
+        assert btn_attrs.get("interestfor") == tip_id
+        assert "title" not in btn_attrs
     assert collector.controls_by_name["inference_backend"].get("aria-describedby") == "hwDiagnosticHint"
     assert 'id="btnDrawSpeedLine"' in html
 
@@ -2872,6 +2885,123 @@ def test_line_roles_count_only_vs_speed_only(tmp_path: Path, monkeypatch) -> Non
     assert "SPEED: Radar 1" in drawn_labels
     assert "Jasper: 27 (20/7)" in drawn_labels
     assert not any(lbl.startswith("Radar 1:") for lbl in drawn_labels)
+
+
+def test_cumulative_heatmap_persistence_motion_trails_and_reset_sync(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+
+    import pytest
+
+    # 1. Zero decay across 500 empty frames + continuous horizontal trail without bridging huge jumps
+    heatmap_file = tmp_path / "data" / "heatmap.npy"
+    ht = HotspotTracker(grid_w=160, grid_h=90, storage_path=heatmap_file)
+    assert ht.decay == 1.0
+
+    # Moving car #10 across horizontal path x: 0.10 -> 0.40 at y=0.50
+    for step, x in enumerate((0.10, 0.25, 0.40)):
+        ht.update([_make_car(10, x, 0.50)], 1000, 1000, now_ts=100.0 + step * 0.2)
+
+    mid_y = round(0.50 * (ht.grid_h - 1))
+    mid_x = round(0.25 * (ht.grid_w - 1))
+    seg_x = round(0.32 * (ht.grid_w - 1))
+    assert float(ht.grid[mid_y, seg_x]) > 0.0
+    assert float(ht.grid[mid_y, mid_x]) > 0.0
+
+    # Huge jump (> 0.35 normalized distance) for car #11 should NOT bridge across y=0.20
+    ht.update([_make_car(11, 0.10, 0.20)], 1000, 1000, now_ts=105.0)
+    ht.update([_make_car(11, 0.85, 0.20)], 1000, 1000, now_ts=105.2)
+    jump_y = round(0.20 * (ht.grid_h - 1))
+    jump_mid_x = round(0.47 * (ht.grid_w - 1))
+    assert float(ht.grid[jump_y, jump_mid_x]) == 0.0
+
+    before_empty = float(ht.grid.sum())
+    for step in range(500):
+        ht.update([], 1000, 1000, now_ts=110.0 + step * 0.1)
+    assert float(ht.grid.sum()) == pytest.approx(before_empty, rel=1e-5)
+
+    # 2. Stationary parked-car heat cap across flickering track IDs + log1p visibility of single-pass lane
+    ht2 = HotspotTracker(grid_w=160, grid_h=90, storage_path=tmp_path / "park.npy")
+    for step in range(500):
+        flicker_tid = (step % 10) + 1
+        ht2.update([_make_car(flicker_tid, 0.85, 0.70)], 1000, 1000, now_ts=200.0 + step * 0.1)
+
+    park_gx = round(0.85 * (ht2.grid_w - 1))
+    park_gy = round(0.70 * (ht2.grid_h - 1))
+    assert float(ht2.grid[park_gy, park_gx]) <= 3.5
+
+    # Single moving pass along lane y=0.30, x: 0.20 -> 0.50
+    for step, x in enumerate((0.20, 0.35, 0.50)):
+        ht2.update([_make_car(50, x, 0.30)], 1000, 1000, now_ts=260.0 + step * 0.1)
+
+    black = np.zeros((360, 640, 3), dtype=np.uint8)
+    overlaid = ht2.render_overlay(black, alpha=0.55)
+    lane_px_y = int(0.30 * 360)
+    lane_px_x = int(0.35 * 640)
+    assert int(overlaid[lane_px_y, lane_px_x].sum()) > 0
+
+    # 3. Disk persistence round-trip
+    ht2.save(force=True)
+    meta_file = tmp_path / "park.meta.json"
+    assert (tmp_path / "park.npy").exists()
+    assert meta_file.exists()
+    ht2_reloaded = HotspotTracker(grid_w=160, grid_h=90, storage_path=tmp_path / "park.npy")
+    assert np.allclose(ht2_reloaded.grid, ht2.grid)
+    assert ht2_reloaded.started_at == ht2.started_at
+
+    # 4. API & StreamWorker reset synchronization + preserve_stationary on live reset
+    settings = Settings(data_dir=str(tmp_path / "app_data"), webhook_url="https://example.com/hook")
+    app = create_app(settings=settings, start_worker=False)
+    with TestClient(app) as client:
+        worker = app.state.worker
+        worker.hotspot.update([_make_car(99, 0.80, 0.80)], 1000, 1000, now_ts=500.0)
+        worker.db.increment_stats(unique_cars=1, total_cars=1)
+        stats_res = client.get("/api/stats")
+        assert stats_res.status_code == 200
+        stats_json = stats_res.json()
+        assert isinstance(stats_json.get("heatmap_started_at"), str)
+        assert len(stats_json["heatmap_started_at"]) >= 10
+
+        # Clear Heatmap clears only heatmap while keeping stats and stationary track memory
+        clear_res = client.post("/api/heatmap/reset")
+        assert clear_res.status_code == 200
+        assert "heatmap_started_at" in clear_res.json()
+        assert float(worker.hotspot.grid.max()) == 0.0
+        assert client.get("/api/stats").json()["unique_cars"] == 1
+
+        # Stationary frame of #99 at (0.80, 0.80) right after reset adds 0 heat
+        worker.hotspot.update([_make_car(99, 0.80, 0.80)], 1000, 1000, now_ts=501.0)
+        assert float(worker.hotspot.grid.max()) == 0.0
+
+        # Once #99 leaves the spot, departure trail is immediately drawn
+        worker.hotspot.update([_make_car(99, 0.70, 0.80)], 1000, 1000, now_ts=501.5)
+        assert float(worker.hotspot.grid.max()) > 0.0
+
+        # Reset Counts resets BOTH counters and cumulative heatmap (persisted on disk)
+        worker.db.increment_stats(unique_cars=2, total_cars=3)
+        reset_res = client.post("/api/stats/reset")
+        assert reset_res.status_code == 200
+        assert "heatmap_started_at" in reset_res.json()
+        assert client.get("/api/stats").json()["unique_cars"] == 0
+        assert float(worker.hotspot.grid.max()) == 0.0
+        reloaded_after_reset = HotspotTracker(storage_path=settings.data_path / "heatmap.npy")
+        assert float(reloaded_after_reset.grid.max()) == 0.0
+
+        # Daily Summary Report with reset_after=True also clears cumulative heatmap
+        worker.hotspot.update([_make_car(120, 0.30, 0.40)], 1000, 1000, now_ts=600.0)
+        worker.db.increment_stats(unique_cars=4, total_cars=5)
+        assert float(worker.hotspot.grid.max()) > 0.0
+        import requests
+
+        monkeypatch.setattr(
+            requests, "post", lambda *args, **kwargs: SimpleNamespace(status_code=200, text="ok")
+        )
+        rep = worker.send_daily_report("https://example.com/hook", reset_after=True)
+        assert rep["ok"] is True
+        assert client.get("/api/stats").json()["unique_cars"] == 0
+        assert float(worker.hotspot.grid.max()) == 0.0
+
 
 
 

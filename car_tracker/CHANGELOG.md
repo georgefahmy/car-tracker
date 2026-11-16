@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.32
+- **Persistent Cumulative Traffic Heatmap (Since Last Reset)**: Removed the exponential time decay (`decay = 1.0`) and added atomic disk persistence (`/data/heatmap.npy` + `/data/heatmap.meta.json`) saved every 30 seconds and on clean shutdown so accumulated traffic survives add-on restarts and updates.
+- **Motion-Weighted Path Trails & Parked-Car Filtering**: Draws smooth frame-to-frame path segments along moving trajectories while capping stationary parked-car heat (and inheriting dwell state across ByteTrack ID flicker or immediately after a live reset) so parked vehicles never wash out moving street or sidewalk traffic.
+- **Logarithmic Dynamic Range & Halo-Free Blending**: Switched heatmap normalization to `np.log1p` with intensity-proportional alpha blending (plus optional Bird's-Eye View heatmap projection) so occasional single-pass lanes and high-volume corridors stay readable together.
+- **Count-Reset Synchronization & Accessible Action Hints**: Synchronized **Reset Counts** and the scheduled **Daily Summary Report** (`reset_after=True`) to clear the cumulative heatmap alongside counters while leaving **Clear Heatmap** independent, and upgraded top-bar action buttons to accessible `popover="hint"` + `interestfor` tooltips displaying the current accumulation start time.
+
 ## 1.0.31
 - **Model & Backend CPU Impact Tiers**: Extended the unified Settings dropdown labels to `[Device · Backend · CPU: <Impact>]` (`Minimal`, `Very Low`, `Low`, `Moderate`, `High`, `Very High`), dynamically updating per-model CPU load and `Auto`/`PyTorch` host resolution whenever **Inference Backend** or hardware diagnostics change.
 

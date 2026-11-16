@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.27
+- **Fixed-Position Header Telemetry Strip**: Replaced the free-flowing `#streamInfo` header string with fixed-slot flex spans (`.telemetry-strip` / `.t-slot`) and `font-variant-numeric: tabular-nums` + fixed decimal formatting (`.toFixed(2)` FPS, `.toFixed(1)` CPU/RAM/temp/mph) and separated Motion Gate (`Gate: Idle` / `Gate: Active`) into its own reserved slot so values stay aligned instead of shifting left and right on updates.
+
 ## 1.0.26
 - **Fix Add-on Docker Build Copy Step**: Removed gitignored `yolov8n.pt` from `car_tracker/Dockerfile` and root `Dockerfile` (YOLO weights are downloaded into `/data/models/` at runtime), while keeping the cached `ubuntu:24.04` + `kobuk-team/intel-graphics` + `.venv` dependency layers intact for fast rebuilds.
 

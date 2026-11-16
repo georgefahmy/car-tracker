@@ -1236,6 +1236,92 @@ function formatSourceSummary(data) {
   return `File (${fname})`;
 }
 
+function formatStreamStatus(rawStatus) {
+  const s = String(rawStatus || "").trim().toLowerCase();
+  const map = {
+    connected: "CONNECTED",
+    connected_http: "HTTP SNAP",
+    connecting: "CONNECTING",
+    reconnecting: "RECONNECTING",
+    initializing: "STARTING",
+    loading_model: "LOAD MODEL",
+    waiting_for_credentials: "NEEDS LOGIN",
+    error: "ERROR",
+  };
+  return map[s] || String(rawStatus || "UNKNOWN").toUpperCase();
+}
+
+function renderStreamTelemetryHtml(data) {
+  const statusLabel = escapeHtml(formatStreamStatus(data.stream_status));
+  const resStr = data.resolution?.width
+    ? `${Number(data.resolution.width)}x${Number(data.resolution.height)}`
+    : "—";
+  const fpsVal = Number(data.fps ?? 0).toFixed(2);
+  const modelLabel = escapeHtml(data.yolo_model || "—");
+  const backendLabel = data.inference_backend
+    ? String(data.inference_backend).toUpperCase()
+    : "—";
+  const sizeLabel = data.input_resolution
+    ? `@${data.input_resolution}`
+    : (data.yolo_imgsz ? `@${data.yolo_imgsz}` : "");
+  const backendFull = escapeHtml(`${backendLabel}${sizeLabel}`);
+
+  let motionLabel = "Gate: Off";
+  let motionActive = false;
+  if (data.motion_gate_enabled && data.motion_state !== "off") {
+    if (data.motion_state === "idle") {
+      motionLabel = "Gate: Idle";
+    } else {
+      motionLabel = "Gate: Active";
+      motionActive = true;
+    }
+  }
+
+  const sys = data.system || {};
+  const cpuHtml = sys.cpu_percent != null
+    ? `CPU<span class="t-num t-num-pct">${Number(sys.cpu_percent).toFixed(1)}</span>%`
+    : "CPU —";
+  const ramHtml = sys.memory_percent != null
+    ? `RAM<span class="t-num t-num-pct">${Number(sys.memory_percent).toFixed(1)}</span>%`
+    : "RAM —";
+
+  const slots = [
+    `<span class="t-slot t-status">${statusLabel}</span>`,
+    `<span class="t-slot t-res">${escapeHtml(resStr)}</span>`,
+    `<span class="t-slot t-fps"><span class="t-num t-num-fps">${fpsVal}</span>FPS</span>`,
+    `<span class="t-slot t-model">${modelLabel}</span>`,
+    `<span class="t-slot t-backend">${backendFull}</span>`,
+    `<span class="t-slot t-motion${motionActive ? " is-active" : ""}">${motionLabel}</span>`,
+    `<span class="t-slot t-cpu">${cpuHtml}</span>`,
+    `<span class="t-slot t-ram">${ramHtml}</span>`,
+  ];
+
+  if (sys.cpu_temp_c != null) {
+    slots.push(
+      `<span class="t-slot t-temp"><span class="t-num t-num-temp">${Number(sys.cpu_temp_c).toFixed(1)}</span>°C</span>`
+    );
+  }
+
+  const sourceLabel = formatSourceSummary(data);
+  if (sourceLabel) {
+    slots.push(`<span class="t-slot t-source">${escapeHtml(sourceLabel)}</span>`);
+  }
+
+  let noteText = "";
+  if (data.model_loading && data.model_loading_target) {
+    noteText = `LOADING ${data.model_loading_target}`;
+  } else if (data.model_error) {
+    noteText = `MODEL ERR: ${data.model_error}`;
+  } else if (data.backend_fallback) {
+    noteText = String(data.backend_fallback);
+  }
+  if (noteText) {
+    slots.push(`<span class="t-slot t-note">${escapeHtml(noteText)}</span>`);
+  }
+
+  return slots.join("");
+}
+
 function updateCvRuntimeHint() {
   const hintEl = document.getElementById("cvRuntimeHint");
   if (!hintEl) return;
@@ -1255,7 +1341,7 @@ function updateCvRuntimeHint() {
     parts.push(
       latestLiveStats.motion_state === "idle"
         ? "Motion Gate: Idle (0.5 FPS)"
-        : "Motion Gate: Active"
+        : "Motion Gate: Active (Full)"
     );
   }
   if (latestLiveStats.backend_fallback) {
@@ -1316,13 +1402,6 @@ async function refreshStats() {
     if (data.stream_status.startsWith("connected")) dot.classList.add("connected");
     else if (data.stream_status === "error") dot.classList.add("error");
 
-    const resStr = data.resolution?.width ? `${data.resolution.width}x${data.resolution.height}` : "—";
-    const sys = data.system || {};
-    const sysParts = [];
-    if (sys.cpu_percent != null) sysParts.push(`CPU ${sys.cpu_percent}%`);
-    if (sys.memory_percent != null) sysParts.push(`RAM ${sys.memory_percent}%`);
-    if (sys.cpu_temp_c != null) sysParts.push(`${sys.cpu_temp_c}°C`);
-    const sysStr = sysParts.length ? ` • ${sysParts.join(" • ")}` : "";
     const verBadge = document.getElementById("appVersionBadge");
     if (verBadge && data.version) {
       const verLabel = `v${String(data.version).replace(/^v/i, "")}`;
@@ -1332,24 +1411,13 @@ async function refreshStats() {
       verBadge.classList.remove("hidden");
     }
 
-    const modelStr = data.yolo_model ? ` • ${data.yolo_model}` : "";
-    const backendLabel = data.inference_backend ? String(data.inference_backend).toUpperCase() : "";
-    const sizeLabel = data.input_resolution
-      ? `@${data.input_resolution}`
-      : (data.yolo_imgsz ? `@${data.yolo_imgsz}` : "");
-    const motionSuffix = data.motion_state === "idle" ? " (Idle)" : "";
-    const backendStr = backendLabel ? ` • ${backendLabel}${sizeLabel}${motionSuffix}` : "";
-    let modelNoteStr = "";
-    if (data.model_loading && data.model_loading_target) {
-      modelNoteStr = ` • LOADING ${data.model_loading_target}`;
-    } else if (data.model_error) {
-      modelNoteStr = ` • MODEL ERR: ${data.model_error}`;
-    } else if (data.backend_fallback) {
-      modelNoteStr = ` • ${data.backend_fallback}`;
+    const streamInfoEl = document.getElementById("streamInfo");
+    if (streamInfoEl) {
+      const nextTelemetryHtml = renderStreamTelemetryHtml(data);
+      if (streamInfoEl.innerHTML !== nextTelemetryHtml) {
+        streamInfoEl.innerHTML = nextTelemetryHtml;
+      }
     }
-    const sourceLabel = formatSourceSummary(data);
-    document.getElementById("streamInfo").textContent =
-      `${data.stream_status.toUpperCase()} • ${resStr} • ${data.fps} FPS${modelStr}${backendStr}${modelNoteStr}${sysStr}${sourceLabel ? ` • ${sourceLabel}` : ""}`;
     if (isModalOpen(settingsModal)) {
       updateCvRuntimeHint();
     }
@@ -1365,9 +1433,9 @@ async function refreshStats() {
       } else if (sp.samples_count > 0) {
         const recentText = (sp.recent || [])
           .slice(0, 4)
-          .map((r) => `#${r.track_id} ${r.vehicle_class} ${r.speed_mph} mph`)
+          .map((r) => `#${r.track_id} ${r.vehicle_class} ${Number(r.speed_mph).toFixed(1)} mph`)
           .join(" • ");
-        speedEl.textContent = `Speed (2-line): Last ${sp.last_speed_mph} mph • Avg ${sp.avg_speed_mph} mph • Max ${sp.max_speed_mph} mph` + (recentText ? ` — ${recentText}` : "");
+        speedEl.textContent = `Speed (2-line): Last ${Number(sp.last_speed_mph).toFixed(1)} mph • Avg ${Number(sp.avg_speed_mph).toFixed(1)} mph • Max ${Number(sp.max_speed_mph).toFixed(1)} mph` + (recentText ? ` — ${recentText}` : "");
       } else {
         speedEl.textContent = "Speed (2-line): Waiting for a vehicle to cross 2 enabled traffic lines.";
       }

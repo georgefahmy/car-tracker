@@ -96,6 +96,49 @@ h1, h2, h3 { text-wrap: balance; }
   }
 }
 .subtitle { margin: 2px 0 0; font-size: 0.82rem; color: var(--muted); }
+.telemetry-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  row-gap: 4px;
+  column-gap: 0;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+.t-slot {
+  display: inline-flex;
+  align-items: baseline;
+  flex: 0 1 auto;
+  padding-inline-end: 0.6rem;
+  margin-inline-end: 0.6rem;
+  border-inline-end: 1px solid #263349;
+}
+.t-slot:last-child {
+  padding-inline-end: 0;
+  margin-inline-end: 0;
+  border-inline-end: none;
+}
+.t-num {
+  display: inline-block;
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
+.t-status  { min-inline-size: min(14.5ch, 100%); font-weight: 600; color: #cbd5e1; }
+.t-res     { min-inline-size: min(9.5ch, 100%); }
+.t-fps     { min-inline-size: min(9.8ch, 100%); }
+.t-model   { min-inline-size: min(12.5ch, 100%); }
+.t-backend { min-inline-size: min(24ch, 100%); }
+.t-motion  { min-inline-size: min(12ch, 100%); }
+.t-motion.is-active { color: #cbd5e1; }
+.t-cpu     { min-inline-size: min(11ch, 100%); }
+.t-ram     { min-inline-size: min(11ch, 100%); }
+.t-temp    { min-inline-size: min(7.2ch, 100%); }
+.t-source  { min-inline-size: min(19ch, 100%); }
+.t-note    { color: #fbbf24; }
+.t-num-fps  { min-inline-size: 5ch; margin-inline-end: 0.3ch; }
+.t-num-pct  { min-inline-size: 5ch; margin-inline-start: 0.35ch; }
+.t-num-temp { min-inline-size: 4.5ch; }
 
 .dot {
   width: 11px;
@@ -150,7 +193,7 @@ h1, h2, h3 { text-wrap: balance; }
   gap: 6px;
 }
 .kpi-label { font-size: 0.8rem; color: var(--muted); }
-.kpi-value { font-size: 1.65rem; font-weight: 700; }
+.kpi-value { font-size: 1.65rem; font-weight: 700; font-variant-numeric: tabular-nums; }
 .accent-green { color: var(--green); }
 .accent-blue { color: var(--blue); }
 .accent-red { color: var(--danger); }
@@ -374,6 +417,7 @@ h1, h2, h3 { text-wrap: balance; }
 .speed-footer {
   margin-top: 10px;
   font-size: 0.83rem;
+  font-variant-numeric: tabular-nums;
 }
 .speed-footer:empty {
   display: none;
@@ -489,6 +533,7 @@ dialog.modal-settings {
 .modal-title-group .runtime-hint {
   margin: 0;
   font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
 }
 .modal-body {
   flex: 1 1 auto;

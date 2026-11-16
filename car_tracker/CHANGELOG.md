@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.34
+- **Separate Vehicle & Pedestrian Heatmaps with Distinct Color Ramps**: Split `HotspotTracker` into independent `vehicle_grid` and `person_grid` accumulators with separate `np.log1p` normalization and custom colorblind-safe OpenCV LUTs (**Warm Crimson → Amber → Gold** for vehicles; **Cool Sapphire → Electric Cyan → Ice-Aqua** for people) so heavy street car traffic never washes out pedestrian sidewalks.
+- **1-Click Heatmap Layer Cycling (`All` / `Cars` / `People` / `OFF`)**: Clicking the top-bar `Heatmap` button now cycles cleanly through `OFF → All → Cars → People → OFF` with color-key swatches on the button, live preview/snapshot/Bird's-Eye View updates, and persisted `heatmap_mode` in SQLite.
+- **2-Channel Disk Persistence (`/data/heatmap.npy`)**: Stores `[vehicle_grid, person_grid]` together on disk while automatically upgrading legacy single-channel 2D `.npy` files into `vehicle_grid`.
+
 ## 1.0.33
 - **Final-Timestamped Red-Zone Discord / Webhook Alerts**: Deferred Red-Zone vehicle violation webhooks until the violation completes (or is flushed on shutdown, reset, source switch, or the 4-hour eviction cap), updating both the database record (`flagged_at`, `dwell_seconds`, `license_plate`) and the snapshot image from the vehicle's **last in-zone frame** before dispatching so Discord receives the end-of-violation camera timestamp and final `ILLEGAL PARK` dwell badge instead of the initial trigger frame.
 - **Live In-Zone Snapshot Tracking & Human-Readable Webhook Durations**: Kept live Web UI cards, Home Assistant events, Speeding alerts, and after-hours Person security alerts immediate while tracking the latest in-zone base frame without overwriting higher-resolution 4K HTTP Snap stills or capturing empty-street frames after departure, and formatted Discord/webhook dwell durations with `format_dwell_duration` (`e.g. 2m 30s`) reading finalized JPEG bytes synchronously before background upload.

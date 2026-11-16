@@ -274,9 +274,12 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
         return await asyncio.to_thread(worker.send_daily_report, url)
 
     @app.post("/api/heatmap/toggle")
-    async def toggle_heatmap(enabled: bool | None = None) -> dict:
-        new_state = worker.toggle_heatmap(enabled)
-        return {"heatmap_enabled": new_state}
+    async def toggle_heatmap(enabled: bool | None = None, mode: str | None = None) -> dict:
+        new_state = worker.toggle_heatmap(enabled=enabled, mode=mode)
+        return {
+            "heatmap_enabled": new_state,
+            "heatmap_mode": worker.config.heatmap_mode,
+        }
 
     @app.post("/api/heatmap/reset")
     async def reset_heatmap() -> dict:
@@ -322,6 +325,7 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
             db.get_zones(),
             db.get_counting_lines(),
             hotspot=(worker.hotspot if worker.config.heatmap_enabled else None),
+            heatmap_mode=worker.config.heatmap_mode,
         )
         if not jpg:
             raise HTTPException(status_code=500, detail="Failed to render bird's-eye view")

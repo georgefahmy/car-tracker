@@ -23,6 +23,7 @@ let draftPoints = [];
 let editingTarget = null; // null | { kind: "zone" | "line", id: string, name: string }
 let dragVertexIndex = -1;
 let heatmapEnabled = false;
+let heatmapMode = "all";
 let groundCalib = null;
 let groundToImgMatrix = null;
 let latestLiveStats = null;
@@ -1693,7 +1694,8 @@ async function refreshStats() {
     }
 
     heatmapEnabled = Boolean(data.heatmap_enabled);
-    document.getElementById("btnHeatmapToggle").textContent = `Heatmap: ${heatmapEnabled ? "ON" : "OFF"}`;
+    heatmapMode = data.heatmap_mode || "all";
+    renderHeatmapButton(heatmapEnabled, heatmapMode);
     updateHeatmapTooltip(data.heatmap_started_at);
 
     const speedEl = document.getElementById("speedSummary");
@@ -1966,6 +1968,28 @@ async function refreshViolations() {
   }
 }
 
+function renderHeatmapButton(enabled, mode) {
+  const btn = document.getElementById("btnHeatmapToggle");
+  if (!btn) return;
+  const m = ["all", "vehicles", "people"].includes(mode) ? mode : "all";
+  if (!enabled) {
+    btn.textContent = "Heatmap: OFF";
+    return;
+  }
+  if (m === "vehicles") {
+    btn.innerHTML =
+      '<span class="hm-btn-content"><span class="hm-swatch hm-swatch-car" aria-hidden="true"></span><span>Heatmap: Cars</span></span>';
+    return;
+  }
+  if (m === "people") {
+    btn.innerHTML =
+      '<span class="hm-btn-content"><span class="hm-swatch hm-swatch-person" aria-hidden="true"></span><span>Heatmap: People</span></span>';
+    return;
+  }
+  btn.innerHTML =
+    '<span class="hm-btn-content"><span class="hm-swatches" aria-hidden="true"><span class="hm-swatch hm-swatch-car"></span><span class="hm-swatch hm-swatch-person"></span></span><span>Heatmap: All</span></span>';
+}
+
 function updateHeatmapTooltip(startedAtIso) {
   const tipEl = document.getElementById("tipHeatmapToggleText");
   if (!tipEl) return;
@@ -1982,15 +2006,16 @@ function updateHeatmapTooltip(startedAtIso) {
       sincePart = `since ${formatted}`;
     }
   }
-  tipEl.textContent = `Cumulative motion-weighted traffic heatmap ${sincePart}. Persists across restarts and resets with Reset Counts or the scheduled Daily Report.`;
+  tipEl.textContent = `Click to cycle Off → All → Cars → People. Warm Amber/Red = Vehicles • Cool Cyan/Blue = People (cumulative ${sincePart}; persists across restarts and resets with Reset Counts or Daily Report).`;
 }
 
 // Heatmap & Reset controls
 document.getElementById("btnHeatmapToggle").addEventListener("click", async () => {
   const res = await fetch("api/heatmap/toggle", { method: "POST" });
   const data = await res.json();
-  heatmapEnabled = data.heatmap_enabled;
-  document.getElementById("btnHeatmapToggle").textContent = `Heatmap: ${heatmapEnabled ? "ON" : "OFF"}`;
+  heatmapEnabled = Boolean(data.heatmap_enabled);
+  heatmapMode = data.heatmap_mode || "all";
+  renderHeatmapButton(heatmapEnabled, heatmapMode);
 });
 
 document.getElementById("btnHeatmapReset").addEventListener("click", async () => {
@@ -2209,6 +2234,7 @@ settingsForm.addEventListener("submit", async (e) => {
   try {
     const payload = formToPayload();
     payload.heatmap_enabled = heatmapEnabled;
+    payload.heatmap_mode = heatmapMode;
     const res = await fetch("api/config", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },

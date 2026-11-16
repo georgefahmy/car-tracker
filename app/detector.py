@@ -127,6 +127,7 @@ class _HotspotTrackState:
     last_seen_ts: float
     dwell_heat: float = 0.0
     has_moved: bool = False
+    kind: str = "vehicle"
 
 
 @dataclass
@@ -134,10 +135,42 @@ class _StationarySpot:
     pos_norm: tuple[float, float]
     dwell_heat: float
     last_seen_ts: float
+    kind: str = "vehicle"
+
+
+def _build_bgr_lut(stops: list[tuple[int, tuple[int, int, int]]]) -> np.ndarray:
+    xs = np.arange(256, dtype=np.float32)
+    stop_x = np.array([s[0] for s in stops], dtype=np.float32)
+    lut = np.zeros((256, 1, 3), dtype=np.uint8)
+    for ch in range(3):
+        stop_c = np.array([s[1][ch] for s in stops], dtype=np.float32)
+        lut[:, 0, ch] = np.clip(np.round(np.interp(xs, stop_x, stop_c)), 0, 255).astype(np.uint8)
+    return lut
+
+
+# Colorblind-safe dual ramps (OpenCV BGR): Warm Crimson->Amber->Gold for vehicles; Cool Sapphire->Cyan->Ice for people
+_VEHICLE_HEATMAP_LUT = _build_bgr_lut(
+    [
+        (0, (0, 0, 0)),
+        (32, (12, 18, 150)),
+        (96, (10, 70, 230)),
+        (176, (16, 155, 255)),
+        (255, (90, 240, 255)),
+    ]
+)
+_PERSON_HEATMAP_LUT = _build_bgr_lut(
+    [
+        (0, (0, 0, 0)),
+        (32, (165, 55, 0)),
+        (96, (235, 135, 8)),
+        (176, (255, 210, 30)),
+        (255, (255, 250, 145)),
+    ]
+)
 
 
 class HotspotTracker:
-    """Accumulates persistent, motion-weighted traffic paths on a fixed normalized grid."""
+    """Accumulates persistent, class-separated vehicle and pedestrian traffic paths."""
 
     INITIAL_POINT_HEAT: float = 0.6
     STATIONARY_STEP_HEAT: float = 0.15
@@ -167,7 +200,8 @@ class HotspotTracker:
 
         self._lock = threading.Lock()
         self._io_lock = threading.Lock()
-        self.grid = np.zeros((grid_h, grid_w), dtype=np.float32)
+        self.vehicle_grid = np.zeros((grid_h, grid_w), dtype=np.float32)
+        self.person_grid = np.zeros((grid_h, grid_w), dtype=np.float32)
         self.started_at: str = datetime.now(timezone.utc).isoformat()
         self._tracks: dict[int, _HotspotTrackState] = {}
         self._recent_stops: list[_StationarySpot] = []
@@ -175,12 +209,25 @@ class HotspotTracker:
         self._last_save_mono: float = time.monotonic()
 
         self._version: int = 0
-        self._cached_version: int = -1
+        self._cached_key: tuple[int, str] | None = None
         self._cached_colored: np.ndarray | None = None
         self._cached_weight: np.ndarray | None = None
 
         if self.storage_path is not None:
             self._load_from_disk()
+
+    @property
+    def grid(self) -> np.ndarray:
+        return self.vehicle_grid + self.person_grid
+
+    @grid.setter
+    def grid(self, value: np.ndarray) -> None:
+        arr = np.asarray(value, dtype=np.float32)
+        self.vehicle_grid = arr.copy()
+        self.person_grid = np.zeros_like(self.vehicle_grid)
+
+    def _stacked_grids_copy(self) -> np.ndarray:
+        return np.stack([self.vehicle_grid, self.person_grid], axis=0).astype(np.float32, copy=True)
 
     def _load_from_disk(self) -> None:
         if self.storage_path is None:
@@ -192,15 +239,37 @@ class HotspotTracker:
                 arr = np.asarray(arr, dtype=np.float32)
                 arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
                 arr = np.maximum(arr, 0.0)
-                if arr.ndim == 2 and arr.size > 0:
+                if arr.ndim == 3 and arr.shape[0] == 2 and arr.size > 0:
+                    v_arr, p_arr = arr[0], arr[1]
+                    if v_arr.shape != (self.grid_h, self.grid_w):
+                        v_arr = cv2.resize(
+                            v_arr, (self.grid_w, self.grid_h), interpolation=cv2.INTER_LINEAR
+                        )
+                    if p_arr.shape != (self.grid_h, self.grid_w):
+                        p_arr = cv2.resize(
+                            p_arr, (self.grid_w, self.grid_h), interpolation=cv2.INTER_LINEAR
+                        )
+                    self.vehicle_grid = np.maximum(
+                        np.ascontiguousarray(v_arr, dtype=np.float32), 0.0
+                    )
+                    self.person_grid = np.maximum(
+                        np.ascontiguousarray(p_arr, dtype=np.float32), 0.0
+                    )
+                    if max(float(self.vehicle_grid.max()), float(self.person_grid.max())) > 0.0:
+                        self._version = 1
+                elif arr.ndim == 2 and arr.size > 0:
+                    # Legacy single-channel 2D grid -> load into vehicle_grid
                     if arr.shape != (self.grid_h, self.grid_w):
                         arr = cv2.resize(arr, (self.grid_w, self.grid_h), interpolation=cv2.INTER_LINEAR)
-                        arr = np.maximum(np.asarray(arr, dtype=np.float32), 0.0)
-                    self.grid = np.ascontiguousarray(arr, dtype=np.float32)
-                    if float(self.grid.max()) > 0.0:
+                    self.vehicle_grid = np.maximum(
+                        np.ascontiguousarray(arr, dtype=np.float32), 0.0
+                    )
+                    self.person_grid = np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
+                    if float(self.vehicle_grid.max()) > 0.0:
                         self._version = 1
         except Exception:
-            self.grid = np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
+            self.vehicle_grid = np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
+            self.person_grid = np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
 
         try:
             if self._meta_path is not None and self._meta_path.exists():
@@ -216,7 +285,7 @@ class HotspotTracker:
         except Exception:
             pass
 
-    def _write_disk_snapshot(self, grid_copy: np.ndarray, started_at: str) -> None:
+    def _write_disk_snapshot(self, stacked_copy: np.ndarray, started_at: str) -> None:
         if self.storage_path is None:
             return
         with self._io_lock:
@@ -225,7 +294,7 @@ class HotspotTracker:
                 tmp_npy = self.storage_path.with_name(f".{self.storage_path.name}.tmp")
                 # Open explicit binary handle so NumPy does not auto-append ".npy" to ".tmp"
                 with tmp_npy.open("wb") as fh:
-                    np.save(fh, grid_copy)
+                    np.save(fh, stacked_copy)
                 os.replace(tmp_npy, self.storage_path)
 
                 if self._meta_path is not None:
@@ -236,6 +305,7 @@ class HotspotTracker:
                                 "started_at": started_at,
                                 "grid_w": self.grid_w,
                                 "grid_h": self.grid_h,
+                                "channels": 2,
                             }
                         ),
                         encoding="utf-8",
@@ -250,13 +320,13 @@ class HotspotTracker:
         with self._lock:
             if not force and not self._dirty:
                 return
-            grid_copy = self.grid.copy()
+            stacked_copy = self._stacked_grids_copy()
             started_at = self.started_at
             self._dirty = False
             self._last_save_mono = time.monotonic()
-        self._write_disk_snapshot(grid_copy, started_at)
+        self._write_disk_snapshot(stacked_copy, started_at)
 
-    def _deposit_point(self, gx: int, gy: int, weight: float) -> bool:
+    def _deposit_point(self, target_grid: np.ndarray, gx: int, gy: int, weight: float) -> bool:
         if weight <= 0.0:
             return False
         x0 = max(0, gx - 2)
@@ -267,11 +337,12 @@ class HotspotTracker:
             return False
         patch = np.zeros((y1 - y0, x1 - x0), dtype=np.float32)
         cv2.circle(patch, (gx - x0, gy - y0), 1, float(weight), thickness=-1)
-        self.grid[y0:y1, x0:x1] += patch
+        target_grid[y0:y1, x0:x1] += patch
         return True
 
     def _deposit_segment(
         self,
+        target_grid: np.ndarray,
         p0: tuple[int, int],
         p1: tuple[int, int],
         weight: float,
@@ -294,45 +365,57 @@ class HotspotTracker:
             cv2.circle(patch, q0, 1, 0.0, thickness=-1)
             if math.hypot(p1[0] - p0[0], p1[1] - p0[1]) <= 2.0:
                 patch[q1[1], q1[0]] = float(weight)
-        self.grid[y0:y1, x0:x1] += patch
+        target_grid[y0:y1, x0:x1] += patch
         return True
 
     def _max_matching_dwell(
-        self, tid: int, pos: tuple[float, float], move_thresh: float
+        self, tid: int, pos: tuple[float, float], move_thresh: float, kind: str
     ) -> float:
         best = 0.0
         for other_tid, other_st in self._tracks.items():
-            if other_tid == tid:
+            if other_tid == tid or other_st.kind != kind:
                 continue
             if (not other_st.has_moved or other_st.dwell_heat > 0.0) and math.hypot(
                 pos[0] - other_st.anchor_norm[0], pos[1] - other_st.anchor_norm[1]
             ) <= move_thresh:
                 best = max(best, other_st.dwell_heat)
         for spot in self._recent_stops:
-            if math.hypot(pos[0] - spot.pos_norm[0], pos[1] - spot.pos_norm[1]) <= move_thresh:
+            if spot.kind == kind and math.hypot(
+                pos[0] - spot.pos_norm[0], pos[1] - spot.pos_norm[1]
+            ) <= move_thresh:
                 best = max(best, spot.dwell_heat)
         return best
 
     def _upsert_recent_stop(
-        self, pos: tuple[float, float], dwell_heat: float, ts: float, move_thresh: float
+        self,
+        pos: tuple[float, float],
+        dwell_heat: float,
+        ts: float,
+        move_thresh: float,
+        kind: str,
     ) -> None:
         if dwell_heat <= 0.0:
             return
         for spot in self._recent_stops:
-            if math.hypot(pos[0] - spot.pos_norm[0], pos[1] - spot.pos_norm[1]) <= move_thresh:
+            if spot.kind == kind and math.hypot(
+                pos[0] - spot.pos_norm[0], pos[1] - spot.pos_norm[1]
+            ) <= move_thresh:
                 spot.pos_norm = pos
                 spot.dwell_heat = max(spot.dwell_heat, dwell_heat)
                 spot.last_seen_ts = max(spot.last_seen_ts, ts)
                 return
         self._recent_stops.append(
-            _StationarySpot(pos_norm=pos, dwell_heat=dwell_heat, last_seen_ts=ts)
+            _StationarySpot(pos_norm=pos, dwell_heat=dwell_heat, last_seen_ts=ts, kind=kind)
         )
 
-    def _clear_recent_stops_near(self, pos: tuple[float, float], move_thresh: float) -> None:
+    def _clear_recent_stops_near(
+        self, pos: tuple[float, float], move_thresh: float, kind: str
+    ) -> None:
         self._recent_stops = [
             spot
             for spot in self._recent_stops
-            if math.hypot(pos[0] - spot.pos_norm[0], pos[1] - spot.pos_norm[1]) > move_thresh
+            if spot.kind != kind
+            or math.hypot(pos[0] - spot.pos_norm[0], pos[1] - spot.pos_norm[1]) > move_thresh
         ]
 
     def update(
@@ -350,8 +433,11 @@ class HotspotTracker:
 
         with self._lock:
             changed = False
-            if self.decay < 1.0 and float(self.grid.max()) > 0.0:
-                self.grid *= self.decay
+            if self.decay < 1.0 and (
+                float(self.vehicle_grid.max()) > 0.0 or float(self.person_grid.max()) > 0.0
+            ):
+                self.vehicle_grid *= self.decay
+                self.person_grid *= self.decay
                 changed = True
 
             expired_tids = [
@@ -362,7 +448,9 @@ class HotspotTracker:
             for tid in expired_tids:
                 st = self._tracks.pop(tid)
                 if st.dwell_heat > 0.0:
-                    self._upsert_recent_stop(st.anchor_norm, st.dwell_heat, st.last_seen_ts, move_thresh)
+                    self._upsert_recent_stop(
+                        st.anchor_norm, st.dwell_heat, st.last_seen_ts, move_thresh, st.kind
+                    )
 
             self._recent_stops = [
                 spot
@@ -371,19 +459,24 @@ class HotspotTracker:
             ]
 
             for det in detections:
+                kind = "person" if det.is_person else "vehicle"
+                target_grid = self.person_grid if det.is_person else self.vehicle_grid
                 nx, ny = det.bottom_center_norm(frame_w, frame_h)
                 gx = min(max(int(round(nx * (self.grid_w - 1))), 0), self.grid_w - 1)
                 gy = min(max(int(round(ny * (self.grid_h - 1))), 0), self.grid_h - 1)
 
                 st = self._tracks.get(det.track_id)
+                if st is not None and st.kind != kind:
+                    st = None
+
                 if (
                     st is None
                     or (ts - st.last_seen_ts) > self.MAX_GAP_SECONDS
                     or math.hypot(nx - st.anchor_norm[0], ny - st.anchor_norm[1]) > self.MAX_JUMP_NORM
                 ):
-                    inherited = self._max_matching_dwell(det.track_id, (nx, ny), move_thresh)
+                    inherited = self._max_matching_dwell(det.track_id, (nx, ny), move_thresh, kind)
                     add_h = max(0.0, min(self.INITIAL_POINT_HEAT, self.MAX_STATIONARY_HEAT - inherited))
-                    if self._deposit_point(gx, gy, add_h):
+                    if self._deposit_point(target_grid, gx, gy, add_h):
                         changed = True
                     total_dwell = inherited + add_h
                     self._tracks[det.track_id] = _HotspotTrackState(
@@ -392,17 +485,18 @@ class HotspotTracker:
                         last_seen_ts=ts,
                         dwell_heat=total_dwell,
                         has_moved=False,
+                        kind=kind,
                     )
-                    self._upsert_recent_stop((nx, ny), total_dwell, ts, move_thresh)
+                    self._upsert_recent_stop((nx, ny), total_dwell, ts, move_thresh, kind)
                     continue
 
                 dist_norm = math.hypot(nx - st.anchor_norm[0], ny - st.anchor_norm[1])
                 if dist_norm >= move_thresh:
                     if self._deposit_segment(
-                        st.last_grid_pt, (gx, gy), self.PATH_WEIGHT, skip_start=st.has_moved
+                        target_grid, st.last_grid_pt, (gx, gy), self.PATH_WEIGHT, skip_start=st.has_moved
                     ):
                         changed = True
-                    self._clear_recent_stops_near(st.anchor_norm, move_thresh)
+                    self._clear_recent_stops_near(st.anchor_norm, move_thresh, kind)
                     st.anchor_norm = (nx, ny)
                     st.last_grid_pt = (gx, gy)
                     st.last_seen_ts = ts
@@ -412,16 +506,16 @@ class HotspotTracker:
                     st.last_seen_ts = ts
                     spot_dwell = max(
                         st.dwell_heat,
-                        self._max_matching_dwell(det.track_id, st.anchor_norm, move_thresh),
+                        self._max_matching_dwell(det.track_id, st.anchor_norm, move_thresh, kind),
                     )
                     if spot_dwell > st.dwell_heat:
                         st.dwell_heat = spot_dwell
                     if st.dwell_heat < self.MAX_STATIONARY_HEAT:
                         add_h = min(self.STATIONARY_STEP_HEAT, self.MAX_STATIONARY_HEAT - st.dwell_heat)
-                        if self._deposit_point(st.last_grid_pt[0], st.last_grid_pt[1], add_h):
+                        if self._deposit_point(target_grid, st.last_grid_pt[0], st.last_grid_pt[1], add_h):
                             changed = True
                         st.dwell_heat += add_h
-                    self._upsert_recent_stop(st.anchor_norm, st.dwell_heat, ts, move_thresh)
+                    self._upsert_recent_stop(st.anchor_norm, st.dwell_heat, ts, move_thresh, kind)
 
             if changed:
                 self._version += 1
@@ -432,7 +526,7 @@ class HotspotTracker:
                 and self._dirty
                 and (time.monotonic() - self._last_save_mono) >= self.save_interval_sec
             ):
-                save_snap = (self.grid.copy(), self.started_at)
+                save_snap = (self._stacked_grids_copy(), self.started_at)
                 self._dirty = False
                 self._last_save_mono = time.monotonic()
 
@@ -446,7 +540,8 @@ class HotspotTracker:
     def reset(self, preserve_stationary: bool = False) -> None:
         save_snap: tuple[np.ndarray, str] | None = None
         with self._lock:
-            self.grid.fill(0.0)
+            self.vehicle_grid.fill(0.0)
+            self.person_grid.fill(0.0)
             self._version += 1
             self.started_at = datetime.now(timezone.utc).isoformat()
             if preserve_stationary:
@@ -459,6 +554,7 @@ class HotspotTracker:
                             pos_norm=st.anchor_norm,
                             dwell_heat=self.MAX_STATIONARY_HEAT,
                             last_seen_ts=st.last_seen_ts,
+                            kind=st.kind,
                         )
                     )
                 self._recent_stops = rebuilt_stops
@@ -468,31 +564,76 @@ class HotspotTracker:
             self._dirty = False
             self._last_save_mono = time.monotonic()
             if self.storage_path is not None:
-                save_snap = (self.grid.copy(), self.started_at)
+                save_snap = (self._stacked_grids_copy(), self.started_at)
 
         if save_snap is not None:
             self._write_disk_snapshot(*save_snap)
 
-    def render_overlay(self, frame: np.ndarray, alpha: float = 0.45) -> np.ndarray:
+    @staticmethod
+    def _encode_layer(layer_grid: np.ndarray, lut: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+        if float(layer_grid.max()) <= 0.05:
+            return None
+        blurred = cv2.GaussianBlur(layer_grid, (15, 15), 0)
+        log_grid = np.log1p(np.maximum(blurred, 0.0) * 10.0)
+        denom = max(float(log_grid.max()), 1.6)
+        norm = np.clip((log_grid / denom) * 255.0, 0.0, 255.0).astype(np.uint8)
+        colored = cv2.applyColorMap(norm, lut)
+        weight = np.where(
+            norm >= 14,
+            np.clip(((norm.astype(np.float32) / 255.0) ** 0.7) * 255.0, 0.0, 255.0),
+            0.0,
+        ).astype(np.uint8)
+        return colored, weight
+
+    def render_overlay(self, frame: np.ndarray, alpha: float = 0.45, mode: str = "all") -> np.ndarray:
+        eff_mode = mode if mode in ("all", "vehicles", "people") else "all"
         with self._lock:
-            if float(self.grid.max()) <= 0.05:
+            v_max = float(self.vehicle_grid.max()) if eff_mode in ("all", "vehicles") else 0.0
+            p_max = float(self.person_grid.max()) if eff_mode in ("all", "people") else 0.0
+            if max(v_max, p_max) <= 0.05:
                 return frame
+            cache_key = (self._version, eff_mode)
             if (
-                self._cached_version != self._version
+                self._cached_key != cache_key
                 or self._cached_colored is None
                 or self._cached_weight is None
             ):
-                blurred = cv2.GaussianBlur(self.grid, (15, 15), 0)
-                log_grid = np.log1p(np.maximum(blurred, 0.0) * 10.0)
-                denom = max(float(log_grid.max()), 1.6)
-                norm = np.clip((log_grid / denom) * 255.0, 0.0, 255.0).astype(np.uint8)
-                self._cached_colored = cv2.applyColorMap(norm, cv2.COLORMAP_INFERNO)
-                self._cached_weight = np.where(
-                    norm >= 14,
-                    np.clip(((norm.astype(np.float32) / 255.0) ** 0.7) * 255.0, 0.0, 255.0),
-                    0.0,
-                ).astype(np.uint8)
-                self._cached_version = self._version
+                veh_layer = (
+                    self._encode_layer(self.vehicle_grid, _VEHICLE_HEATMAP_LUT)
+                    if eff_mode in ("all", "vehicles")
+                    else None
+                )
+                per_layer = (
+                    self._encode_layer(self.person_grid, _PERSON_HEATMAP_LUT)
+                    if eff_mode in ("all", "people")
+                    else None
+                )
+                if veh_layer is not None and per_layer is None:
+                    c_small, w_small = veh_layer
+                elif per_layer is not None and veh_layer is None:
+                    c_small, w_small = per_layer
+                elif veh_layer is not None and per_layer is not None:
+                    c_v, w_v = veh_layer
+                    c_p, w_p = per_layer
+                    a_v = w_v.astype(np.float32) / 255.0
+                    a_p = w_p.astype(np.float32) / 255.0
+                    a_out = a_p + a_v * (1.0 - a_p)
+                    denom_a = np.maximum(a_out, 1e-5)[..., None]
+                    c_small = np.clip(
+                        (
+                            c_p.astype(np.float32) * a_p[..., None]
+                            + c_v.astype(np.float32) * (a_v * (1.0 - a_p))[..., None]
+                        )
+                        / denom_a,
+                        0.0,
+                        255.0,
+                    ).astype(np.uint8)
+                    w_small = np.clip(np.round(a_out * 255.0), 0.0, 255.0).astype(np.uint8)
+                else:
+                    return frame
+                self._cached_colored = c_small
+                self._cached_weight = w_small
+                self._cached_key = cache_key
             colored_small = self._cached_colored
             weight_small = self._cached_weight
 
@@ -3096,6 +3237,7 @@ def annotate_frame(
     counting_lines: list[CountingLineModel] | None = None,
     annotation_scale: float = 1.0,
     person_dwell_threshold: float = 2.0,
+    heatmap_mode: str = "all",
 ) -> np.ndarray:
     """Render red zones, optional heatmap overlay, counting lines, and tracked bounding boxes."""
     out = frame.copy()
@@ -3109,7 +3251,7 @@ def annotate_frame(
     dot_r = max(3, int(round(4 * scale)))
 
     if show_heatmap and hotspot is not None:
-        out = hotspot.render_overlay(out, alpha=0.45)
+        out = hotspot.render_overlay(out, alpha=0.45, mode=heatmap_mode)
 
     # Draw red-zone & exclusion-mask polygons
     overlay = out.copy()
@@ -3269,9 +3411,14 @@ def render_birdseye_jpeg(
     out_w: int = 800,
     out_h: int = 600,
     hotspot: HotspotTracker | None = None,
+    heatmap_mode: str = "all",
 ) -> bytes | None:
     """Warp the camera frame into a top-down bird's-eye view with grid, zones, and lines."""
-    src_frame = hotspot.render_overlay(frame, alpha=0.45) if hotspot is not None else frame
+    src_frame = (
+        hotspot.render_overlay(frame, alpha=0.45, mode=heatmap_mode)
+        if hotspot is not None
+        else frame
+    )
     h, w = src_frame.shape[:2]
     tf = compute_ground_transforms(calib, out_w=out_w, out_h=out_h)
 

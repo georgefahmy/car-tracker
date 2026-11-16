@@ -615,10 +615,35 @@ class StreamWorker:
             with self._lock:
                 self._latest_jpeg = jpg
 
-    def toggle_heatmap(self, enabled: bool | None = None) -> bool:
+    def toggle_heatmap(self, enabled: bool | None = None, mode: str | None = None) -> bool:
         with self._lock:
-            new_val = (not self.config.heatmap_enabled) if enabled is None else enabled
+            cur_on = bool(self.config.heatmap_enabled)
+            cur_mode = (self.config.heatmap_mode or "all").strip().lower()
+            req_mode = mode.strip().lower() if isinstance(mode, str) else None
+            if req_mode == "off":
+                new_val = False
+                new_mode = "all"
+            elif req_mode in ("all", "vehicles", "people"):
+                new_val = True if enabled is None else bool(enabled)
+                new_mode = req_mode
+            elif enabled is not None:
+                new_val = bool(enabled)
+                new_mode = cur_mode if cur_mode in ("all", "vehicles", "people") else "all"
+            else:
+                if not cur_on:
+                    new_val = True
+                    new_mode = "all"
+                elif cur_mode == "all":
+                    new_val = True
+                    new_mode = "vehicles"
+                elif cur_mode == "vehicles":
+                    new_val = True
+                    new_mode = "people"
+                else:
+                    new_val = False
+                    new_mode = "all"
             self.config.heatmap_enabled = new_val
+            self.config.heatmap_mode = new_mode  # type: ignore[assignment]
             self.db.save_config(self.config.model_dump())
         self._rerender_latest_preview()
         return new_val
@@ -825,6 +850,7 @@ class StreamWorker:
                 "counting_lines": [ln.model_dump() for ln in self.db.get_counting_lines()],
                 "active_dwells": list(self._active_dwells),
                 "heatmap_enabled": self.config.heatmap_enabled,
+                "heatmap_mode": self.config.heatmap_mode,
                 "heatmap_started_at": self.hotspot.started_at,
                 "last_violation": self._last_violation,
                 "last_plate": dict(self._last_plate),
@@ -1229,6 +1255,7 @@ class StreamWorker:
             counting_lines=counting_lines,
             annotation_scale=cfg.annotation_scale,
             person_dwell_threshold=cfg.person_zone_dwell_seconds,
+            heatmap_mode=cfg.heatmap_mode,
         )
         ok_jpg, jpg_buf = cv2.imencode(".jpg", annotated_preview, [cv2.IMWRITE_JPEG_QUALITY, 80])
         return jpg_buf.tobytes() if ok_jpg else None
@@ -1289,7 +1316,7 @@ class StreamWorker:
             clean_source = snap_base
             if step.new_violations:
                 clean_source = (
-                    self.hotspot.render_overlay(snap_base, alpha=0.45)
+                    self.hotspot.render_overlay(snap_base, alpha=0.45, mode=cfg.heatmap_mode)
                     if cfg.heatmap_enabled and self.hotspot is not None
                     else snap_base
                 )
@@ -1310,6 +1337,7 @@ class StreamWorker:
                 counting_lines=counting_lines,
                 annotation_scale=cfg.annotation_scale,
                 person_dwell_threshold=cfg.person_zone_dwell_seconds,
+                heatmap_mode=cfg.heatmap_mode,
             )
             evicted_entries: list[dict[str, Any]] = []
             for v in step.new_violations:
@@ -1478,7 +1506,7 @@ class StreamWorker:
                     if fresh_base is not None:
                         fh, fw = fresh_base.shape[:2]
                         clean_src = (
-                            self.hotspot.render_overlay(fresh_base, alpha=0.45)
+                            self.hotspot.render_overlay(fresh_base, alpha=0.45, mode=cfg.heatmap_mode)
                             if cfg.heatmap_enabled and self.hotspot is not None
                             else fresh_base
                         )

@@ -126,6 +126,7 @@ class RuntimeConfig(BaseModel):
     ha_url: str = ""
     ha_token: str = ""
     heatmap_enabled: bool = False
+    heatmap_mode: Literal["all", "vehicles", "people"] = "all"
 
     @classmethod
     def from_settings(cls, s: Settings) -> RuntimeConfig:

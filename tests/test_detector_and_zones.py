@@ -1148,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.33"
+    assert expected_ver == "1.0.34"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1799,9 +1799,9 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         assert "role" not in attrs
         assert "aria-modal" not in attrs
 
-    assert "static/icon.png?v=29" in collector.links
-    assert "static/styles.css?v=29" in collector.links
-    assert "static/app.js?v=29" in collector.scripts
+    assert "static/icon.png?v=30" in collector.links
+    assert "static/styles.css?v=30" in collector.links
+    assert "static/app.js?v=30" in collector.scripts
     for tip_id, btn_id in (
         ("tip-heatmap_toggle", "btnHeatmapToggle"),
         ("tip-heatmap_reset", "btnHeatmapReset"),
@@ -3234,6 +3234,108 @@ def test_red_zone_webhook_sent_after_final_timestamped_snapshot(
     assert "CAR #2" in posts[1][1]["data"]["content"]
     worker.reset_all_counts()
     assert len(posts) == 2
+
+
+def test_separate_vehicle_and_person_heatmaps_colors_and_mode_cycle(tmp_path: Path) -> None:
+    def _make_person(
+        track_id: int, cx: float = 0.5, y2: float = 0.5, w: int = 1000, h: int = 1000
+    ) -> TrackedDetection:
+        bw = 0.04 * w
+        bh = 0.12 * h
+        x1 = cx * w - bw * 0.5
+        x2 = cx * w + bw * 0.5
+        y1 = y2 * h - bh
+        return TrackedDetection(
+            track_id=track_id,
+            class_id=PERSON_CLASS_ID,
+            class_name="person",
+            confidence=0.9,
+            bbox_xyxy=(x1, y1, x2, y2 * h),
+        )
+
+    ht = HotspotTracker(grid_w=160, grid_h=90, storage_path=tmp_path / "dual.npy")
+
+    # Heavy vehicle traffic along y=0.25 (25 passes) vs single pedestrian walk along y=0.75 (1 pass)
+    t = 100.0
+    for pass_idx in range(25):
+        tid = 100 + pass_idx
+        for x in (0.15, 0.35, 0.55):
+            ht.update([_make_car(tid, x, 0.25)], 1000, 1000, now_ts=t)
+            t += 0.2
+    for x in (0.15, 0.35, 0.55):
+        ht.update([_make_person(500, x, 0.75)], 1000, 1000, now_ts=t)
+        t += 0.2
+
+    black = np.zeros((360, 640, 3), dtype=np.uint8)
+    px_x = int(0.35 * 640)
+    veh_y = int(0.25 * 360)
+    per_y = int(0.75 * 360)
+
+    # 1. Mode "all": vehicles render warm (R >> B), people render cool (B >> R) despite 25x traffic ratio
+    all_img = ht.render_overlay(black, alpha=0.65, mode="all")
+    vb, _vg, vr = [int(v) for v in all_img[veh_y, px_x]]
+    pb, _pg, pr = [int(v) for v in all_img[per_y, px_x]]
+    assert vr > vb + 60
+    assert pb > pr + 60
+
+    # 2. Mode "vehicles": only vehicle lane rendered
+    veh_only = ht.render_overlay(black, alpha=0.65, mode="vehicles")
+    v_b, _v_g, v_r = [int(v) for v in veh_only[veh_y, px_x]]
+    assert v_r > v_b + 60
+    assert veh_only[per_y, px_x].tolist() == [0, 0, 0]
+
+    # 3. Mode "people": only pedestrian path rendered
+    per_only = ht.render_overlay(black, alpha=0.65, mode="people")
+    p_b, _p_g, p_r = [int(v) for v in per_only[per_y, px_x]]
+    assert p_b > p_r + 60
+    assert per_only[veh_y, px_x].tolist() == [0, 0, 0]
+
+    # 4. Class-independent stationary spot caps (parked car at (0.80, 0.50) does not suppress person)
+    for step in range(40):
+        ht.update([_make_car(700, 0.80, 0.50)], 1000, 1000, now_ts=t + step * 0.1)
+    p_before = float(ht.person_grid.sum())
+    ht.update([_make_person(701, 0.80, 0.50)], 1000, 1000, now_ts=t + 5.0)
+    assert float(ht.person_grid.sum()) > p_before
+
+    # 5. 2-channel .npy persistence round-trip & legacy 2D .npy upgrade
+    ht.save(force=True)
+    raw_saved = np.load(tmp_path / "dual.npy", allow_pickle=False)
+    assert raw_saved.shape == (2, 90, 160)
+    ht_reloaded = HotspotTracker(grid_w=160, grid_h=90, storage_path=tmp_path / "dual.npy")
+    assert np.allclose(ht_reloaded.vehicle_grid, ht.vehicle_grid)
+    assert np.allclose(ht_reloaded.person_grid, ht.person_grid)
+
+    legacy_path = tmp_path / "legacy.npy"
+    legacy_2d = np.zeros((90, 160), dtype=np.float32)
+    legacy_2d[45, 80] = 4.2
+    with legacy_path.open("wb") as fh:
+        np.save(fh, legacy_2d)
+    ht_legacy = HotspotTracker(grid_w=160, grid_h=90, storage_path=legacy_path)
+    import pytest
+
+    assert float(ht_legacy.vehicle_grid[45, 80]) == pytest.approx(4.2, rel=1e-5)
+    assert float(ht_legacy.person_grid.max()) == 0.0
+
+    # 6. Top-bar POST /api/heatmap/toggle cycles OFF -> All -> Cars -> People -> OFF
+    settings = Settings(data_dir=str(tmp_path / "api_data"))
+    app = create_app(settings=settings, start_worker=False)
+    with TestClient(app) as client:
+        assert client.get("/api/stats").json()["heatmap_enabled"] is False
+        assert client.get("/api/stats").json()["heatmap_mode"] == "all"
+
+        r1 = client.post("/api/heatmap/toggle").json()
+        assert r1 == {"heatmap_enabled": True, "heatmap_mode": "all"}
+        r2 = client.post("/api/heatmap/toggle").json()
+        assert r2 == {"heatmap_enabled": True, "heatmap_mode": "vehicles"}
+        r3 = client.post("/api/heatmap/toggle").json()
+        assert r3 == {"heatmap_enabled": True, "heatmap_mode": "people"}
+        r4 = client.post("/api/heatmap/toggle").json()
+        assert r4 == {"heatmap_enabled": False, "heatmap_mode": "all"}
+
+        r5 = client.post("/api/heatmap/toggle?mode=people").json()
+        assert r5 == {"heatmap_enabled": True, "heatmap_mode": "people"}
+        assert client.get("/api/stats").json()["heatmap_mode"] == "people"
+
 
 
 

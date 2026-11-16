@@ -53,6 +53,32 @@ h1, h2, h3 { text-wrap: balance; }
   gap: 16px;
   flex-wrap: wrap;
 }
+.hm-btn-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.hm-swatches {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.hm-swatch {
+  inline-size: 8px;
+  block-size: 8px;
+  border-radius: 999px;
+  display: inline-block;
+  flex-shrink: 0;
+  forced-color-adjust: none;
+}
+.hm-swatch-car {
+  background: #fb923c;
+  box-shadow: 0 0 0 1px rgba(255, 237, 213, 0.55);
+}
+.hm-swatch-person {
+  background: #22d3ee;
+  box-shadow: 0 0 0 1px rgba(207, 250, 254, 0.55);
+}
 
 .brand {
   display: flex;

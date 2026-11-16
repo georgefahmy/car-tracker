@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.22
+- **Custom Home Assistant Add-on Icon, Detail Logo & Web Favicon**: Added Retina-crisp transparent squircle icon (`car_tracker/icon.png`, `256x256`) and detail-page banner (`car_tracker/logo.png`, `500x200`) for Home Assistant's Add-ons store and installed-apps grid, plus matching browser favicon (`static/icon.png`).
+
 ## 1.0.21
 - **Zero-Scroll Desktop Bento Settings**: Widened the Settings dialog (`min(1520px, 100dvw - 32px)`) into a 6-track bento layout (`3 + 2` cards), moved the active runtime status summary into the modal header, placed action buttons inline in card headers, streamlined toggle rows into single-line pills (relying on `?` tooltips instead of verbose subtext), and aligned all 4 emergency vehicle thresholds in one compact row so the entire Settings menu fits on desktop without vertical scrolling.
 

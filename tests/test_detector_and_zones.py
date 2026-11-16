@@ -1146,7 +1146,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.21"
+    assert expected_ver == "1.0.22"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1775,11 +1775,30 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         assert "role" not in attrs
         assert "aria-modal" not in attrs
 
-    assert "static/styles.css?v=19" in collector.links
-    assert "static/app.js?v=19" in collector.scripts
+    assert "static/icon.png?v=20" in collector.links
+    assert "static/styles.css?v=20" in collector.links
+    assert "static/app.js?v=20" in collector.scripts
     assert 'class="settings-bento"' in html
     assert 'class="toggle-sub"' not in html
     assert collector.buttons_inside_label == []
+
+    from PIL import Image
+
+    with Image.open("car_tracker/icon.png") as addon_icon:
+        assert addon_icon.mode == "RGBA"
+        assert addon_icon.size == (256, 256)
+        assert addon_icon.getpixel((0, 0))[3] == 0
+        assert addon_icon.getpixel((128, 128))[3] == 255
+
+    with Image.open("car_tracker/logo.png") as addon_logo:
+        assert addon_logo.mode == "RGBA"
+        assert addon_logo.size == (500, 200)
+        assert addon_logo.getpixel((0, 0))[3] == 0
+        assert addon_logo.getpixel((250, 100))[3] == 255
+
+    with Image.open("static/icon.png") as web_icon:
+        assert web_icon.mode == "RGBA"
+        assert web_icon.size == (64, 64)
 
     expected_settings = [
         "nvr_host",

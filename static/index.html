@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Car Tracker & Red-Zone Monitor</title>
-  <link rel="icon" type="image/png" href="static/icon.png?v=24" />
-  <link rel="stylesheet" href="static/styles.css?v=24" />
+  <link rel="icon" type="image/png" href="static/icon.png?v=25" />
+  <link rel="stylesheet" href="static/styles.css?v=25" />
 </head>
 <body>
   <header class="topbar">
@@ -91,8 +91,9 @@
                   <button type="button" class="btn btn-danger" id="btnDrawZone">+ Draw Red Zone</button>
                   <button type="button" class="btn btn-secondary" id="btnAutoRedZone">Auto-Detect Red Curb</button>
                   <button type="button" class="btn btn-purple" id="btnDrawPersonZone">+ Draw Person Zone</button>
+                  <button type="button" class="btn btn-secondary" id="btnDrawLine">+ Draw Count Line</button>
+                  <button type="button" class="btn btn-amber" id="btnDrawSpeedLine">+ Draw Speed Line</button>
                   <button type="button" class="btn btn-secondary" id="btnDrawExclusion">+ Exclusion Mask</button>
-                  <button type="button" class="btn btn-secondary" id="btnDrawLine">+ Draw Traffic Line</button>
                   <button type="button" class="btn btn-secondary" id="btnCalibrateGround">3D Ground Grid</button>
                   <button type="button" class="btn btn-ghost hidden" id="btnToggleGrid">Grid: ON</button>
                   <button type="button" class="btn btn-secondary hidden" id="btnBirdseye">Bird's-Eye View</button>
@@ -107,7 +108,7 @@
               </div>
               <hr class="dropdown-divider" />
               <div class="dropdown-section">
-                <h3>Configured Traffic Flow Lines</h3>
+                <h3>Traffic &amp; Speed Lines</h3>
                 <div id="linesList" class="zones-list">
                   <span class="muted small">No traffic lines defined yet.</span>
                 </div>
@@ -630,6 +631,6 @@
     </div>
   </dialog>
 
-  <script src="static/app.js?v=24"></script>
+  <script src="static/app.js?v=25"></script>
 </body>
 </html>

@@ -690,18 +690,32 @@ function renderZoneCanvas() {
   // Draw existing lines lightly while editing
   for (const ln of savedLines) {
     if (editingTarget && editingTarget.kind === "line" && editingTarget.id === ln.id) continue;
+    const isSpeedOnly = (ln.line_role || "both") === "speed";
     ctx.beginPath();
+    ctx.setLineDash(isSpeedOnly ? [8, 6] : []);
     ctx.moveTo(ln.p1[0] * w, ln.p1[1] * h);
     ctx.lineTo(ln.p2[0] * w, ln.p2[1] * h);
-    ctx.strokeStyle = ln.enabled ? "rgba(56, 189, 248, 0.75)" : "rgba(148, 163, 184, 0.5)";
+    ctx.strokeStyle = !ln.enabled
+      ? "rgba(148, 163, 184, 0.5)"
+      : isSpeedOnly
+        ? "rgba(245, 158, 11, 0.85)"
+        : "rgba(56, 189, 248, 0.75)";
     ctx.lineWidth = 3;
     ctx.stroke();
+    ctx.setLineDash([]);
   }
 
   // Draw active draft polygon or line
   if (draftPoints.length > 0) {
-    const isLine = drawingMode === "line" || (drawingMode === "edit" && editingTarget?.kind === "line");
+    const isLine =
+      drawingMode === "line" ||
+      drawingMode === "speed_line" ||
+      (drawingMode === "edit" && editingTarget?.kind === "line");
+    const isSpeedDraft =
+      drawingMode === "speed_line" ||
+      (drawingMode === "edit" && editingTarget?.kind === "line" && editingTarget?.line_role === "speed");
     ctx.beginPath();
+    ctx.setLineDash(isSpeedDraft ? [8, 6] : []);
     draftPoints.forEach(([nx, ny], idx) => {
       if (idx === 0) ctx.moveTo(nx * w, ny * h);
       else ctx.lineTo(nx * w, ny * h);
@@ -711,9 +725,10 @@ function renderZoneCanvas() {
       ctx.fillStyle = "rgba(250, 204, 21, 0.12)";
       ctx.fill();
     }
-    ctx.strokeStyle = isLine ? "#38bdf8" : "#facc15";
+    ctx.strokeStyle = isSpeedDraft ? "#f59e0b" : isLine ? "#38bdf8" : "#facc15";
     ctx.lineWidth = 2.5;
     ctx.stroke();
+    ctx.setLineDash([]);
 
     const handleRadius =
       drawingMode === "edit"
@@ -725,7 +740,8 @@ function renderZoneCanvas() {
       ctx.beginPath();
       ctx.arc(px, py, handleRadius, 0, Math.PI * 2);
       let handleColor = "#ef4444";
-      if (isLine) handleColor = "#38bdf8";
+      if (isSpeedDraft) handleColor = "#f59e0b";
+      else if (isLine) handleColor = "#38bdf8";
       else if (drawingMode === "exclusion" || (drawingMode === "edit" && editingTarget?.zone_type === "exclusion")) {
         handleColor = "#94a3b8";
       } else if (drawingMode === "person_zone" || (drawingMode === "edit" && editingTarget?.zone_type === "person_zone")) {
@@ -769,8 +785,10 @@ function setDrawingMode(mode, target = null) {
     hint.textContent = `Editing "${target?.name || "Zone"}": Drag corners to move, click an edge to add a corner, right-click a corner to remove, then Finish & Save.`;
   } else if (mode === "calibrate") {
     hint.textContent = "Click 4 ground corners of a known rectangle (Top-Left → Top-Right → Bottom-Right → Bottom-Left) to calibrate 3D perspective.";
+  } else if (mode === "speed_line") {
+    hint.textContent = "Click 2 points across the lane to place a speed-measurement line (requires 2 speed lines + 3D Ground Grid).";
   } else if (mode === "line") {
-    hint.textContent = "Click 2 points on the video to place a traffic counting line (start and end).";
+    hint.textContent = "Click 2 points on the video to place a directional traffic counting line (A → B / B → A).";
   } else if (mode === "exclusion") {
     hint.textContent = 'Click on the video to outline an exclusion mask (e.g. balcony/plants to ignore). Double-click or press "Finish & Save".';
   } else if (mode === "person_zone") {
@@ -905,7 +923,7 @@ zoneCanvas.addEventListener("click", (e) => {
   const { nx, ny } = getNormalizedPointer(e);
   draftPoints.push([nx, ny]);
   renderZoneCanvas();
-  if (drawingMode === "line" && draftPoints.length === 2) {
+  if ((drawingMode === "line" || drawingMode === "speed_line") && draftPoints.length === 2) {
     finishLine();
   } else if (drawingMode === "calibrate" && draftPoints.length === 4) {
     finishCalibration();
@@ -923,6 +941,7 @@ document.getElementById("btnAutoRedZone").addEventListener("click", autoDetectRe
 document.getElementById("btnDrawPersonZone")?.addEventListener("click", () => setDrawingMode("person_zone"));
 document.getElementById("btnDrawExclusion").addEventListener("click", () => setDrawingMode("exclusion"));
 document.getElementById("btnDrawLine").addEventListener("click", () => setDrawingMode("line"));
+document.getElementById("btnDrawSpeedLine")?.addEventListener("click", () => setDrawingMode("speed_line"));
 document.getElementById("btnCalibrateGround").addEventListener("click", () => setDrawingMode("calibrate"));
 document.getElementById("btnCancelDraw").addEventListener("click", () => setDrawingMode(null));
 document.getElementById("btnUndoPoint").addEventListener("click", () => {
@@ -941,7 +960,14 @@ document.getElementById("btnFinishZone").addEventListener("click", finishZone);
 
 async function finishLine() {
   if (draftPoints.length !== 2) return;
-  const name = prompt("Name this traffic line:", `Traffic Line ${savedLines.length + 1}`);
+  const isSpeedOnly = drawingMode === "speed_line";
+  const defaultName = isSpeedOnly
+    ? `Speed Line ${savedLines.length + 1}`
+    : `Traffic Line ${savedLines.length + 1}`;
+  const promptTitle = isSpeedOnly
+    ? "Name this speed measurement line:"
+    : "Name this traffic counting line:";
+  const name = prompt(promptTitle, defaultName);
   if (!name) {
     setDrawingMode(null);
     return;
@@ -954,9 +980,10 @@ async function finishLine() {
       p1: draftPoints[0],
       p2: draftPoints[1],
       enabled: true,
-      color: "#38bdf8",
+      color: isSpeedOnly ? "#f59e0b" : "#38bdf8",
       count_a_to_b: 0,
       count_b_to_a: 0,
+      line_role: isSpeedOnly ? "speed" : "count",
     },
   ];
   await saveLines(updated);
@@ -981,7 +1008,12 @@ async function loadLines() {
 
 function startEditLine(ln) {
   draftPoints = [[...ln.p1], [...ln.p2]];
-  setDrawingMode("edit", { kind: "line", id: ln.id, name: ln.name });
+  setDrawingMode("edit", {
+    kind: "line",
+    id: ln.id,
+    name: ln.name,
+    line_role: ln.line_role || "both",
+  });
 }
 
 function startEditZone(z) {
@@ -1022,19 +1054,43 @@ function renderLinesList() {
     return;
   }
   el.innerHTML = "";
+  const nextRoleMap = { both: "count", count: "speed", speed: "both" };
   for (const ln of savedLines) {
+    const role = ln.line_role || "both";
+    const roleLabel =
+      role === "count" ? "Count Only" : role === "speed" ? "Speed Only" : "Count + Speed";
     const total = (ln.count_a_to_b || 0) + (ln.count_b_to_a || 0);
+    const labelHtml =
+      role === "speed"
+        ? `${ln.enabled ? "⚡" : "⚪"} ${escapeHtml(ln.name)} <span class="muted small">· Speed trap</span>`
+        : `${ln.enabled ? (role === "both" ? "🔵⚡" : "🔵") : "⚪"} ${escapeHtml(ln.name)}: <strong>${total}</strong> (${ln.count_a_to_b || 0} / ${ln.count_b_to_a || 0})`;
     const row = document.createElement("div");
     row.className = "zone-menu-row";
     row.innerHTML = `
-      <span class="zone-menu-label">${ln.enabled ? "🔵" : "⚪"} ${escapeHtml(ln.name)}: <strong>${total}</strong> (${ln.count_a_to_b || 0} / ${ln.count_b_to_a || 0})</span>
+      <span class="zone-menu-label">${labelHtml}</span>
       <div class="zone-menu-actions">
-        <button type="button" data-id="${escapeHtml(ln.id)}" data-action="edit" title="Edit">Edit</button>
-        <button type="button" data-id="${escapeHtml(ln.id)}" data-action="toggle" title="Toggle">${ln.enabled ? "Disable" : "Enable"}</button>
+        <button type="button" class="line-role-btn role-${escapeHtml(role)}" data-id="${escapeHtml(ln.id)}" data-action="role" aria-label="${roleLabel} — ${escapeHtml(ln.name)}" title="Click to switch mode: Count + Speed → Count Only → Speed Only">${roleLabel}</button>
+        <button type="button" data-id="${escapeHtml(ln.id)}" data-action="edit" aria-label="Edit ${escapeHtml(ln.name)}" title="Edit">Edit</button>
+        <button type="button" data-id="${escapeHtml(ln.id)}" data-action="toggle" aria-label="${ln.enabled ? "Disable" : "Enable"} ${escapeHtml(ln.name)}" title="Toggle">${ln.enabled ? "Disable" : "Enable"}</button>
         <button type="button" data-id="${escapeHtml(ln.id)}" data-action="delete" aria-label="Delete ${escapeHtml(ln.name)}" title="Delete">✕</button>
       </div>
     `;
-    const [editBtn, toggleBtn, delBtn] = row.querySelectorAll("button");
+    const [roleBtn, editBtn, toggleBtn, delBtn] = row.querySelectorAll("button");
+    roleBtn.addEventListener("click", () => {
+      const nextRole = nextRoleMap[role] || "count";
+      const next = savedLines.map((item) => {
+        if (item.id !== ln.id) return item;
+        const curColor = String(item.color || "#38bdf8").toLowerCase();
+        let nextColor = item.color || "#38bdf8";
+        if (nextRole === "speed" && curColor === "#38bdf8") {
+          nextColor = "#f59e0b";
+        } else if (nextRole !== "speed" && curColor === "#f59e0b") {
+          nextColor = "#38bdf8";
+        }
+        return { ...item, line_role: nextRole, color: nextColor };
+      });
+      saveLines(next);
+    });
     editBtn.addEventListener("click", () => startEditLine(ln));
     toggleBtn.addEventListener("click", () => {
       const next = savedLines.map((item) =>
@@ -1393,10 +1449,9 @@ async function refreshStats() {
       if (sig !== lastLinesSignature) {
         renderLinesList();
       }
-      const totalCrossings = savedLines.reduce(
-        (acc, ln) => acc + (ln.count_a_to_b || 0) + (ln.count_b_to_a || 0),
-        0
-      );
+      const totalCrossings = savedLines
+        .filter((ln) => (ln.line_role || "both") !== "speed")
+        .reduce((acc, ln) => acc + (ln.count_a_to_b || 0) + (ln.count_b_to_a || 0), 0);
       document.getElementById("kpiLineCrossings").textContent = totalCrossings;
     }
 
@@ -1431,16 +1486,21 @@ async function refreshStats() {
     const speedEl = document.getElementById("speedSummary");
     if (speedEl) {
       const sp = data.speed || {};
+      const speedLineCount = savedLines.filter(
+        (ln) => ln.enabled && (ln.line_role || "both") !== "count"
+      ).length;
       if (!sp.calibrated) {
-        speedEl.textContent = "Speed (2-line): Calibrate 3D Ground Grid and enable 2 traffic lines to measure mph.";
+        speedEl.textContent = "Speed (2-line): Calibrate 3D Ground Grid and enable 2 Speed or Count+Speed lines to measure mph.";
       } else if (sp.samples_count > 0) {
         const recentText = (sp.recent || [])
           .slice(0, 4)
           .map((r) => `#${r.track_id} ${r.vehicle_class} ${Number(r.speed_mph).toFixed(1)} mph`)
           .join(" • ");
         speedEl.textContent = `Speed (2-line): Last ${Number(sp.last_speed_mph).toFixed(1)} mph • Avg ${Number(sp.avg_speed_mph).toFixed(1)} mph • Max ${Number(sp.max_speed_mph).toFixed(1)} mph` + (recentText ? ` — ${recentText}` : "");
+      } else if (speedLineCount < 2) {
+        speedEl.textContent = `Speed (2-line): Enable at least 2 Speed or Count+Speed lines (${speedLineCount} active) to measure mph.`;
       } else {
-        speedEl.textContent = "Speed (2-line): Waiting for a vehicle to cross 2 enabled traffic lines.";
+        speedEl.textContent = "Speed (2-line): Waiting for a vehicle to cross 2 Speed / Count+Speed lines.";
       }
     }
 

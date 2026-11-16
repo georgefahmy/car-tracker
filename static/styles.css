@@ -167,6 +167,11 @@ h1, h2, h3 { text-wrap: balance; }
 .btn-primary { background: var(--primary); }
 .btn-danger { background: var(--danger); }
 .btn-purple { background: #9333ea; }
+.btn-amber {
+  background: rgba(245, 158, 11, 0.16);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.42);
+}
 .btn-secondary { background: #1f2a3d; border-color: #31415c; }
 .btn-ghost { background: transparent; border-color: var(--panel-border); color: var(--muted); }
 
@@ -269,7 +274,7 @@ h1, h2, h3 { text-wrap: balance; }
 }
 .zones-dropdown {
   display: none;
-  width: min(420px, calc(100vw - 24px));
+  width: min(468px, calc(100vw - 24px));
   max-block-size: min(75dvh, 540px);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -407,12 +412,41 @@ h1, h2, h3 { text-wrap: balance; }
   border-radius: 6px;
   color: var(--muted);
   cursor: pointer;
+  min-block-size: 26px;
+  min-inline-size: 26px;
   padding: 4px 8px;
   font-size: 0.8rem;
 }
 .zone-menu-row button:hover {
   color: var(--text);
   background: #243146;
+}
+.zone-menu-row button.line-role-btn {
+  font-size: 0.72rem;
+  font-weight: 600;
+  border-color: #334155;
+  padding: 3px 7px;
+}
+.zone-menu-row button.line-role-btn.role-count {
+  color: #7dd3fc;
+  background: rgba(56, 189, 248, 0.12);
+  border-color: rgba(56, 189, 248, 0.35);
+}
+.zone-menu-row button.line-role-btn.role-speed {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.4);
+}
+.zone-menu-row button.line-role-btn.role-both {
+  color: #cbd5e1;
+  background: rgba(148, 163, 184, 0.12);
+}
+@media (pointer: coarse) {
+  .zone-menu-row button {
+    min-block-size: 36px;
+    min-inline-size: 36px;
+    padding: 6px 10px;
+  }
 }
 .speed-footer {
   margin-top: 10px;

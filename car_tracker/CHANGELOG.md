@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.29
+- **Per-Line Modes (`Count + Speed` / `Count Only` / `Speed Only`)**: Added a dedicated `line_role` (`"both"`, `"count"`, `"speed"`) to traffic lines with automatic SQLite schema migration and a `+ Draw Speed Line` action plus 1-click mode cycling pill in **Zones & Lines**.
+- **Clean Counting vs. Speed-Trap Separation**: `Count Only` lines track `A → B` / `B → A` crossings without pairing into 2-line speed timing; `Speed Only` lines measure vehicle speed in mph between speed lines without incrementing cross counters, cluttering KPI totals, or appearing in daily flow reports, and render as dashed amber `SPEED:` overlays on live/snapshot views.
+
 ## 1.0.28
 - **Intel QuickSync VA-API Hardware Decode & Demand-Driven Frame Skipping**: Added `_FFmpegVAAPICapture` (`ffmpeg -hwaccel vaapi -hwaccel_device /dev/dri/renderD*` with `intel-media-va-driver-non-free`, `ffmpeg`, and `libva-drm2` cached cleanly after the `.venv` Docker layer) plus demand-driven `cap.grab()` / `cap.retrieve()` skipping so unneeded YUV→BGR decodes are bypassed when idle or between inference intervals.
 - **OpenVINO Native FP16 & Persistent GPU Shader Cache**: GPU OpenVINO exports (`yolo` and `D-FINE`) now compile in native Intel Xe-LP **FP16** (`half=True` / `INFERENCE_PRECISION_HINT=f16`) with persistent OpenCL (`NEO_CACHE_DIR=/data/models/neo_cache`) and OpenVINO (`CACHE_DIR=/data/models/ov_cache`) caches for faster startup and lower GPU heat.

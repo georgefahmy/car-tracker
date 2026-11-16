@@ -847,16 +847,28 @@ class LineCrossingMonitor:
         now_ts: float,
         curr: tuple[float, float],
         increments: dict[str, tuple[int, int]],
+        speed_line_ids: set[str] | frozenset[str] | None = None,
     ) -> None:
         self._crossed_pairs.add((tid, ln.id))
-        a_inc, b_inc = increments.get(ln.id, (0, 0))
-        if side_prev < 0:
-            increments[ln.id] = (a_inc + 1, b_inc)
-        else:
-            increments[ln.id] = (a_inc, b_inc + 1)
+        role = getattr(ln, "line_role", "both")
+        counts_flow = role in ("both", "count")
+        measures_speed = role in ("both", "speed")
+
+        if counts_flow:
+            a_inc, b_inc = increments.get(ln.id, (0, 0))
+            if side_prev < 0:
+                increments[ln.id] = (a_inc + 1, b_inc)
+            else:
+                increments[ln.id] = (a_inc, b_inc + 1)
+
+        if not measures_speed:
+            return
 
         first = self._first_crossing.get(tid)
-        if first is None:
+        valid_first = first is not None and (
+            speed_line_ids is None or first[0] in speed_line_ids
+        )
+        if not valid_first:
             self._first_crossing[tid] = (ln.id, ln.name, cross_ts, cross_pt)
         elif first[0] != ln.id and tf is not None and tid not in self._track_speeds_mph:
             _, first_name, t1, pt1 = first
@@ -896,6 +908,9 @@ class LineCrossingMonitor:
     ) -> dict[str, tuple[int, int]]:
         """Return {line_id: (new_a_to_b, new_b_to_a)} and estimate two-line speed when calibrated."""
         enabled_lines = [ln for ln in lines if ln.enabled]
+        speed_line_ids = frozenset(
+            ln.id for ln in enabled_lines if getattr(ln, "line_role", "both") in ("both", "speed")
+        )
         increments: dict[str, tuple[int, int]] = {}
         self._calibrated = calib is not None
         tf = compute_ground_transforms(calib) if calib is not None else None
@@ -933,7 +948,17 @@ class LineCrossingMonitor:
                     elif net_disp >= min_travel and _perp_line_distance(curr, p1, p2) >= 0.008:
                         self._pending_crossings.pop(pair, None)
                         self._record_crossing(
-                            tid, det, ln, pend_ts, pend_pt, pend_side_prev, tf, now_ts, curr, increments
+                            tid,
+                            det,
+                            ln,
+                            pend_ts,
+                            pend_pt,
+                            pend_side_prev,
+                            tf,
+                            now_ts,
+                            curr,
+                            increments,
+                            speed_line_ids=speed_line_ids,
                         )
                     continue
 
@@ -946,7 +971,17 @@ class LineCrossingMonitor:
 
                 if net_disp >= min_travel:
                     self._record_crossing(
-                        tid, det, ln, cross_ts, cross_pt, side_prev, tf, now_ts, curr, increments
+                        tid,
+                        det,
+                        ln,
+                        cross_ts,
+                        cross_pt,
+                        side_prev,
+                        tf,
+                        now_ts,
+                        curr,
+                        increments,
+                        speed_line_ids=speed_line_ids,
                     )
                 else:
                     self._pending_crossings[pair] = (cross_ts, cross_pt, side_prev)
@@ -2665,6 +2700,34 @@ def format_dwell_duration(seconds: float) -> str:
     return f"{hours}h {mins}m {secs}s"
 
 
+def _draw_dashed_line(
+    img: np.ndarray,
+    pt1: tuple[int, int],
+    pt2: tuple[int, int],
+    color: tuple[int, int, int],
+    thickness: int,
+    dash_px: int = 12,
+    gap_px: int = 8,
+) -> None:
+    """Draw a dashed anti-aliased line segment between two pixel points."""
+    x1, y1 = pt1
+    x2, y2 = pt2
+    dist = math.hypot(x2 - x1, y2 - y1)
+    if dist < 1.0:
+        cv2.line(img, pt1, pt2, color, thickness, cv2.LINE_AA)
+        return
+    ux = (x2 - x1) / dist
+    uy = (y2 - y1) / dist
+    pos = 0.0
+    step = max(2.0, float(dash_px + gap_px))
+    while pos < dist:
+        end_pos = min(dist, pos + dash_px)
+        p_a = (int(round(x1 + ux * pos)), int(round(y1 + uy * pos)))
+        p_b = (int(round(x1 + ux * end_pos)), int(round(y1 + uy * end_pos)))
+        cv2.line(img, p_a, p_b, color, thickness, cv2.LINE_AA)
+        pos += step
+
+
 def annotate_frame(
     frame: np.ndarray,
     tracks: list[TrackedDetection],
@@ -2711,19 +2774,30 @@ def annotate_frame(
 
     out = cv2.addWeighted(overlay, 0.18, out, 0.82, 0)
 
-    # Draw traffic counting lines
+    # Draw traffic counting & speed measurement lines
     for ln in counting_lines or []:
         if not ln.enabled:
             continue
         pt1 = (int(ln.p1[0] * w), int(ln.p1[1] * h))
         pt2 = (int(ln.p2[0] * w), int(ln.p2[1] * h))
-        lcolor = _hex_to_bgr(ln.color)
-        cv2.line(out, pt1, pt2, lcolor, max(2, box_thick + 1), cv2.LINE_AA)
+        role = getattr(ln, "line_role", "both")
+        line_thick = max(2, box_thick + 1)
+        mid = ((pt1[0] + pt2[0]) // 2, max(int(26 * scale), (pt1[1] + pt2[1]) // 2 - pad_y))
+        if role == "speed":
+            lcolor = (
+                _hex_to_bgr("#f59e0b")
+                if ln.color.lower() == "#38bdf8"
+                else _hex_to_bgr(ln.color)
+            )
+            _draw_dashed_line(out, pt1, pt2, lcolor, line_thick)
+            ln_label = f"SPEED: {ln.name}"
+        else:
+            lcolor = _hex_to_bgr(ln.color)
+            cv2.line(out, pt1, pt2, lcolor, line_thick, cv2.LINE_AA)
+            total_ln = ln.count_a_to_b + ln.count_b_to_a
+            ln_label = f"{ln.name}: {total_ln} ({ln.count_a_to_b}/{ln.count_b_to_a})"
         cv2.circle(out, pt1, dot_r + 1, lcolor, -1)
         cv2.circle(out, pt2, dot_r + 1, lcolor, -1)
-        mid = ((pt1[0] + pt2[0]) // 2, max(int(26 * scale), (pt1[1] + pt2[1]) // 2 - pad_y))
-        total_ln = ln.count_a_to_b + ln.count_b_to_a
-        ln_label = f"{ln.name}: {total_ln} ({ln.count_a_to_b}/{ln.count_b_to_a})"
         cv2.putText(out, ln_label, mid, cv2.FONT_HERSHEY_SIMPLEX, font_scale, lcolor, text_thick, cv2.LINE_AA)
 
     # Draw tracked detections
@@ -2898,7 +2972,8 @@ def render_birdseye_jpeg(
         bev_norm = project_points([ln.p1, ln.p2], tf["img_norm_to_bev_norm"])
         p1 = (int(bev_norm[0][0] * out_w), int(bev_norm[0][1] * out_h))
         p2 = (int(bev_norm[1][0] * out_w), int(bev_norm[1][1] * out_h))
-        cv2.line(bev, p1, p2, (248, 189, 56), 2)
+        line_bgr = (11, 158, 245) if getattr(ln, "line_role", "both") == "speed" else (248, 189, 56)
+        cv2.line(bev, p1, p2, line_bgr, 2)
 
     cv2.putText(
         bev,

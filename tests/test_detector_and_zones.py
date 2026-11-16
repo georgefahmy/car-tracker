@@ -1148,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.28"
+    assert expected_ver == "1.0.29"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1777,10 +1777,11 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         assert "role" not in attrs
         assert "aria-modal" not in attrs
 
-    assert "static/icon.png?v=24" in collector.links
-    assert "static/styles.css?v=24" in collector.links
-    assert "static/app.js?v=24" in collector.scripts
+    assert "static/icon.png?v=25" in collector.links
+    assert "static/styles.css?v=25" in collector.links
+    assert "static/app.js?v=25" in collector.scripts
     assert collector.controls_by_name["inference_backend"].get("aria-describedby") == "hwDiagnosticHint"
+    assert 'id="btnDrawSpeedLine"' in html
     assert 'class="settings-bento"' in html
     assert "telemetry-strip" in html
     assert "tabular-nums" in Path("static/styles.css").read_text(encoding="utf-8")
@@ -2612,6 +2613,228 @@ def test_gpu_fp16_cache_vaapi_grab_and_alpr(tmp_path: Path, monkeypatch) -> None
     crop_4k = LicensePlateReader.crop_vehicle_region(uhd_frame, (200, 1000, 2200, 2000))
     assert crop_4k.shape[1] == 960
     assert int(crop_4k[0].mean()) == 0
+
+
+def test_line_roles_count_only_vs_speed_only(tmp_path: Path, monkeypatch) -> None:
+    import sqlite3
+
+    import cv2
+
+    from app.database import Database, GroundCalibrationModel
+    from app.detector import annotate_frame
+    from app.stream import StreamWorker
+
+    # 1. Legacy SQLite table without line_role column migrates cleanly to line_role='both'
+    legacy_db_path = tmp_path / "legacy_lines.db"
+    conn = sqlite3.connect(str(legacy_db_path))
+    conn.execute(
+        """
+        CREATE TABLE counting_lines (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            p1_json TEXT NOT NULL,
+            p2_json TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            color TEXT NOT NULL DEFAULT '#38bdf8',
+            count_a_to_b INTEGER NOT NULL DEFAULT 0,
+            count_b_to_a INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO counting_lines (id, name, p1_json, p2_json, enabled, color, count_a_to_b, count_b_to_a) "
+        "VALUES ('jasper', 'Jasper', '[0.1, 0.0]', '[0.1, 1.0]', 1, '#38bdf8', 5, 2)"
+    )
+    conn.commit()
+    conn.close()
+
+    legacy_db = Database(legacy_db_path)
+    migrated = legacy_db.get_counting_lines()
+    assert len(migrated) == 1
+    assert migrated[0].line_role == "both"
+    assert (migrated[0].count_a_to_b, migrated[0].count_b_to_a) == (5, 2)
+    legacy_db.close()
+
+    # 2. Count-only line + two Speed-only lines remain strictly decoupled
+    calib = GroundCalibrationModel(
+        points=[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        width_ft=40.0,
+        length_ft=20.0,
+    )
+    ln_jasper = CountingLineModel(
+        id="jasper",
+        name="Jasper",
+        p1=[0.15, 0.0],
+        p2=[0.15, 1.0],
+        enabled=True,
+        line_role="count",
+    )
+    ln_speed1 = CountingLineModel(
+        id="sp1",
+        name="Speed 1",
+        p1=[0.40, 0.0],
+        p2=[0.40, 1.0],
+        enabled=True,
+        color="#f59e0b",
+        line_role="speed",
+    )
+    ln_speed2 = CountingLineModel(
+        id="sp2",
+        name="Speed 2",
+        p1=[0.80, 0.0],
+        p2=[0.80, 1.0],
+        enabled=True,
+        color="#f59e0b",
+        line_role="speed",
+    )
+    lines = [ln_jasper, ln_speed1, ln_speed2]
+
+    lm = LineCrossingMonitor()
+    # Car 1 crosses Jasper left-to-right (count only), then Speed 1 (0.40) and Speed 2 (0.80 -> 16 ft apart)
+    lm.process_tracks([_make_car(1, 0.05, 0.5)], 1000, 1000, lines, now_ts=0.0, calib=calib)
+    inc_j = lm.process_tracks([_make_car(1, 0.25, 0.5)], 1000, 1000, lines, now_ts=1.0, calib=calib)
+    assert inc_j == {"jasper": (0, 1)}
+
+    inc_s1 = lm.process_tracks([_make_car(1, 0.55, 0.5)], 1000, 1000, lines, now_ts=2.0, calib=calib)
+    assert inc_s1 == {}
+    # Crossing Jasper + Speed 1 must NEVER produce a bogus speed between them
+    assert lm.consume_new_speeds() == []
+    assert 1 not in lm.get_track_speeds()
+
+    inc_s2 = lm.process_tracks([_make_car(1, 0.90, 0.5)], 1000, 1000, lines, now_ts=3.0, calib=calib)
+    assert inc_s2 == {}
+    speeds = lm.get_track_speeds()
+    assert 1 in speeds
+    ev = lm.consume_new_speeds()
+    assert len(ev) == 1
+    assert ev[0]["from_line"] == "Speed 1"
+    assert ev[0]["to_line"] == "Speed 2"
+
+    # Car 2 crosses Jasper in reverse direction (right-to-left) then stops at Speed 1: no speed emitted
+    lm.process_tracks([_make_car(2, 0.50, 0.5)], 1000, 1000, lines, now_ts=4.0, calib=calib)
+    inc_rev = lm.process_tracks([_make_car(2, 0.05, 0.5)], 1000, 1000, lines, now_ts=5.0, calib=calib)
+    assert inc_rev == {"jasper": (1, 0)}
+    assert lm.consume_new_speeds() == []
+
+    # 3. Switching an existing line with counts via PUT /api/lines to speed clears counts & excludes daily report
+    settings = Settings(data_dir=str(tmp_path / "api_data"), ha_enabled=False)
+    app = create_app(settings=settings, start_worker=False)
+    with TestClient(app) as client:
+        r_put = client.put(
+            "/api/lines",
+            json=[
+                {
+                    "id": "tl1",
+                    "name": "Traffic Line 1",
+                    "p1": [0.4, 0.2],
+                    "p2": [0.4, 0.8],
+                    "enabled": True,
+                    "color": "#38bdf8",
+                    "count_a_to_b": 12,
+                    "count_b_to_a": 18,
+                    "line_role": "count",
+                },
+                {
+                    "id": "jasper",
+                    "name": "Jasper",
+                    "p1": [0.7, 0.2],
+                    "p2": [0.7, 0.8],
+                    "enabled": True,
+                    "color": "#38bdf8",
+                    "count_a_to_b": 20,
+                    "count_b_to_a": 7,
+                    "line_role": "count",
+                },
+            ],
+        )
+        assert r_put.status_code == 200
+        assert r_put.json()[0]["count_a_to_b"] == 12
+
+        # Convert Traffic Line 1 to speed-only -> stored crossing counters reset to 0/0
+        r_put2 = client.put(
+            "/api/lines",
+            json=[
+                {
+                    "id": "tl1",
+                    "name": "Traffic Line 1",
+                    "p1": [0.4, 0.2],
+                    "p2": [0.4, 0.8],
+                    "enabled": True,
+                    "color": "#f59e0b",
+                    "count_a_to_b": 12,
+                    "count_b_to_a": 18,
+                    "line_role": "speed",
+                },
+                {
+                    "id": "jasper",
+                    "name": "Jasper",
+                    "p1": [0.7, 0.2],
+                    "p2": [0.7, 0.8],
+                    "enabled": True,
+                    "color": "#38bdf8",
+                    "line_role": "count",
+                },
+            ],
+        )
+        assert r_put2.status_code == 200
+        body2 = r_put2.json()
+        assert body2[0]["line_role"] == "speed"
+        assert (body2[0]["count_a_to_b"], body2[0]["count_b_to_a"]) == (0, 0)
+        assert (body2[1]["count_a_to_b"], body2[1]["count_b_to_a"]) == (20, 7)
+
+        summary = app.state.db.get_daily_summary()
+        report_msg = StreamWorker.build_daily_report_message(summary)
+        assert "Jasper" in report_msg
+        assert "Traffic Line 1" not in report_msg
+
+        index_html = client.get("/").text
+        assert 'id="btnDrawSpeedLine"' in index_html
+
+    # 4. annotate_frame labels Speed-only lines as 'SPEED: <name>' (dashed) without counts
+    drawn_labels: list[str] = []
+    orig_put_text = cv2.putText
+
+    def _spy_put_text(img, text, org, fontFace, fontScale, color, *args, **kwargs):
+        drawn_labels.append(str(text))
+        return orig_put_text(img, text, org, fontFace, fontScale, color, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "putText", _spy_put_text)
+    canvas = np.zeros((360, 640, 3), dtype=np.uint8)
+    annotate_frame(
+        frame=canvas,
+        tracks=[],
+        track_statuses={},
+        zones=[],
+        dwell_threshold=15.0,
+        counting_lines=[
+            CountingLineModel(
+                id="sp",
+                name="Radar 1",
+                p1=[0.2, 0.5],
+                p2=[0.8, 0.5],
+                enabled=True,
+                color="#38bdf8",
+                count_a_to_b=4,
+                count_b_to_a=5,
+                line_role="speed",
+            ),
+            CountingLineModel(
+                id="ct",
+                name="Jasper",
+                p1=[0.2, 0.8],
+                p2=[0.8, 0.8],
+                enabled=True,
+                color="#38bdf8",
+                count_a_to_b=20,
+                count_b_to_a=7,
+                line_role="count",
+            ),
+        ],
+    )
+    assert "SPEED: Radar 1" in drawn_labels
+    assert "Jasper: 27 (20/7)" in drawn_labels
+    assert not any(lbl.startswith("Radar 1:") for lbl in drawn_labels)
+
 
 
 

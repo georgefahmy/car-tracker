@@ -1680,7 +1680,9 @@ class StreamWorker:
             lines_out.append(f"• **Peak Hour:** {hour_label}:00 ({peak['vehicles_count']} vehicles)")
         lines_out.append(f"• **Red-Zone Violations Today:** {summary['violations_today']}")
         lines_out.append(f"• **Person Zone Alerts Today:** {summary.get('person_alerts_today', 0)}")
-        counting_lines = summary.get("counting_lines") or []
+        counting_lines = [
+            ln for ln in (summary.get("counting_lines") or []) if ln.get("line_role", "both") != "speed"
+        ]
         if counting_lines:
             lines_out.append("• **Traffic Flow Lines (total A→B / B→A):**")
             for ln in counting_lines:

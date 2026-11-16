@@ -22,7 +22,7 @@ class ZoneModel(BaseModel):
 
 
 class CountingLineModel(BaseModel):
-    """Normalized 2-point line ([0..1] coordinates) for traffic flow counting."""
+    """Normalized 2-point line ([0..1] coordinates) for traffic flow counting and/or 2-line speed."""
 
     id: str
     name: str
@@ -32,6 +32,7 @@ class CountingLineModel(BaseModel):
     color: str = "#38bdf8"
     count_a_to_b: int = 0
     count_b_to_a: int = 0
+    line_role: Literal["both", "count", "speed"] = "both"
 
 
 class GroundCalibrationModel(BaseModel):
@@ -133,7 +134,8 @@ class Database:
                     enabled INTEGER NOT NULL DEFAULT 1,
                     color TEXT NOT NULL DEFAULT '#38bdf8',
                     count_a_to_b INTEGER NOT NULL DEFAULT 0,
-                    count_b_to_a INTEGER NOT NULL DEFAULT 0
+                    count_b_to_a INTEGER NOT NULL DEFAULT 0,
+                    line_role TEXT NOT NULL DEFAULT 'both'
                 );
                 """
             )
@@ -149,6 +151,10 @@ class Database:
             scols = {row[1] for row in cur.fetchall()}
             if "person_alerts" not in scols:
                 cur.execute("ALTER TABLE stats_state ADD COLUMN person_alerts INTEGER NOT NULL DEFAULT 0")
+            cur.execute("PRAGMA table_info(counting_lines)")
+            lcols = {row[1] for row in cur.fetchall()}
+            if "line_role" not in lcols:
+                cur.execute("ALTER TABLE counting_lines ADD COLUMN line_role TEXT NOT NULL DEFAULT 'both'")
             self._conn.commit()
 
     def close(self) -> None:
@@ -191,7 +197,7 @@ class Database:
     def get_counting_lines(self) -> list[CountingLineModel]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, name, p1_json, p2_json, enabled, color, count_a_to_b, count_b_to_a FROM counting_lines"
+                "SELECT id, name, p1_json, p2_json, enabled, color, count_a_to_b, count_b_to_a, line_role FROM counting_lines"
             ).fetchall()
         return [
             CountingLineModel(
@@ -203,6 +209,7 @@ class Database:
                 color=r["color"],
                 count_a_to_b=int(r["count_a_to_b"]),
                 count_b_to_a=int(r["count_b_to_a"]),
+                line_role=r["line_role"] if r["line_role"] in ("both", "count", "speed") else "both",
             )
             for r in rows
         ]
@@ -217,11 +224,14 @@ class Database:
             cur.execute("DELETE FROM counting_lines")
             result: list[CountingLineModel] = []
             for line in lines:
-                a_to_b, b_to_a = existing.get(line.id, (line.count_a_to_b, line.count_b_to_a))
+                if line.line_role == "speed":
+                    a_to_b, b_to_a = 0, 0
+                else:
+                    a_to_b, b_to_a = existing.get(line.id, (line.count_a_to_b, line.count_b_to_a))
                 cur.execute(
                     """
-                    INSERT INTO counting_lines (id, name, p1_json, p2_json, enabled, color, count_a_to_b, count_b_to_a)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO counting_lines (id, name, p1_json, p2_json, enabled, color, count_a_to_b, count_b_to_a, line_role)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         line.id,
@@ -232,6 +242,7 @@ class Database:
                         line.color,
                         a_to_b,
                         b_to_a,
+                        line.line_role,
                     ),
                 )
                 result.append(line.model_copy(update={"count_a_to_b": a_to_b, "count_b_to_a": b_to_a}))

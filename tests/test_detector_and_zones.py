@@ -1148,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.25"
+    assert expected_ver == "1.0.26"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -2147,6 +2147,7 @@ def test_hardware_diagnostics_dockerfile_and_thermal_priority(tmp_path: Path) ->
         assert "libglib2.0-0t64" in txt
         assert "libgomp1" in txt
         assert "ca-certificates" in txt
+        assert "yolov8n.pt" not in txt
         for line in txt.splitlines():
             if "intel-opencl-icd" in line:
                 assert "|| true" not in line

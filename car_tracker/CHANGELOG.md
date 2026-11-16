@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.26
+- **Fix Add-on Docker Build Copy Step**: Removed gitignored `yolov8n.pt` from `car_tracker/Dockerfile` and root `Dockerfile` (YOLO weights are downloaded into `/data/models/` at runtime), while keeping the cached `ubuntu:24.04` + `kobuk-team/intel-graphics` + `.venv` dependency layers intact for fast rebuilds.
+
 ## 1.0.25
 - **Cached Python Dependency Docker Layer (Fast Add-on Updates)**: Moved `pyproject.toml` and `uv.lock` into the add-on Docker build context ahead of `COPY config.yaml` and switched startup (`car_tracker/run.sh`) to `uv run --no-sync` so future version bumps reuse the cached `.venv` layer (PyTorch, OpenVINO, ONNX Runtime, OpenCV) in seconds instead of re-downloading ~1.5 GB of Python packages on every update.
 - **Intel N150 (`0x8086:0x46d4`) Twin Lake OpenCL Driver via Canonical Intel Graphics PPA**: Added `ppa:kobuk-team/intel-graphics` (`intel-opencl-icd 26.40+` + `libze-intel-gpu1`) on Ubuntu 24.04 `amd64` because stock `universe` `intel-opencl-icd 23.43` predates Twin Lake `0x46d4`, and fixed `/proc/cpuinfo` `model name` parsing so x86 `model: 190` no longer shadows `Intel(R) N150`.

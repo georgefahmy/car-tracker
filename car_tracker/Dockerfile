@@ -40,7 +40,7 @@ RUN uv sync --frozen --no-dev && rm -rf /root/.cache/uv
 COPY config.yaml /tmp/addon_config.yaml
 RUN git clone --depth 1 --branch main https://github.com/georgefahmy/car-tracker.git /tmp/repo \
     && rm -rf /app/app /app/static \
-    && cp -a /tmp/repo/app /tmp/repo/static /tmp/repo/yolov8n.pt /tmp/repo/pyproject.toml /tmp/repo/uv.lock /app/ \
+    && cp -a /tmp/repo/app /tmp/repo/static /tmp/repo/pyproject.toml /tmp/repo/uv.lock /app/ \
     && uv sync --frozen --no-dev \
     && rm -rf /tmp/repo /root/.cache/uv
 

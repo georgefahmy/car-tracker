@@ -35,7 +35,6 @@ RUN uv sync --frozen --no-dev && rm -rf /root/.cache/uv
 
 COPY app ./app
 COPY static ./static
-COPY yolov8n.pt ./
 
 RUN mkdir -p /app/data/snapshots
 

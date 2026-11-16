@@ -26,6 +26,92 @@ let heatmapEnabled = false;
 let groundCalib = null;
 let groundToImgMatrix = null;
 let latestLiveStats = null;
+let latestHardwareDiag = null;
+
+const MODEL_CATALOG = {
+  "yolo26s.pt": { name: "YOLO26s", trait: "High Accuracy, NMS-Free", family: "yolo" },
+  "yolo26n.pt": { name: "YOLO26n", trait: "Fast, NMS-Free", family: "yolo" },
+  "yolo11s.pt": { name: "YOLO11s", trait: "High Accuracy", family: "yolo" },
+  "yolo11n.pt": { name: "YOLO11n", trait: "Fast + Balanced", family: "yolo" },
+  "yolov8s.pt": { name: "YOLOv8s", trait: "High Accuracy Baseline", family: "yolo" },
+  "yolov8n.pt": { name: "YOLOv8n", trait: "Fast Baseline", family: "yolo" },
+  "dfine_s.onnx": { name: "D-FINE Small", trait: "Max Accuracy Transformer", family: "dfine" },
+  "dfine_n.onnx": { name: "D-FINE Nano", trait: "Fast Transformer", family: "dfine" },
+};
+
+function formatModelShortName(rawModel) {
+  const key = String(rawModel || "").trim();
+  return MODEL_CATALOG[key]?.name || key || "—";
+}
+
+function formatRuntimeBackendBadge(rawBackend) {
+  const b = String(rawBackend || "").trim().toLowerCase();
+  const map = {
+    openvino_gpu: "GPU · OpenVINO",
+    mps: "GPU · Apple MPS",
+    cuda: "GPU · CUDA",
+    onnx: "CPU · ONNX",
+    openvino: "CPU · OpenVINO",
+    pytorch: "CPU · PyTorch",
+  };
+  return map[b] || (b ? b.toUpperCase() : "—");
+}
+
+function resolveModelRuntimeBadge(family, selectedBackend, hwDiag, liveStats) {
+  const req = String(selectedBackend || "auto").trim().toLowerCase();
+  const hasProbe = Boolean(hwDiag || liveStats);
+  const hasOvGpu = hwDiag
+    ? Boolean(hwDiag.openvino?.gpu_available)
+    : liveStats?.inference_backend === "openvino_gpu";
+  const hasMps = hwDiag
+    ? Boolean(hwDiag.pytorch?.mps_available)
+    : liveStats?.inference_backend === "mps";
+  const hasCuda = hwDiag
+    ? Boolean(hwDiag.pytorch?.cuda_available)
+    : liveStats?.inference_backend === "cuda";
+
+  if (req === "onnx") return "CPU · ONNX Runtime";
+  if (req === "openvino") return "CPU · OpenVINO";
+  if (req === "openvino_gpu") {
+    return !hasProbe || hasOvGpu ? "GPU · OpenVINO FP16" : "CPU · ONNX Fallback";
+  }
+  if (req === "pytorch") {
+    if (family === "dfine") return "CPU · ONNX Runtime";
+    if (hasMps) return "GPU · Apple MPS";
+    if (hasCuda) return "GPU · CUDA";
+    return "CPU · PyTorch";
+  }
+  if (!hasProbe) {
+    return family === "dfine"
+      ? "CPU/GPU · OpenVINO, ONNX"
+      : "CPU/GPU · OpenVINO, ONNX, PyTorch";
+  }
+  if (family === "dfine") {
+    return hasOvGpu ? "GPU · OpenVINO FP16" : "CPU · ONNX Runtime";
+  }
+  if (hasMps) return "GPU · Apple MPS";
+  if (hasCuda) return "GPU · CUDA";
+  if (hasOvGpu) return "GPU · OpenVINO FP16";
+  return "CPU · PyTorch";
+}
+
+function syncModelOptionLabels() {
+  const modelSelect = document.getElementById("cfg-yolo_model");
+  if (!modelSelect) return;
+  const backendSelect = document.getElementById("cfg-inference_backend");
+  const selectedBackend = backendSelect?.value || "auto";
+  for (const opt of modelSelect.options) {
+    const meta = MODEL_CATALOG[opt.value];
+    if (!meta) continue;
+    const badge = resolveModelRuntimeBadge(
+      meta.family,
+      selectedBackend,
+      latestHardwareDiag,
+      latestLiveStats
+    );
+    opt.textContent = `${meta.name} — ${meta.trait} [${badge}]`;
+  }
+}
 
 function isModalOpen(dialog) {
   return Boolean(dialog && (dialog.open || dialog.hasAttribute("open")));
@@ -1313,10 +1399,8 @@ function renderStreamTelemetryHtml(data) {
     ? `${Number(data.resolution.width)}x${Number(data.resolution.height)}`
     : "—";
   const fpsVal = Number(data.fps ?? 0).toFixed(2);
-  const modelLabel = escapeHtml(data.yolo_model || "—");
-  const backendLabel = data.inference_backend
-    ? String(data.inference_backend).toUpperCase()
-    : "—";
+  const modelLabel = escapeHtml(formatModelShortName(data.yolo_model));
+  const backendLabel = formatRuntimeBackendBadge(data.inference_backend);
   const sizeLabel = data.input_resolution
     ? `@${data.input_resolution}`
     : (data.yolo_imgsz ? `@${data.yolo_imgsz}` : "");
@@ -1385,14 +1469,12 @@ function updateCvRuntimeHint() {
     hintEl.textContent = "Runtime status will appear once connected.";
     return;
   }
-  const activeModel = latestLiveStats.yolo_model || "—";
-  const activeBackend = latestLiveStats.inference_backend
-    ? String(latestLiveStats.inference_backend).toUpperCase()
-    : "—";
+  const activeModel = formatModelShortName(latestLiveStats.yolo_model);
+  const activeBackend = formatRuntimeBackendBadge(latestLiveStats.inference_backend);
   const activeSize = latestLiveStats.input_resolution
     ? ` @ ${latestLiveStats.input_resolution}`
     : (latestLiveStats.yolo_imgsz ? ` @ ${latestLiveStats.yolo_imgsz}px` : "");
-  const parts = [`Active: ${activeModel} (${activeBackend}${activeSize})`];
+  const parts = [`Active: ${activeModel} [${activeBackend}${activeSize}]`];
   if (latestLiveStats.video_decode === "vaapi") {
     parts.push("Decode: VA-API");
   }
@@ -1780,6 +1862,8 @@ async function refreshHardwareDiagnostics(force = false) {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
+    latestHardwareDiag = data;
+    syncModelOptionLabels();
     if (!isModalOpen(settingsModal)) return;
     const cpuLabel = data.cpu_model
       ? `${data.cpu_model} (${data.cpu_cores || "?"}c)`
@@ -1820,6 +1904,13 @@ document.getElementById("btnRefreshHardware")?.addEventListener("click", () => {
   refreshHardwareDiagnostics(true);
 });
 
+document.getElementById("cfg-inference_backend")?.addEventListener("change", () => {
+  syncModelOptionLabels();
+  if (latestHardwareDiag) {
+    refreshHardwareDiagnostics(false);
+  }
+});
+
 // Settings & Snapshot dialogs
 document.getElementById("btnSettings").addEventListener("click", async () => {
   const res = await fetch("api/config");
@@ -1840,6 +1931,7 @@ document.getElementById("btnSettings").addEventListener("click", async () => {
   document.getElementById("testWebhookResult").textContent = "";
   const haOut = document.getElementById("testHaResult");
   if (haOut) haOut.textContent = "";
+  syncModelOptionLabels();
   updateCvRuntimeHint();
   openModalDialog(settingsModal);
   refreshHardwareDiagnostics(false);

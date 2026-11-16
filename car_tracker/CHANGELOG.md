@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.30
+- **Unified Model & Inference Backend Naming Convention**: Standardized every entry in Settings (**Detection Model** and **Inference Backend**), the Settings header status, and the header telemetry strip around `<Model> — <Tier> [<CPU/GPU> · <Backend>]`. Changing **Inference Backend** or probing host hardware dynamically updates every model option's `[CPU/GPU · Backend]` badge live in Settings without auto-submitting.
+
 ## 1.0.29
 - **Per-Line Modes (`Count + Speed` / `Count Only` / `Speed Only`)**: Added a dedicated `line_role` (`"both"`, `"count"`, `"speed"`) to traffic lines with automatic SQLite schema migration and a `+ Draw Speed Line` action plus 1-click mode cycling pill in **Zones & Lines**.
 - **Clean Counting vs. Speed-Trap Separation**: `Count Only` lines track `A → B` / `B → A` crossings without pairing into 2-line speed timing; `Speed Only` lines measure vehicle speed in mph between speed lines without incrementing cross counters, cluttering KPI totals, or appearing in daily flow reports, and render as dashed amber `SPEED:` overlays on live/snapshot views.

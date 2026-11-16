@@ -1148,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.29"
+    assert expected_ver == "1.0.30"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1710,10 +1710,14 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
             self.has_modal_backdrop = False
             self.links: list[str] = []
             self.scripts: list[str] = []
+            self.select_options: dict[str, list[tuple[str, str]]] = {}
             self._in_label = False
             self._active_tip_id: str | None = None
             self._tip_depth = 0
             self._tip_parts: list[str] = []
+            self._active_select_id: str | None = None
+            self._active_option_val: str | None = None
+            self._active_option_parts: list[str] = []
 
         def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
             attr = dict(attrs)
@@ -1737,6 +1741,11 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
                     self.tip_buttons_by_for[attr["interestfor"]] = attr
             if tag in {"input", "select"} and attr.get("name") and attr["name"] != "violation_filter":
                 self.controls_by_name[attr["name"]] = attr
+            if tag == "select" and attr.get("id"):
+                self._active_select_id = attr["id"]
+            if tag == "option" and self._active_select_id is not None:
+                self._active_option_val = attr.get("value") or ""
+                self._active_option_parts = []
             if tag == "div" and attr.get("popover") == "hint" and attr.get("id"):
                 self._active_tip_id = attr["id"]
                 self._tip_depth = 1
@@ -1747,6 +1756,14 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         def handle_endtag(self, tag: str) -> None:
             if tag == "label":
                 self._in_label = False
+            if tag == "option" and self._active_select_id is not None and self._active_option_val is not None:
+                opt_text = re.sub(r"\s+", " ", "".join(self._active_option_parts)).strip()
+                self.select_options.setdefault(self._active_select_id, []).append(
+                    (self._active_option_val, opt_text)
+                )
+                self._active_option_val = None
+            if tag == "select":
+                self._active_select_id = None
             if tag == "div" and self._active_tip_id is not None:
                 self._tip_depth -= 1
                 if self._tip_depth == 0:
@@ -1757,6 +1774,8 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         def handle_data(self, data: str) -> None:
             if self._active_tip_id is not None:
                 self._tip_parts.append(data)
+            if self._active_option_val is not None:
+                self._active_option_parts.append(data)
 
     settings = Settings(data_dir=str(tmp_path / "ui_data"))
     app = create_app(settings=settings, start_worker=False)
@@ -1777,11 +1796,30 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         assert "role" not in attrs
         assert "aria-modal" not in attrs
 
-    assert "static/icon.png?v=25" in collector.links
-    assert "static/styles.css?v=25" in collector.links
-    assert "static/app.js?v=25" in collector.scripts
+    assert "static/icon.png?v=26" in collector.links
+    assert "static/styles.css?v=26" in collector.links
+    assert "static/app.js?v=26" in collector.scripts
     assert collector.controls_by_name["inference_backend"].get("aria-describedby") == "hwDiagnosticHint"
     assert 'id="btnDrawSpeedLine"' in html
+
+    model_opts = collector.select_options["cfg-yolo_model"]
+    assert len(model_opts) == 8
+    for _val, opt_text in model_opts:
+        assert re.match(r"^.+ — .+ \[(?:CPU|GPU|CPU/GPU) · .+\]$", opt_text), opt_text
+
+    backend_opts = collector.select_options["cfg-inference_backend"]
+    assert len(backend_opts) == 5
+    for _val, opt_text in backend_opts:
+        assert re.match(r"^.+ — .+ \[(?:CPU|GPU|GPU/CPU|CPU/GPU) · .+\]$", opt_text), opt_text
+
+    app_js_txt = Path("static/app.js").read_text(encoding="utf-8")
+    for sym in (
+        "MODEL_CATALOG",
+        "resolveModelRuntimeBadge",
+        "syncModelOptionLabels",
+        "formatRuntimeBackendBadge",
+    ):
+        assert sym in app_js_txt
     assert 'class="settings-bento"' in html
     assert "telemetry-strip" in html
     assert "tabular-nums" in Path("static/styles.css").read_text(encoding="utf-8")

@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Car Tracker & Red-Zone Monitor</title>
-  <link rel="icon" type="image/png" href="static/icon.png?v=26" />
-  <link rel="stylesheet" href="static/styles.css?v=26" />
+  <link rel="icon" type="image/png" href="static/icon.png?v=27" />
+  <link rel="stylesheet" href="static/styles.css?v=27" />
 </head>
 <body>
   <header class="topbar">
@@ -273,17 +273,17 @@
                 <div class="field-label-row">
                   <label for="cfg-yolo_model">Detection Model</label>
                   <button type="button" class="help-tip-btn" interestfor="tip-yolo_model" popovertarget="tip-yolo_model" popovertargetaction="show" aria-label="More about Detection Model">?</button>
-                  <div id="tip-yolo_model" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Object detector architecture and weight tier. Every model shows its active [CPU or GPU · Backend] target and updates live when you change Inference Backend. YOLO26s and D-FINE Small offer the best accuracy on iGPU; Nano (n) models are fastest on CPU.</div></div>
+                  <div id="tip-yolo_model" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Object detector architecture and weight tier. Each option shows [Device · Backend · CPU: Impact] and updates live when you change Inference Backend — e.g. NMS-free YOLO26n/s have Minimal/Very Low CPU load on iGPU, while Small/Transformer models have High/Very High CPU load when run on CPU.</div></div>
                 </div>
                 <select id="cfg-yolo_model" name="yolo_model">
-                  <option value="yolo26s.pt">YOLO26s — High Accuracy, NMS-Free [CPU/GPU · OpenVINO, ONNX, PyTorch]</option>
-                  <option value="yolo26n.pt">YOLO26n — Fast, NMS-Free [CPU/GPU · OpenVINO, ONNX, PyTorch]</option>
-                  <option value="yolo11s.pt">YOLO11s — High Accuracy [CPU/GPU · OpenVINO, ONNX, PyTorch]</option>
-                  <option value="yolo11n.pt">YOLO11n — Fast + Balanced [CPU/GPU · OpenVINO, ONNX, PyTorch]</option>
-                  <option value="yolov8s.pt">YOLOv8s — High Accuracy Baseline [CPU/GPU · OpenVINO, ONNX, PyTorch]</option>
-                  <option value="yolov8n.pt">YOLOv8n — Fast Baseline [CPU/GPU · OpenVINO, ONNX, PyTorch]</option>
-                  <option value="dfine_s.onnx">D-FINE Small — Max Accuracy Transformer [CPU/GPU · OpenVINO, ONNX]</option>
-                  <option value="dfine_n.onnx">D-FINE Nano — Fast Transformer [CPU/GPU · OpenVINO, ONNX]</option>
+                  <option value="yolo26s.pt">YOLO26s — High Accuracy, NMS-Free [CPU/GPU · OpenVINO, ONNX, PyTorch · CPU: Very Low–Mod]</option>
+                  <option value="yolo26n.pt">YOLO26n — Fast, NMS-Free [CPU/GPU · OpenVINO, ONNX, PyTorch · CPU: Minimal–Low]</option>
+                  <option value="yolo11s.pt">YOLO11s — High Accuracy [CPU/GPU · OpenVINO, ONNX, PyTorch · CPU: Low–High]</option>
+                  <option value="yolo11n.pt">YOLO11n — Fast + Balanced [CPU/GPU · OpenVINO, ONNX, PyTorch · CPU: Very Low–Low]</option>
+                  <option value="yolov8s.pt">YOLOv8s — High Accuracy Baseline [CPU/GPU · OpenVINO, ONNX, PyTorch · CPU: Low–High]</option>
+                  <option value="yolov8n.pt">YOLOv8n — Fast Baseline [CPU/GPU · OpenVINO, ONNX, PyTorch · CPU: Very Low–Low]</option>
+                  <option value="dfine_s.onnx">D-FINE Small — Max Accuracy Transformer [CPU/GPU · OpenVINO, ONNX · CPU: Low–High]</option>
+                  <option value="dfine_n.onnx">D-FINE Nano — Fast Transformer [CPU/GPU · OpenVINO, ONNX · CPU: Very Low–Mod]</option>
                 </select>
               </div>
               <div class="field">
@@ -293,11 +293,11 @@
                   <div id="tip-inference_backend" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Execution runtime for inference. OpenVINO Intel iGPU (/dev/dri) runs native FP16 with a persistent GPU shader cache; Auto prefers Intel iGPU / MPS / CUDA when present, then falls back to CPU.</div></div>
                 </div>
                 <select id="cfg-inference_backend" name="inference_backend" aria-describedby="hwDiagnosticHint">
-                  <option value="auto">Auto — Hardware Preferred [GPU/CPU · OpenVINO, MPS, CUDA, PyTorch]</option>
-                  <option value="openvino_gpu">OpenVINO iGPU — Intel /dev/dri [GPU · OpenVINO FP16]</option>
-                  <option value="onnx">ONNX Runtime — Low-Idle CPU [CPU · ONNX Runtime]</option>
-                  <option value="openvino">OpenVINO CPU — Intel x86 [CPU · OpenVINO]</option>
-                  <option value="pytorch">PyTorch — Native Weights [CPU/GPU · PyTorch]</option>
+                  <option value="auto">Auto — Hardware Preferred [GPU/CPU · OpenVINO, MPS, CUDA, PyTorch · CPU: Minimal–Mod]</option>
+                  <option value="openvino_gpu">OpenVINO iGPU — Intel /dev/dri [GPU · OpenVINO FP16 · CPU: Minimal–Low]</option>
+                  <option value="onnx">ONNX Runtime — Optimized CPU [CPU · ONNX Runtime · CPU: Low–High]</option>
+                  <option value="openvino">OpenVINO CPU — Intel x86 Spin [CPU · OpenVINO · CPU: High–Very High]</option>
+                  <option value="pytorch">PyTorch — Native Weights [CPU/GPU · PyTorch · CPU: Mod–Very High]</option>
                 </select>
               </div>
             </div>
@@ -631,6 +631,6 @@
     </div>
   </dialog>
 
-  <script src="static/app.js?v=26"></script>
+  <script src="static/app.js?v=27"></script>
 </body>
 </html>

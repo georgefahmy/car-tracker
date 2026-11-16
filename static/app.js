@@ -29,14 +29,54 @@ let latestLiveStats = null;
 let latestHardwareDiag = null;
 
 const MODEL_CATALOG = {
-  "yolo26s.pt": { name: "YOLO26s", trait: "High Accuracy, NMS-Free", family: "yolo" },
-  "yolo26n.pt": { name: "YOLO26n", trait: "Fast, NMS-Free", family: "yolo" },
-  "yolo11s.pt": { name: "YOLO11s", trait: "High Accuracy", family: "yolo" },
-  "yolo11n.pt": { name: "YOLO11n", trait: "Fast + Balanced", family: "yolo" },
-  "yolov8s.pt": { name: "YOLOv8s", trait: "High Accuracy Baseline", family: "yolo" },
-  "yolov8n.pt": { name: "YOLOv8n", trait: "Fast Baseline", family: "yolo" },
-  "dfine_s.onnx": { name: "D-FINE Small", trait: "Max Accuracy Transformer", family: "dfine" },
-  "dfine_n.onnx": { name: "D-FINE Nano", trait: "Fast Transformer", family: "dfine" },
+  "yolo26s.pt": {
+    name: "YOLO26s",
+    trait: "High Accuracy, NMS-Free",
+    family: "yolo",
+    cpu: { gpu: "Very Low", onnx: "Moderate", pytorch: "High", openvino: "Very High", range: "Very Low–Mod" },
+  },
+  "yolo26n.pt": {
+    name: "YOLO26n",
+    trait: "Fast, NMS-Free",
+    family: "yolo",
+    cpu: { gpu: "Minimal", onnx: "Low", pytorch: "Moderate", openvino: "High", range: "Minimal–Low" },
+  },
+  "yolo11s.pt": {
+    name: "YOLO11s",
+    trait: "High Accuracy",
+    family: "yolo",
+    cpu: { gpu: "Low", onnx: "High", pytorch: "Very High", openvino: "Very High", range: "Low–High" },
+  },
+  "yolo11n.pt": {
+    name: "YOLO11n",
+    trait: "Fast + Balanced",
+    family: "yolo",
+    cpu: { gpu: "Very Low", onnx: "Low", pytorch: "Moderate", openvino: "High", range: "Very Low–Low" },
+  },
+  "yolov8s.pt": {
+    name: "YOLOv8s",
+    trait: "High Accuracy Baseline",
+    family: "yolo",
+    cpu: { gpu: "Low", onnx: "High", pytorch: "Very High", openvino: "Very High", range: "Low–High" },
+  },
+  "yolov8n.pt": {
+    name: "YOLOv8n",
+    trait: "Fast Baseline",
+    family: "yolo",
+    cpu: { gpu: "Very Low", onnx: "Low", pytorch: "Moderate", openvino: "High", range: "Very Low–Low" },
+  },
+  "dfine_s.onnx": {
+    name: "D-FINE Small",
+    trait: "Max Accuracy Transformer",
+    family: "dfine",
+    cpu: { gpu: "Low", onnx: "High", pytorch: "High", openvino: "Very High", range: "Low–High" },
+  },
+  "dfine_n.onnx": {
+    name: "D-FINE Nano",
+    trait: "Fast Transformer",
+    family: "dfine",
+    cpu: { gpu: "Very Low", onnx: "Moderate", pytorch: "Moderate", openvino: "High", range: "Very Low–Mod" },
+  },
 };
 
 function formatModelShortName(rawModel) {
@@ -57,54 +97,126 @@ function formatRuntimeBackendBadge(rawBackend) {
   return map[b] || (b ? b.toUpperCase() : "—");
 }
 
-function resolveModelRuntimeBadge(family, selectedBackend, hwDiag, liveStats) {
-  const req = String(selectedBackend || "auto").trim().toLowerCase();
-  const hasProbe = Boolean(hwDiag || liveStats);
-  const hasOvGpu = hwDiag
-    ? Boolean(hwDiag.openvino?.gpu_available)
-    : liveStats?.inference_backend === "openvino_gpu";
-  const hasMps = hwDiag
-    ? Boolean(hwDiag.pytorch?.mps_available)
-    : liveStats?.inference_backend === "mps";
-  const hasCuda = hwDiag
-    ? Boolean(hwDiag.pytorch?.cuda_available)
-    : liveStats?.inference_backend === "cuda";
+function probeHostAccelerators(hwDiag, liveStats) {
+  return {
+    hasProbe: Boolean(hwDiag || liveStats),
+    hasOvGpu: hwDiag
+      ? Boolean(hwDiag.openvino?.gpu_available)
+      : liveStats?.inference_backend === "openvino_gpu",
+    hasMps: hwDiag
+      ? Boolean(hwDiag.pytorch?.mps_available)
+      : liveStats?.inference_backend === "mps",
+    hasCuda: hwDiag
+      ? Boolean(hwDiag.pytorch?.cuda_available)
+      : liveStats?.inference_backend === "cuda",
+  };
+}
 
-  if (req === "onnx") return "CPU · ONNX Runtime";
-  if (req === "openvino") return "CPU · OpenVINO";
-  if (req === "openvino_gpu") {
-    return !hasProbe || hasOvGpu ? "GPU · OpenVINO FP16" : "CPU · ONNX Fallback";
+function resolveModelRuntimeBadge(meta, selectedBackend, hwDiag, liveStats) {
+  const req = String(selectedBackend || "auto").trim().toLowerCase();
+  const family = meta.family;
+  const cpuMap = meta.cpu || {};
+  const { hasProbe, hasOvGpu, hasMps, hasCuda } = probeHostAccelerators(hwDiag, liveStats);
+
+  let devBackend = "";
+  let cpuImpact = "";
+  if (req === "onnx") {
+    devBackend = "CPU · ONNX Runtime";
+    cpuImpact = cpuMap.onnx || "Moderate";
+  } else if (req === "openvino") {
+    devBackend = "CPU · OpenVINO";
+    cpuImpact = cpuMap.openvino || "High";
+  } else if (req === "openvino_gpu") {
+    if (!hasProbe || hasOvGpu) {
+      devBackend = "GPU · OpenVINO FP16";
+      cpuImpact = cpuMap.gpu || "Very Low";
+    } else {
+      devBackend = "CPU · ONNX Fallback";
+      cpuImpact = cpuMap.onnx || "Moderate";
+    }
+  } else if (req === "pytorch") {
+    if (family === "dfine") {
+      devBackend = "CPU · ONNX Runtime";
+      cpuImpact = cpuMap.onnx || "Moderate";
+    } else if (hasMps) {
+      devBackend = "GPU · Apple MPS";
+      cpuImpact = cpuMap.gpu || "Very Low";
+    } else if (hasCuda) {
+      devBackend = "GPU · CUDA";
+      cpuImpact = cpuMap.gpu || "Very Low";
+    } else {
+      devBackend = "CPU · PyTorch";
+      cpuImpact = cpuMap.pytorch || "High";
+    }
+  } else if (!hasProbe) {
+    devBackend =
+      family === "dfine"
+        ? "CPU/GPU · OpenVINO, ONNX"
+        : "CPU/GPU · OpenVINO, ONNX, PyTorch";
+    cpuImpact = cpuMap.range || "Minimal–High";
+  } else if (family === "dfine") {
+    if (hasOvGpu) {
+      devBackend = "GPU · OpenVINO FP16";
+      cpuImpact = cpuMap.gpu || "Low";
+    } else {
+      devBackend = "CPU · ONNX Runtime";
+      cpuImpact = cpuMap.onnx || "Moderate";
+    }
+  } else if (hasMps) {
+    devBackend = "GPU · Apple MPS";
+    cpuImpact = cpuMap.gpu || "Very Low";
+  } else if (hasCuda) {
+    devBackend = "GPU · CUDA";
+    cpuImpact = cpuMap.gpu || "Very Low";
+  } else if (hasOvGpu) {
+    devBackend = "GPU · OpenVINO FP16";
+    cpuImpact = cpuMap.gpu || "Very Low";
+  } else {
+    devBackend = "CPU · PyTorch";
+    cpuImpact = cpuMap.pytorch || "High";
   }
-  if (req === "pytorch") {
-    if (family === "dfine") return "CPU · ONNX Runtime";
-    if (hasMps) return "GPU · Apple MPS";
-    if (hasCuda) return "GPU · CUDA";
-    return "CPU · PyTorch";
-  }
-  if (!hasProbe) {
-    return family === "dfine"
-      ? "CPU/GPU · OpenVINO, ONNX"
-      : "CPU/GPU · OpenVINO, ONNX, PyTorch";
-  }
-  if (family === "dfine") {
-    return hasOvGpu ? "GPU · OpenVINO FP16" : "CPU · ONNX Runtime";
-  }
-  if (hasMps) return "GPU · Apple MPS";
-  if (hasCuda) return "GPU · CUDA";
-  if (hasOvGpu) return "GPU · OpenVINO FP16";
-  return "CPU · PyTorch";
+  return `${devBackend} · CPU: ${cpuImpact}`;
 }
 
 function syncModelOptionLabels() {
   const modelSelect = document.getElementById("cfg-yolo_model");
-  if (!modelSelect) return;
   const backendSelect = document.getElementById("cfg-inference_backend");
   const selectedBackend = backendSelect?.value || "auto";
+
+  if (backendSelect) {
+    const { hasProbe, hasOvGpu, hasMps, hasCuda } = probeHostAccelerators(
+      latestHardwareDiag,
+      latestLiveStats
+    );
+    for (const bOpt of backendSelect.options) {
+      if (bOpt.value === "auto" && hasProbe) {
+        if (hasOvGpu) {
+          bOpt.textContent = "Auto — Hardware Preferred [GPU · OpenVINO FP16 · CPU: Minimal–Low]";
+        } else if (hasMps) {
+          bOpt.textContent = "Auto — Hardware Preferred [GPU · Apple MPS · CPU: Minimal–Mod]";
+        } else if (hasCuda) {
+          bOpt.textContent = "Auto — Hardware Preferred [GPU · CUDA · CPU: Minimal–Mod]";
+        } else {
+          bOpt.textContent = "Auto — Hardware Preferred [CPU · PyTorch · CPU: Mod–Very High]";
+        }
+      } else if (bOpt.value === "pytorch" && hasProbe) {
+        if (hasMps) {
+          bOpt.textContent = "PyTorch — Native Weights [GPU · Apple MPS · CPU: Minimal–Mod]";
+        } else if (hasCuda) {
+          bOpt.textContent = "PyTorch — Native Weights [GPU · CUDA · CPU: Minimal–Mod]";
+        } else {
+          bOpt.textContent = "PyTorch — Native Weights [CPU · PyTorch · CPU: Mod–Very High]";
+        }
+      }
+    }
+  }
+
+  if (!modelSelect) return;
   for (const opt of modelSelect.options) {
     const meta = MODEL_CATALOG[opt.value];
     if (!meta) continue;
     const badge = resolveModelRuntimeBadge(
-      meta.family,
+      meta,
       selectedBackend,
       latestHardwareDiag,
       latestLiveStats

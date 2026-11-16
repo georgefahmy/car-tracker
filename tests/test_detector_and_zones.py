@@ -1148,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.30"
+    assert expected_ver == "1.0.31"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1796,21 +1796,21 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         assert "role" not in attrs
         assert "aria-modal" not in attrs
 
-    assert "static/icon.png?v=26" in collector.links
-    assert "static/styles.css?v=26" in collector.links
-    assert "static/app.js?v=26" in collector.scripts
+    assert "static/icon.png?v=27" in collector.links
+    assert "static/styles.css?v=27" in collector.links
+    assert "static/app.js?v=27" in collector.scripts
     assert collector.controls_by_name["inference_backend"].get("aria-describedby") == "hwDiagnosticHint"
     assert 'id="btnDrawSpeedLine"' in html
 
     model_opts = collector.select_options["cfg-yolo_model"]
     assert len(model_opts) == 8
     for _val, opt_text in model_opts:
-        assert re.match(r"^.+ — .+ \[(?:CPU|GPU|CPU/GPU) · .+\]$", opt_text), opt_text
+        assert re.match(r"^.+ — .+ \[(?:CPU|GPU|CPU/GPU) · .+ · CPU: .+\]$", opt_text), opt_text
 
     backend_opts = collector.select_options["cfg-inference_backend"]
     assert len(backend_opts) == 5
     for _val, opt_text in backend_opts:
-        assert re.match(r"^.+ — .+ \[(?:CPU|GPU|GPU/CPU|CPU/GPU) · .+\]$", opt_text), opt_text
+        assert re.match(r"^.+ — .+ \[(?:CPU|GPU|GPU/CPU|CPU/GPU) · .+ · CPU: .+\]$", opt_text), opt_text
 
     app_js_txt = Path("static/app.js").read_text(encoding="utf-8")
     for sym in (

@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.31
+- **Model & Backend CPU Impact Tiers**: Extended the unified Settings dropdown labels to `[Device · Backend · CPU: <Impact>]` (`Minimal`, `Very Low`, `Low`, `Moderate`, `High`, `Very High`), dynamically updating per-model CPU load and `Auto`/`PyTorch` host resolution whenever **Inference Backend** or hardware diagnostics change.
+
 ## 1.0.30
 - **Unified Model & Inference Backend Naming Convention**: Standardized every entry in Settings (**Detection Model** and **Inference Backend**), the Settings header status, and the header telemetry strip around `<Model> — <Tier> [<CPU/GPU> · <Backend>]`. Changing **Inference Backend** or probing host hardware dynamically updates every model option's `[CPU/GPU · Backend]` badge live in Settings without auto-submitting.
 

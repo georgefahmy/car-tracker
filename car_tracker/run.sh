@@ -17,4 +17,4 @@ fi
 
 mkdir -p /data/snapshots
 cd /app
-exec uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
+exec uv run --no-sync uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.25
+- **Cached Python Dependency Docker Layer (Fast Add-on Updates)**: Moved `pyproject.toml` and `uv.lock` into the add-on Docker build context ahead of `COPY config.yaml` and switched startup (`car_tracker/run.sh`) to `uv run --no-sync` so future version bumps reuse the cached `.venv` layer (PyTorch, OpenVINO, ONNX Runtime, OpenCV) in seconds instead of re-downloading ~1.5 GB of Python packages on every update.
+- **Intel N150 (`0x8086:0x46d4`) Twin Lake OpenCL Driver via Canonical Intel Graphics PPA**: Added `ppa:kobuk-team/intel-graphics` (`intel-opencl-icd 26.40+` + `libze-intel-gpu1`) on Ubuntu 24.04 `amd64` because stock `universe` `intel-opencl-icd 23.43` predates Twin Lake `0x46d4`, and fixed `/proc/cpuinfo` `model name` parsing so x86 `model: 190` no longer shadows `Intel(R) N150`.
+
 ## 1.0.24
 - **Fix Intel iGPU OpenCL / Level Zero Container Drivers**: Switched the container base image from `python:3.12-slim` (Debian 13 Trixie, which removed `intel-opencl-icd` and caused silent OpenCL install failure) to `ubuntu:24.04` (Noble LTS) with `ocl-icd-libopencl1`, `intel-opencl-icd`, `libze-intel-gpu1`, `libze1`, and `clinfo` on `amd64` so Intel N95/N100/N150/N305/Core iGPUs are properly exposed to OpenVINO.
 - **Hardware & GPU Diagnostics (`GET /api/system/hardware`)**: Inspects CPU model/cores, virtualization flags, PCI GPU IDs, `/dev/dri/*` render-node permissions, OpenCL ICDs, and OpenVINO/ONNX/PyTorch backends; surfaces exact GPU fallback reasons in `#streamInfo` and Settings (`Check GPU`), and prioritizes `x86_pkg_temp`/`coretemp`/`k10temp` over fixed `acpitz` (`27.8°C`) thermal sensors.

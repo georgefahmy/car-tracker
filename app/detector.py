@@ -1887,26 +1887,27 @@ def collect_hardware_diagnostics(
         except OSError:
             pass
 
-    cpu_model = ""
+    model_name = ""
+    arm_model = ""
     hypervisor_flag = False
     if cpuinfo_path.exists():
         try:
             for line in cpuinfo_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                lower = line.lower()
-                if not cpu_model and (
-                    lower.startswith("model name")
-                    or lower.startswith("model\t")
-                    or lower.startswith("hardware")
-                ) and ":" in line:
-                    cpu_model = line.split(":", 1)[1].strip()
-                elif lower.startswith("flags") and ":" in line:
-                    flags = line.split(":", 1)[1].split()
-                    if "hypervisor" in flags:
+                if ":" not in line:
+                    continue
+                key_raw, val_raw = line.split(":", 1)
+                key_stripped = key_raw.strip()
+                key_lower = key_stripped.lower()
+                if key_lower == "model name" and not model_name:
+                    model_name = val_raw.strip()
+                elif (key_stripped == "Model" or key_lower == "hardware") and not arm_model:
+                    arm_model = val_raw.strip()
+                elif key_lower == "flags":
+                    if "hypervisor" in val_raw.split():
                         hypervisor_flag = True
         except OSError:
             pass
-    if not cpu_model:
-        cpu_model = platform.processor() or platform.machine()
+    cpu_model = model_name or arm_model or platform.processor() or platform.machine()
     cpu_cores = int(os.cpu_count() or 1)
 
     board_parts: list[str] = []

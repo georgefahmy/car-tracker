@@ -1148,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.24"
+    assert expected_ver == "1.0.25"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -2128,9 +2128,19 @@ def test_hardware_diagnostics_dockerfile_and_thermal_priority(tmp_path: Path) ->
     from app.detector import collect_hardware_diagnostics
     from app.stream import StreamWorker
 
+    assert (
+        Path("car_tracker/pyproject.toml").read_text(encoding="utf-8")
+        == Path("pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert (
+        Path("car_tracker/uv.lock").read_text(encoding="utf-8")
+        == Path("uv.lock").read_text(encoding="utf-8")
+    )
+
     for df_path in (Path("car_tracker/Dockerfile"), Path("Dockerfile")):
         txt = df_path.read_text(encoding="utf-8")
         assert "FROM ubuntu:24.04" in txt
+        assert "kobuk-team/intel-graphics" in txt
         assert "intel-opencl-icd" in txt
         assert "ocl-icd-libopencl1" in txt
         assert "libze-intel-gpu1" in txt
@@ -2141,7 +2151,10 @@ def test_hardware_diagnostics_dockerfile_and_thermal_priority(tmp_path: Path) ->
             if "intel-opencl-icd" in line:
                 assert "|| true" not in line
 
-    # (a) Working Intel Alder Lake-N (0x8086 / 0x46d1) + renderD128 + intel.icd + OpenVINO GPU
+    addon_df = Path("car_tracker/Dockerfile").read_text(encoding="utf-8")
+    assert addon_df.index("COPY pyproject.toml uv.lock") < addon_df.index("COPY config.yaml")
+
+    # (a) Working Intel Alder Lake-N / Twin Lake (0x8086 / 0x46d1, x86 `model : 190` before `model name`)
     root_a = tmp_path / "host_a"
     cpuinfo_a = root_a / "cpuinfo"
     dmi_a = root_a / "dmi"
@@ -2152,7 +2165,7 @@ def test_hardware_diagnostics_dockerfile_and_thermal_priority(tmp_path: Path) ->
     for d in (dmi_a, pci_a, dri_a, icd_a):
         d.mkdir(parents=True, exist_ok=True)
     cpuinfo_a.write_text(
-        "processor\t: 0\nmodel name\t: Intel(R) N100\nflags\t\t: fpu vme avx2\n",
+        "processor\t: 0\ncpu family\t: 6\nmodel\t\t: 190\nmodel name\t: Intel(R) N150\nflags\t\t: fpu vme avx2\n",
         encoding="utf-8",
     )
     (dmi_a / "sys_vendor").write_text("AZW\n", encoding="utf-8")
@@ -2173,7 +2186,7 @@ def test_hardware_diagnostics_dockerfile_and_thermal_priority(tmp_path: Path) ->
         def get_property(dev: str, prop: str) -> str:
             if dev == "GPU":
                 return "Intel(R) UHD Graphics [0x46d1] (iGPU)"
-            return "Intel(R) N100"
+            return "Intel(R) N150"
 
     class _FakeOvCpuCore:
         available_devices = ["CPU"]
@@ -2196,7 +2209,7 @@ def test_hardware_diagnostics_dockerfile_and_thermal_priority(tmp_path: Path) ->
             os_release_path=osrel_a,
             run_clinfo=False,
         )
-        assert diag_a["cpu_model"] == "Intel(R) N100"
+        assert diag_a["cpu_model"] == "Intel(R) N150"
         assert diag_a["gpu_available"] is True
         assert "0x46d1" in diag_a["gpu_name"]
         assert diag_a["pci_gpus"][0]["description"] == "Intel Alder Lake-N UHD Graphics"

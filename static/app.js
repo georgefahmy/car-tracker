@@ -1639,6 +1639,52 @@ document.getElementById("btnResetStats").addEventListener("click", async () => {
   refreshStats();
 });
 
+async function refreshHardwareDiagnostics(force = false) {
+  const hwEl = document.getElementById("hwDiagnosticHint");
+  const btn = document.getElementById("btnRefreshHardware");
+  if (!hwEl || !isModalOpen(settingsModal)) return;
+  if (btn) btn.disabled = true;
+  try {
+    const url = force ? "api/system/hardware?refresh=true" : "api/system/hardware";
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!isModalOpen(settingsModal)) return;
+    const cpuLabel = data.cpu_model
+      ? `${data.cpu_model} (${data.cpu_cores || "?"}c)`
+      : "Unknown CPU";
+    const renderNodes = (data.dri_devices || [])
+      .filter((d) => String(d.name || "").startsWith("renderD"))
+      .map((d) => d.name);
+    const driLabel = renderNodes.length ? `DRI: ${renderNodes.join(",")}` : "DRI: none";
+    const pciLabel = data.pci_gpus?.length
+      ? `GPU: ${data.pci_gpus.map((g) => g.description || g.vendor).join(", ")}`
+      : "";
+    const summaryParts = [cpuLabel, driLabel];
+    if (pciLabel) summaryParts.push(pciLabel);
+    if (data.diagnosis) summaryParts.push(data.diagnosis);
+    hwEl.textContent = summaryParts.join(" • ");
+    if (data.gpu_available) {
+      hwEl.style.color = "#22c55e";
+    } else if (settingsForm.elements["inference_backend"]?.value === "openvino_gpu") {
+      hwEl.style.color = "#f59e0b";
+    } else {
+      hwEl.style.color = "";
+    }
+  } catch (err) {
+    if (isModalOpen(settingsModal)) {
+      hwEl.textContent = `Hardware check failed: ${err.message || err}`;
+      hwEl.style.color = "#ef4444";
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+document.getElementById("btnRefreshHardware")?.addEventListener("click", () => {
+  refreshHardwareDiagnostics(true);
+});
+
 // Settings & Snapshot dialogs
 document.getElementById("btnSettings").addEventListener("click", async () => {
   const res = await fetch("api/config");
@@ -1661,6 +1707,7 @@ document.getElementById("btnSettings").addEventListener("click", async () => {
   if (haOut) haOut.textContent = "";
   updateCvRuntimeHint();
   openModalDialog(settingsModal);
+  refreshHardwareDiagnostics(false);
 });
 
 document.getElementById("btnCloseSettings").addEventListener("click", () => closeModalDialog(settingsModal));

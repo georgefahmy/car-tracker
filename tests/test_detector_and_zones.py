@@ -1148,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.23"
+    assert expected_ver == "1.0.24"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1777,12 +1777,14 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         assert "role" not in attrs
         assert "aria-modal" not in attrs
 
-    assert "static/icon.png?v=21" in collector.links
-    assert "static/styles.css?v=21" in collector.links
-    assert "static/app.js?v=21" in collector.scripts
+    assert "static/icon.png?v=22" in collector.links
+    assert "static/styles.css?v=22" in collector.links
+    assert "static/app.js?v=22" in collector.scripts
     assert 'class="settings-bento"' in html
     assert 'id="kpiPersonAlerts"' in html
     assert 'id="btnDrawPersonZone"' in html
+    assert 'id="btnRefreshHardware"' in html
+    assert 'id="hwDiagnosticHint"' in html
     assert "Scheduled Person Watch" in html
     assert 'class="toggle-sub"' not in html
     assert collector.buttons_inside_label == []
@@ -2117,6 +2119,199 @@ def test_scheduled_person_zone_counter_time_windows_and_snapshots(tmp_path: Path
         reset_r = client.post("/api/stats/reset")
         assert reset_r.status_code == 200
         assert client.get("/api/stats").json()["person_alerts"] == 0
+
+
+def test_hardware_diagnostics_dockerfile_and_thermal_priority(tmp_path: Path) -> None:
+    import sys
+    import types
+
+    from app.detector import collect_hardware_diagnostics
+    from app.stream import StreamWorker
+
+    for df_path in (Path("car_tracker/Dockerfile"), Path("Dockerfile")):
+        txt = df_path.read_text(encoding="utf-8")
+        assert "FROM ubuntu:24.04" in txt
+        assert "intel-opencl-icd" in txt
+        assert "ocl-icd-libopencl1" in txt
+        assert "libze-intel-gpu1" in txt
+        assert "libglib2.0-0t64" in txt
+        assert "libgomp1" in txt
+        assert "ca-certificates" in txt
+        for line in txt.splitlines():
+            if "intel-opencl-icd" in line:
+                assert "|| true" not in line
+
+    # (a) Working Intel Alder Lake-N (0x8086 / 0x46d1) + renderD128 + intel.icd + OpenVINO GPU
+    root_a = tmp_path / "host_a"
+    cpuinfo_a = root_a / "cpuinfo"
+    dmi_a = root_a / "dmi"
+    pci_a = root_a / "pci" / "0000:00:02.0"
+    dri_a = root_a / "dri"
+    icd_a = root_a / "vendors"
+    osrel_a = root_a / "os-release"
+    for d in (dmi_a, pci_a, dri_a, icd_a):
+        d.mkdir(parents=True, exist_ok=True)
+    cpuinfo_a.write_text(
+        "processor\t: 0\nmodel name\t: Intel(R) N100\nflags\t\t: fpu vme avx2\n",
+        encoding="utf-8",
+    )
+    (dmi_a / "sys_vendor").write_text("AZW\n", encoding="utf-8")
+    (dmi_a / "product_name").write_text("MINI S\n", encoding="utf-8")
+    (pci_a / "class").write_text("0x030000\n", encoding="utf-8")
+    (pci_a / "vendor").write_text("0x8086\n", encoding="utf-8")
+    (pci_a / "device").write_text("0x46d1\n", encoding="utf-8")
+    (pci_a / "driver").write_text("i915\n", encoding="utf-8")
+    (dri_a / "card0").write_bytes(b"")
+    (dri_a / "renderD128").write_bytes(b"")
+    (icd_a / "intel.icd").write_text("/usr/lib/x86_64-linux-gnu/intel-opencl/libigdrcl.so\n", encoding="utf-8")
+    osrel_a.write_text('PRETTY_NAME="Ubuntu 24.04.2 LTS"\n', encoding="utf-8")
+
+    class _FakeOvGpuCore:
+        available_devices = ["CPU", "GPU"]
+
+        @staticmethod
+        def get_property(dev: str, prop: str) -> str:
+            if dev == "GPU":
+                return "Intel(R) UHD Graphics [0x46d1] (iGPU)"
+            return "Intel(R) N100"
+
+    class _FakeOvCpuCore:
+        available_devices = ["CPU"]
+
+        @staticmethod
+        def get_property(dev: str, prop: str) -> str:
+            return "Simulated CPU"
+
+    fake_ov = types.ModuleType("openvino")
+    prev_ov = sys.modules.get("openvino")
+    try:
+        fake_ov.Core = _FakeOvGpuCore  # type: ignore[attr-defined]
+        sys.modules["openvino"] = fake_ov
+        diag_a = collect_hardware_diagnostics(
+            cpuinfo_path=cpuinfo_a,
+            dmi_dir=dmi_a,
+            pci_devices_dir=root_a / "pci",
+            dri_dir=dri_a,
+            opencl_vendors_dir=icd_a,
+            os_release_path=osrel_a,
+            run_clinfo=False,
+        )
+        assert diag_a["cpu_model"] == "Intel(R) N100"
+        assert diag_a["gpu_available"] is True
+        assert "0x46d1" in diag_a["gpu_name"]
+        assert diag_a["pci_gpus"][0]["description"] == "Intel Alder Lake-N UHD Graphics"
+        assert diag_a["short_fallback_reason"] == ""
+
+        # Switch fake OpenVINO to CPU-only for failure cases (b), (c), (d)
+        fake_ov.Core = _FakeOvCpuCore  # type: ignore[attr-defined]
+
+        # (b) Missing OpenCL ICD (mirrors old Debian Trixie silent apt failure)
+        empty_icd = root_a / "empty_vendors"
+        empty_icd.mkdir(parents=True, exist_ok=True)
+        diag_b = collect_hardware_diagnostics(
+            cpuinfo_path=cpuinfo_a,
+            dmi_dir=dmi_a,
+            pci_devices_dir=root_a / "pci",
+            dri_dir=dri_a,
+            opencl_vendors_dir=empty_icd,
+            os_release_path=osrel_a,
+            run_clinfo=False,
+        )
+        assert diag_b["gpu_available"] is False
+        assert "Missing Intel OpenCL ICD" in diag_b["short_fallback_reason"]
+        assert "/etc/OpenCL/vendors" in diag_b["diagnosis"]
+
+        # (c) Virtualized host without /dev/dri/renderD*
+        root_vm = tmp_path / "host_vm"
+        cpu_vm = root_vm / "cpuinfo"
+        dmi_vm = root_vm / "dmi"
+        dri_vm = root_vm / "dri"
+        pci_vm = root_vm / "pci" / "0000:00:02.0"
+        for d in (dmi_vm, dri_vm, pci_vm):
+            d.mkdir(parents=True, exist_ok=True)
+        cpu_vm.write_text(
+            "model name\t: Common KVM processor\nflags\t\t: sse4_2 hypervisor\n",
+            encoding="utf-8",
+        )
+        (dmi_vm / "sys_vendor").write_text("QEMU\n", encoding="utf-8")
+        (pci_vm / "class").write_text("0x030000\n", encoding="utf-8")
+        (pci_vm / "vendor").write_text("0x1234\n", encoding="utf-8")
+        (pci_vm / "device").write_text("0x1111\n", encoding="utf-8")
+        diag_c = collect_hardware_diagnostics(
+            cpuinfo_path=cpu_vm,
+            dmi_dir=dmi_vm,
+            pci_devices_dir=root_vm / "pci",
+            dri_dir=dri_vm,
+            opencl_vendors_dir=empty_icd,
+            os_release_path=osrel_a,
+            run_clinfo=False,
+        )
+        assert diag_c["virtualized"] is True
+        assert diag_c["gpu_available"] is False
+        assert "VM" in diag_c["short_fallback_reason"]
+
+        # (d) AMD GPU (OpenVINO GPU unsupported)
+        root_amd = tmp_path / "host_amd"
+        pci_amd = root_amd / "pci" / "0000:03:00.0"
+        pci_amd.mkdir(parents=True, exist_ok=True)
+        (pci_amd / "class").write_text("0x030000\n", encoding="utf-8")
+        (pci_amd / "vendor").write_text("0x1002\n", encoding="utf-8")
+        (pci_amd / "device").write_text("0x15e7\n", encoding="utf-8")
+        diag_d = collect_hardware_diagnostics(
+            cpuinfo_path=cpuinfo_a,
+            dmi_dir=dmi_a,
+            pci_devices_dir=root_amd / "pci",
+            dri_dir=dri_a,
+            opencl_vendors_dir=empty_icd,
+            os_release_path=osrel_a,
+            run_clinfo=False,
+        )
+        assert diag_d["gpu_available"] is False
+        assert "AMD GPU" in diag_d["diagnosis"]
+        assert "AMD GPU detected" in diag_d["short_fallback_reason"]
+    finally:
+        if prev_ov is None:
+            sys.modules.pop("openvino", None)
+        else:
+            sys.modules["openvino"] = prev_ov
+
+    # Thermal priority: prefer x86_pkg_temp over static ACPI thermal_zone0 (27.8 C)
+    therm_root = tmp_path / "thermal"
+    z0 = therm_root / "thermal_zone0"
+    z1 = therm_root / "thermal_zone1"
+    hw_root = tmp_path / "hwmon"
+    z0.mkdir(parents=True)
+    z1.mkdir(parents=True)
+    (z0 / "type").write_text("acpitz\n", encoding="utf-8")
+    (z0 / "temp").write_text("27800\n", encoding="utf-8")
+    (z1 / "type").write_text("x86_pkg_temp\n", encoding="utf-8")
+    (z1 / "temp").write_text("48500\n", encoding="utf-8")
+    assert StreamWorker._read_cpu_temp_c(thermal_root=therm_root, hwmon_root=hw_root) == 48.5
+
+    # End-to-end GET /api/system/hardware & ?refresh=true
+    settings = Settings(data_dir=str(tmp_path / "data"), ha_enabled=False)
+    app = create_app(settings=settings, start_worker=False)
+    with TestClient(app) as client:
+        r1 = client.get("/api/system/hardware")
+        assert r1.status_code == 200
+        body = r1.json()
+        for key in (
+            "cpu_model",
+            "cpu_cores",
+            "pci_gpus",
+            "dri_devices",
+            "opencl_icds",
+            "openvino",
+            "onnxruntime",
+            "gpu_available",
+            "diagnosis",
+            "detector_runtime",
+        ):
+            assert key in body
+        r2 = client.get("/api/system/hardware?refresh=true")
+        assert r2.status_code == 200
+        assert "diagnosis" in r2.json()
+
 
 
 

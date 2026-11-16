@@ -552,9 +552,10 @@ dialog.modal-settings {
   padding: 5px 10px;
   font-size: 0.8rem;
 }
-.ha-hint {
+.ha-hint,
+.hw-hint {
   margin: -2px 0 0;
-  font-size: 0.76rem;
+  font-size: 0.75rem;
   line-height: 1.25;
 }
 .form-grid {

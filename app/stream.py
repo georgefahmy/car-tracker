@@ -36,6 +36,7 @@ from app.detector import (
     RedZoneMonitor,
     TrackedDetection,
     annotate_frame,
+    collect_hardware_diagnostics,
     compute_optimal_input_hw,
     filter_excluded_tracks,
     is_dfine_model,
@@ -216,6 +217,7 @@ class StreamWorker:
         self._last_viewer_ts: float = 0.0
         self._snap_client: ReolinkHTTPSnapClient | None = None
         self._active_violation_snaps: dict[tuple[int, str], dict[str, Any]] = {}
+        self._hw_diag_cache: tuple[float, dict[str, Any]] | None = None
 
     def get_source_url(self, cfg: RuntimeConfig | None = None) -> str:
         c = cfg or self.config
@@ -363,12 +365,78 @@ class StreamWorker:
             return None if self._latest_raw_frame is None else self._latest_raw_frame.copy()
 
     @staticmethod
+    def _read_cpu_temp_c(
+        thermal_root: Path = Path("/sys/class/thermal"),
+        hwmon_root: Path = Path("/sys/class/hwmon"),
+    ) -> float | None:
+        """Read host CPU temperature, preferring x86_pkg_temp / coretemp over ACPI stubs."""
+        preferred_types = (
+            "x86_pkg_temp",
+            "cpu-thermal",
+            "cpu_thermal",
+            "soc_thermal",
+            "k10temp",
+            "coretemp",
+            "tcpu",
+        )
+        first_valid: float | None = None
+        if thermal_root.exists():
+            try:
+                for zone_dir in sorted(thermal_root.glob("thermal_zone*")):
+                    temp_file = zone_dir / "temp"
+                    if not temp_file.exists():
+                        continue
+                    try:
+                        val = int(temp_file.read_text(encoding="utf-8").strip()) / 1000.0
+                    except Exception:
+                        continue
+                    if not (0.0 < val < 130.0):
+                        continue
+                    if first_valid is None:
+                        first_valid = val
+                    type_file = zone_dir / "type"
+                    ztype = ""
+                    if type_file.exists():
+                        try:
+                            ztype = (
+                                type_file.read_text(encoding="utf-8", errors="ignore").strip().lower()
+                            )
+                        except Exception:
+                            pass
+                    if ztype in preferred_types:
+                        return round(val, 1)
+            except Exception:
+                pass
+
+        if hwmon_root.exists():
+            try:
+                for hw_dir in sorted(hwmon_root.glob("hwmon*")):
+                    name_file = hw_dir / "name"
+                    temp_file = hw_dir / "temp1_input"
+                    if not (name_file.exists() and temp_file.exists()):
+                        continue
+                    try:
+                        hname = (
+                            name_file.read_text(encoding="utf-8", errors="ignore").strip().lower()
+                        )
+                        if hname not in ("coretemp", "k10temp", "zenpower", "cpu_thermal"):
+                            continue
+                        val = int(temp_file.read_text(encoding="utf-8").strip()) / 1000.0
+                    except Exception:
+                        continue
+                    if 0.0 < val < 130.0:
+                        return round(val, 1)
+            except Exception:
+                pass
+
+        return round(first_valid, 1) if first_valid is not None else None
+
+    @staticmethod
     def _get_system_metrics() -> dict[str, Any]:
-        """Collect host CPU, memory, process RAM, and Raspberry Pi CPU temperature."""
+        """Collect host CPU, memory, process RAM, and CPU temperature."""
         cpu_percent: float | None = None
         memory_percent: float | None = None
         app_ram_mb: float | None = None
-        cpu_temp_c: float | None = None
 
         if psutil is not None:
             try:
@@ -378,13 +446,7 @@ class StreamWorker:
             except Exception:
                 pass
 
-        thermal_path = Path("/sys/class/thermal/thermal_zone0/temp")
-        if thermal_path.exists():
-            try:
-                raw_temp = thermal_path.read_text(encoding="utf-8").strip()
-                cpu_temp_c = round(int(raw_temp) / 1000.0, 1)
-            except Exception:
-                pass
+        cpu_temp_c = StreamWorker._read_cpu_temp_c()
 
         return {
             "cpu_percent": cpu_percent,
@@ -530,6 +592,44 @@ class StreamWorker:
                 "model_loading_target": self._model_loading_target,
                 "model_error": self._model_error,
             }
+
+    def get_hardware_diagnostics(self, refresh: bool = False) -> dict[str, Any]:
+        """Collect host hardware/GPU diagnostics with a 15-second cache."""
+        now_mono = time.monotonic()
+        cached = self._hw_diag_cache
+        if not refresh and cached is not None and (now_mono - cached[0]) < 15.0:
+            base = dict(cached[1])
+        else:
+            base = collect_hardware_diagnostics(run_clinfo=True)
+            self._hw_diag_cache = (now_mono, dict(base))
+
+        with self._lock:
+            det = self._detector
+            detector_runtime = {
+                "requested_backend": (
+                    getattr(det, "requested_backend", self.config.inference_backend)
+                    if det is not None
+                    else self.config.inference_backend
+                ),
+                "active_backend": (
+                    getattr(det, "backend", self.config.inference_backend)
+                    if det is not None
+                    else self.config.inference_backend
+                ),
+                "active_device": getattr(det, "device", "") if det is not None else "",
+                "backend_fallback": getattr(det, "fallback_note", "") if det is not None else "",
+                "yolo_model": (
+                    getattr(det, "model_name", self.config.yolo_model)
+                    if det is not None
+                    else self.config.yolo_model
+                ),
+                "input_resolution": (
+                    getattr(det, "input_resolution_label", "") if det is not None else ""
+                ),
+            }
+        base["detector_runtime"] = detector_runtime
+        base["cpu_temp_c"] = self._read_cpu_temp_c()
+        return base
 
     def _ensure_detector(self, frame_wh: tuple[int, int] | None = None) -> ObjectDetector | None:
         cfg = self.config

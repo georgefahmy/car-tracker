@@ -1,11 +1,24 @@
-FROM python:3.12-slim
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_PYTHON_PREFERENCE=system
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    python3 \
     git \
     jq \
     libgl1 \
-    libglib2.0-0 \
-    && if [ "$(dpkg --print-architecture)" = "amd64" ]; then apt-get install -y --no-install-recommends ocl-icd-libopencl1 intel-opencl-icd || true; fi \
+    libglib2.0-0t64 \
+    libgomp1 \
+    && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+        apt-get install -y --no-install-recommends \
+            ocl-icd-libopencl1 \
+            intel-opencl-icd \
+            libze-intel-gpu1 \
+            libze1 \
+            clinfo; \
+    fi \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv

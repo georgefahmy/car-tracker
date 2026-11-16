@@ -5,6 +5,8 @@ import math
 import os
 import platform
 import shutil
+import subprocess
+import sys
 import time
 import types
 from collections import deque
@@ -1472,7 +1474,11 @@ class _DFineRunner:
                             )
                         compiled = True
                     else:
-                        self.fallback_note = "Intel GPU unavailable; fell back to ONNX"
+                        diag = collect_hardware_diagnostics(run_clinfo=False)
+                        self.fallback_note = (
+                            diag["short_fallback_reason"]
+                            or "Intel GPU unavailable; fell back to ONNX"
+                        )
                 else:
                     self._ov_compiled = core.compile_model(str(self.onnx_path), "CPU")
                     self.backend = "openvino"
@@ -1487,11 +1493,14 @@ class _DFineRunner:
                         )
                     compiled = True
             except Exception as exc:
-                self.fallback_note = (
-                    "Intel GPU unavailable; fell back to ONNX"
-                    if req_backend == "openvino_gpu"
-                    else f"OpenVINO unavailable ({exc}); fell back to ONNX"
-                )
+                if req_backend == "openvino_gpu":
+                    diag = collect_hardware_diagnostics(run_clinfo=False)
+                    self.fallback_note = (
+                        diag["short_fallback_reason"]
+                        or "Intel GPU unavailable; fell back to ONNX"
+                    )
+                else:
+                    self.fallback_note = f"OpenVINO unavailable ({exc}); fell back to ONNX"
 
         if not compiled:
             import onnxruntime as ort
@@ -1858,6 +1867,334 @@ def _ensure_tracker_yaml(models_dir: Path | None, conf: float = 0.35) -> str:
     return str(yaml_path)
 
 
+def collect_hardware_diagnostics(
+    cpuinfo_path: Path = Path("/proc/cpuinfo"),
+    dmi_dir: Path = Path("/sys/class/dmi/id"),
+    pci_devices_dir: Path = Path("/sys/bus/pci/devices"),
+    dri_dir: Path = Path("/dev/dri"),
+    opencl_vendors_dir: Path = Path("/etc/OpenCL/vendors"),
+    os_release_path: Path = Path("/etc/os-release"),
+    run_clinfo: bool = True,
+) -> dict[str, Any]:
+    """Inspect host CPU, virtualization, PCI GPUs, /dev/dri nodes, OpenCL ICDs, and ML runtimes."""
+    os_release = platform.platform()
+    if os_release_path.exists():
+        try:
+            for line in os_release_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if line.startswith("PRETTY_NAME="):
+                    os_release = line.split("=", 1)[1].strip().strip('"')
+                    break
+        except OSError:
+            pass
+
+    cpu_model = ""
+    hypervisor_flag = False
+    if cpuinfo_path.exists():
+        try:
+            for line in cpuinfo_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                lower = line.lower()
+                if not cpu_model and (
+                    lower.startswith("model name")
+                    or lower.startswith("model\t")
+                    or lower.startswith("hardware")
+                ) and ":" in line:
+                    cpu_model = line.split(":", 1)[1].strip()
+                elif lower.startswith("flags") and ":" in line:
+                    flags = line.split(":", 1)[1].split()
+                    if "hypervisor" in flags:
+                        hypervisor_flag = True
+        except OSError:
+            pass
+    if not cpu_model:
+        cpu_model = platform.processor() or platform.machine()
+    cpu_cores = int(os.cpu_count() or 1)
+
+    board_parts: list[str] = []
+    if dmi_dir.exists():
+        for fname in ("sys_vendor", "product_name"):
+            fpath = dmi_dir / fname
+            if fpath.exists():
+                try:
+                    val = fpath.read_text(encoding="utf-8", errors="ignore").replace("\x00", "").strip()
+                    if val and val not in board_parts:
+                        board_parts.append(val)
+                except OSError:
+                    pass
+    board = " ".join(board_parts).strip()
+    if not board:
+        dt_model = Path("/proc/device-tree/model")
+        if dt_model.exists():
+            try:
+                board = dt_model.read_text(encoding="utf-8", errors="ignore").replace("\x00", "").strip()
+            except OSError:
+                pass
+
+    vendor_map = {
+        "0x8086": "Intel",
+        "0x1002": "AMD",
+        "0x10de": "NVIDIA",
+        "0x1af4": "VirtIO",
+        "0x1234": "QEMU/Bochs",
+        "0x15ad": "VMware",
+    }
+    known_devices = {
+        "0x46d0": "Intel Alder Lake-N UHD Graphics",
+        "0x46d1": "Intel Alder Lake-N UHD Graphics",
+        "0x46d2": "Intel Alder Lake-N UHD Graphics",
+        "0x46d3": "Intel Twin Lake UHD Graphics",
+        "0x46d4": "Intel Twin Lake UHD Graphics",
+        "0x4e55": "Intel Jasper Lake UHD Graphics",
+        "0x4e61": "Intel Jasper Lake UHD Graphics",
+        "0x4e71": "Intel Jasper Lake UHD Graphics",
+        "0x9a49": "Intel Iris Xe Graphics",
+        "0x46a6": "Intel Iris Xe Graphics",
+        "0xa7a0": "Intel Iris Xe Graphics",
+    }
+    pci_gpus: list[dict[str, str]] = []
+    if pci_devices_dir.exists():
+        try:
+            for dev_dir in sorted(pci_devices_dir.iterdir()):
+                cls_path = dev_dir / "class"
+                if not cls_path.exists():
+                    continue
+                try:
+                    cls_hex = cls_path.read_text(encoding="utf-8", errors="ignore").strip().lower()
+                except OSError:
+                    continue
+                if not cls_hex.startswith("0x03"):
+                    continue
+                vendor_id = ""
+                device_id = ""
+                driver = ""
+                try:
+                    vendor_id = (dev_dir / "vendor").read_text(encoding="utf-8", errors="ignore").strip().lower()
+                except OSError:
+                    pass
+                try:
+                    device_id = (dev_dir / "device").read_text(encoding="utf-8", errors="ignore").strip().lower()
+                except OSError:
+                    pass
+                drv_path = dev_dir / "driver"
+                try:
+                    if drv_path.is_symlink():
+                        driver = drv_path.resolve().name
+                    elif drv_path.is_file():
+                        driver = drv_path.read_text(encoding="utf-8", errors="ignore").strip()
+                    elif drv_path.exists():
+                        driver = drv_path.name
+                except OSError:
+                    pass
+                vendor_name = vendor_map.get(vendor_id, vendor_id or "Unknown")
+                pci_gpus.append(
+                    {
+                        "slot": dev_dir.name,
+                        "vendor_id": vendor_id,
+                        "vendor": vendor_name,
+                        "device_id": device_id,
+                        "description": known_devices.get(device_id, f"{vendor_name} GPU ({device_id})" if device_id else vendor_name),
+                        "class_id": cls_hex,
+                        "driver": driver,
+                    }
+                )
+        except OSError:
+            pass
+
+    vm_tokens = ("qemu", "kvm", "virtualbox", "vmware", "proxmox", "standard pc", "bochs", "hyper-v")
+    physical_vendors = {"Intel", "AMD", "NVIDIA"}
+    virtualized = bool(
+        hypervisor_flag
+        or any(tok in board.lower() for tok in vm_tokens)
+        or (pci_gpus and all(g["vendor"] not in physical_vendors for g in pci_gpus))
+    )
+
+    dri_devices: list[dict[str, Any]] = []
+    if dri_dir.exists():
+        try:
+            for entry in sorted(dri_dir.iterdir()):
+                try:
+                    st = entry.stat()
+                    dri_devices.append(
+                        {
+                            "name": entry.name,
+                            "path": str(entry),
+                            "readable": bool(os.access(entry, os.R_OK)),
+                            "writable": bool(os.access(entry, os.W_OK)),
+                            "gid": int(st.st_gid),
+                            "mode": oct(st.st_mode & 0o777),
+                        }
+                    )
+                except OSError:
+                    dri_devices.append(
+                        {
+                            "name": entry.name,
+                            "path": str(entry),
+                            "readable": False,
+                            "writable": False,
+                            "gid": -1,
+                            "mode": "unknown",
+                        }
+                    )
+        except OSError:
+            pass
+
+    opencl_icds: list[str] = []
+    if opencl_vendors_dir.exists():
+        try:
+            opencl_icds = sorted(f.name for f in opencl_vendors_dir.glob("*.icd"))
+        except OSError:
+            pass
+
+    clinfo_summary: list[str] = []
+    if run_clinfo and shutil.which("clinfo"):
+        try:
+            proc = subprocess.run(
+                ["clinfo", "--list"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            lines = [ln.strip() for ln in (proc.stdout or proc.stderr or "").splitlines() if ln.strip()]
+            clinfo_summary = lines[:8]
+        except Exception:
+            pass
+
+    ov_info: dict[str, Any] = {
+        "installed": False,
+        "available_devices": [],
+        "device_names": {},
+        "gpu_available": False,
+    }
+    try:
+        import openvino as ov
+
+        ov_info["installed"] = True
+        core = ov.Core()
+        devs = list(core.available_devices)
+        ov_info["available_devices"] = devs
+        dev_names: dict[str, str] = {}
+        for d in devs:
+            try:
+                dev_names[d] = str(core.get_property(d, "FULL_DEVICE_NAME"))
+            except Exception:
+                dev_names[d] = d
+        ov_info["device_names"] = dev_names
+        ov_info["gpu_available"] = any(d == "GPU" or d.startswith("GPU.") for d in devs)
+    except Exception:
+        pass
+
+    ort_info: dict[str, Any] = {"installed": False, "version": "", "providers": []}
+    try:
+        import onnxruntime as ort
+
+        ort_info["installed"] = True
+        ort_info["version"] = str(getattr(ort, "__version__", ""))
+        ort_info["providers"] = list(ort.get_available_providers())
+    except Exception:
+        pass
+
+    torch_info: dict[str, bool] = {"cuda_available": False, "mps_available": False}
+    try:
+        import torch
+
+        torch_info["cuda_available"] = bool(torch.cuda.is_available())
+        torch_info["mps_available"] = bool(
+            hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+        )
+    except Exception:
+        pass
+
+    has_linux_probe = any(
+        p.exists() for p in (cpuinfo_path, pci_devices_dir, dri_dir, opencl_vendors_dir)
+    )
+    gpu_available = False
+    gpu_name = ""
+    diagnosis = ""
+    short_fallback_reason = ""
+
+    if ov_info["gpu_available"]:
+        gpu_dev = next(
+            (d for d in ov_info["available_devices"] if d == "GPU" or d.startswith("GPU.")),
+            "GPU",
+        )
+        gpu_name = ov_info["device_names"].get(gpu_dev) or "Intel GPU"
+        gpu_available = True
+        diagnosis = f"Intel GPU ready via OpenVINO ({gpu_name})"
+    elif torch_info["cuda_available"]:
+        gpu_available = True
+        gpu_name = "NVIDIA CUDA GPU"
+        diagnosis = "NVIDIA CUDA GPU available"
+        short_fallback_reason = "OpenVINO requires Intel GPU; CUDA available"
+    elif torch_info["mps_available"] and not has_linux_probe:
+        gpu_available = True
+        gpu_name = "Apple Metal (MPS)"
+        diagnosis = "Apple Metal (MPS) GPU available (OpenVINO Intel GPU requires Linux x86_64)"
+        short_fallback_reason = "Intel GPU unavailable on macOS; fell back to ONNX"
+    else:
+        vendors = {g["vendor"] for g in pci_gpus}
+        render_nodes = [d for d in dri_devices if d["name"].startswith("renderD")]
+        render_rw = any(d["readable"] and d["writable"] for d in render_nodes)
+        if pci_gpus:
+            gpu_name = pci_gpus[0]["description"]
+        if "AMD" in vendors and "Intel" not in vendors:
+            diagnosis = "AMD GPU detected; OpenVINO GPU only supports Intel GPUs — use ONNX Runtime CPU."
+            short_fallback_reason = "AMD GPU detected (OpenVINO requires Intel); fell back to ONNX"
+        elif not render_nodes and virtualized:
+            diagnosis = (
+                "Virtualized host has no /dev/dri/renderD* node — pass the host PCIe iGPU "
+                "through to the Home Assistant VM."
+            )
+            short_fallback_reason = "No /dev/dri/renderD* in VM (enable iGPU passthrough); fell back to ONNX"
+        elif not render_nodes:
+            diagnosis = (
+                "No /dev/dri/renderD* GPU render node exposed — verify host iGPU is enabled in BIOS "
+                "and Add-on Protection Mode allows /dev/dri."
+            )
+            short_fallback_reason = "No /dev/dri/renderD* device exposed; fell back to ONNX"
+        elif not render_rw:
+            diagnosis = (
+                "/dev/dri/renderD* exists but lacks read/write permission — disable Protection Mode "
+                "on the Add-on Info page."
+            )
+            short_fallback_reason = "/dev/dri/renderD* permission denied (check Protection Mode); fell back to ONNX"
+        elif not opencl_icds:
+            diagnosis = (
+                "/dev/dri/renderD* is accessible, but no OpenCL ICD is installed in "
+                "/etc/OpenCL/vendors — rebuild/update the add-on container."
+            )
+            short_fallback_reason = "Missing Intel OpenCL ICD in container; fell back to ONNX"
+        elif not ov_info["installed"]:
+            diagnosis = "OpenVINO runtime is not installed on this platform/architecture."
+            short_fallback_reason = "OpenVINO not installed; fell back to ONNX"
+        else:
+            diagnosis = (
+                f"Render node and OpenCL ICD ({', '.join(opencl_icds)}) exist, but OpenVINO only found "
+                f"{ov_info['available_devices']} — check host kernel i915/xe driver or Protection Mode."
+            )
+            short_fallback_reason = "Intel GPU unavailable in OpenVINO; fell back to ONNX"
+
+    return {
+        "platform": sys.platform,
+        "arch": platform.machine(),
+        "kernel": platform.release(),
+        "os_release": os_release,
+        "cpu_model": cpu_model,
+        "cpu_cores": cpu_cores,
+        "board": board,
+        "virtualized": virtualized,
+        "pci_gpus": pci_gpus,
+        "dri_devices": dri_devices,
+        "opencl_icds": opencl_icds,
+        "clinfo_summary": clinfo_summary,
+        "openvino": ov_info,
+        "onnxruntime": ort_info,
+        "pytorch": torch_info,
+        "gpu_available": gpu_available,
+        "gpu_name": gpu_name,
+        "diagnosis": diagnosis,
+        "short_fallback_reason": short_fallback_reason,
+    }
+
+
 class ObjectDetector:
     """Ultralytics YOLO / D-FINE + ByteTrack wrapper with ONNX Runtime & OpenVINO acceleration."""
 
@@ -1946,7 +2283,11 @@ class ObjectDetector:
                 self.model = onnx_model
                 self.device = "cpu"
                 self.backend = "onnx"
-                self.fallback_note = "Intel GPU unavailable; fell back to ONNX"
+                diag = collect_hardware_diagnostics(run_clinfo=False)
+                self.fallback_note = (
+                    diag["short_fallback_reason"]
+                    or "Intel GPU unavailable; fell back to ONNX"
+                )
                 return
             fallback_reason = "OpenVINO GPU & ONNX unavailable"
         elif req_backend == "openvino":

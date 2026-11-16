@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.24
+- **Fix Intel iGPU OpenCL / Level Zero Container Drivers**: Switched the container base image from `python:3.12-slim` (Debian 13 Trixie, which removed `intel-opencl-icd` and caused silent OpenCL install failure) to `ubuntu:24.04` (Noble LTS) with `ocl-icd-libopencl1`, `intel-opencl-icd`, `libze-intel-gpu1`, `libze1`, and `clinfo` on `amd64` so Intel N95/N100/N150/N305/Core iGPUs are properly exposed to OpenVINO.
+- **Hardware & GPU Diagnostics (`GET /api/system/hardware`)**: Inspects CPU model/cores, virtualization flags, PCI GPU IDs, `/dev/dri/*` render-node permissions, OpenCL ICDs, and OpenVINO/ONNX/PyTorch backends; surfaces exact GPU fallback reasons in `#streamInfo` and Settings (`Check GPU`), and prioritizes `x86_pkg_temp`/`coretemp`/`k10temp` over fixed `acpitz` (`27.8°C`) thermal sensors.
+
 ## 1.0.23
 - **Scheduled After-Hours Person Watch**: Added configurable time-window person monitoring (`person_zone_enabled`, `person_zone_start_time`, `person_zone_end_time`, `person_zone_dwell_seconds`, `person_zone_scope`) supporting both same-day and cross-midnight schedules (default `00:00`–`05:00`), drawable `person_zone` polygons (`+ Draw Person Zone` in purple), and four watch scopes (`person_zones_or_frame`, `person_zones`, `red_zones`, `full_frame`).
 - **Person Alerts Counter, Snapshots & Home Assistant Entity**: Added persistent `person_alerts` counter in `stats_state`, 7th KPI card (`Person Zone Alerts`) with active/scheduled badge, high-resolution annotated `person_*.jpg` snapshots (skipping vehicle ALPR OCR) with live dwell updates, webhook alerts, daily summary totals (`person_alerts_today`), `car_tracker_person_alert` HA events, and `sensor.car_tracker_person_alerts`.

@@ -121,6 +121,10 @@ def create_app(settings: Settings | None = None, start_worker: bool = True) -> F
         state["hourly_traffic"] = db.get_hourly_traffic(limit=24)
         return state
 
+    @app.get("/api/system/hardware")
+    async def get_system_hardware(refresh: bool = Query(default=False)) -> dict:
+        return await asyncio.to_thread(worker.get_hardware_diagnostics, refresh)
+
     @app.post("/api/stats/reset")
     async def reset_stats() -> dict:
         worker.reset_all_counts()

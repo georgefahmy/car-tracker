@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Car Tracker & Red-Zone Monitor</title>
-  <link rel="icon" type="image/png" href="static/icon.png?v=21" />
-  <link rel="stylesheet" href="static/styles.css?v=21" />
+  <link rel="icon" type="image/png" href="static/icon.png?v=22" />
+  <link rel="stylesheet" href="static/styles.css?v=22" />
 </head>
 <body>
   <header class="topbar">
@@ -263,6 +263,9 @@
           <section class="settings-card bento-top" aria-labelledby="secCvTitle">
             <div class="card-head">
               <h3 id="secCvTitle">Detection Engine &amp; Performance</h3>
+              <div class="card-actions-inline">
+                <button type="button" class="btn btn-secondary btn-compact" id="btnRefreshHardware">Check GPU</button>
+              </div>
             </div>
             <div class="form-grid form-grid-2">
               <div class="field">
@@ -358,6 +361,7 @@
                 <div id="tip-motion_gate_enabled" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Uses fast OpenCV pixel-diff checks (ignoring Exclusion Masks) to throttle neural-net inference to ~0.5 FPS when the street is static, waking instantly to full FPS on motion while keeping active Red-Zone timers ticking.</div></div>
               </div>
             </div>
+            <p class="small muted hw-hint" id="hwDiagnosticHint" role="status"></p>
           </section>
 
           <section class="settings-card bento-top" aria-labelledby="secRulesTitle">
@@ -626,6 +630,6 @@
     </div>
   </dialog>
 
-  <script src="static/app.js?v=21"></script>
+  <script src="static/app.js?v=22"></script>
 </body>
 </html>

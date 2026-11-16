@@ -1855,7 +1855,8 @@ function violationImageUrl(v) {
   const rev = v.zone_id === "speeding"
     ? Math.round((Number(v.dwell_seconds) || 0) * 10)
     : Math.round(Number(v.dwell_seconds) || 0);
-  return `snapshots/${encodeURIComponent(v.snapshot_filename)}?t=${rev}`;
+  const tsTag = v.flagged_at ? `-${encodeURIComponent(v.flagged_at)}` : "";
+  return `snapshots/${encodeURIComponent(v.snapshot_filename)}?t=${rev}${tsTag}`;
 }
 
 function formatSnapshotTitle(v) {
@@ -1942,7 +1943,7 @@ async function refreshViolations() {
     const res = await fetch("api/violations?limit=30");
     const items = await res.json();
     const sig = JSON.stringify(
-      items.map((v) => [v.id, v.dwell_seconds, v.license_plate, v.snapshot_filename])
+      items.map((v) => [v.id, v.dwell_seconds, v.flagged_at, v.license_plate, v.snapshot_filename])
     );
     if (sig === lastViolationsSignature) return;
     lastViolationsSignature = sig;

@@ -44,6 +44,7 @@ from app.detector import (
     collect_hardware_diagnostics,
     compute_optimal_input_hw,
     filter_excluded_tracks,
+    format_dwell_duration,
     is_dfine_model,
     is_within_time_window,
 )
@@ -513,6 +514,7 @@ class StreamWorker:
             self._report_thread.join(timeout=2.0)
         if self._ha_thread:
             self._ha_thread.join(timeout=2.0)
+        self._flush_pending_violation_webhooks(synchronous=True)
         self.hotspot.save(force=True)
 
     @staticmethod
@@ -594,6 +596,7 @@ class StreamWorker:
             if old_source != new_source:
                 if self._detector is not None:
                     self._detector.reset()
+                self._flush_pending_violation_webhooks(synchronous=False)
                 self.hotspot.clear_tracks()
                 self._has_inferred_frame = False
                 with self._lock:
@@ -1067,13 +1070,17 @@ class StreamWorker:
         return True
 
     def _refresh_violation_snapshot(self, entry: dict[str, Any], dwell_seconds: float) -> bool:
-        """Re-render the initial violation snapshot using the updated parked dwell duration."""
-        clean_bytes: bytes = entry.get("clean_jpeg", b"")
-        if not clean_bytes:
-            return False
-        base_img = cv2.imdecode(np.frombuffer(clean_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if base_img is None:
-            return False
+        """Re-render the violation snapshot using the latest in-zone frame and parked dwell duration."""
+        latest_clean = entry.get("latest_clean_frame")
+        if isinstance(latest_clean, np.ndarray) and latest_clean.size > 0:
+            base_img = latest_clean.copy()
+        else:
+            clean_bytes: bytes = entry.get("clean_jpeg", b"")
+            if not clean_bytes:
+                return False
+            base_img = cv2.imdecode(np.frombuffer(clean_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if base_img is None:
+                return False
 
         orig_tid = int(entry["orig_track_id"])
         statuses = {k: dict(val) for k, val in entry["track_statuses"].items()}
@@ -1107,6 +1114,9 @@ class StreamWorker:
             target_status["in_red_zone"] = True
             target_status["violation"] = True
             target_status["dwell_seconds"] = round(float(dwell_seconds), 1)
+        plate_txt = str((entry.get("record") or {}).get("license_plate") or "").strip()
+        if plate_txt and not target_status.get("license_plate"):
+            target_status["license_plate"] = plate_txt
 
         updated_img = annotate_frame(
             frame=base_img,
@@ -1121,6 +1131,68 @@ class StreamWorker:
             person_dwell_threshold=float(entry.get("person_dwell_threshold", 2.0)),
         )
         return self._write_jpeg_atomic(entry["snap_path"], updated_img, quality=92)
+
+    def _finalize_violation_snap_entry(
+        self,
+        snap_entry: dict[str, Any],
+        dwell_seconds: float | None = None,
+        *,
+        synchronous_webhook: bool = False,
+    ) -> None:
+        final_dwell = round(
+            float(
+                dwell_seconds
+                if dwell_seconds is not None
+                else snap_entry.get("last_rendered_dwell", 0.0)
+            ),
+            1,
+        )
+        last_seen_iso = str(snap_entry.get("last_seen_iso") or "")
+        plate_txt = str((snap_entry.get("record") or {}).get("license_plate") or "")
+        self.db.update_violation_dwell(
+            snap_entry["violation_id"],
+            final_dwell,
+            flagged_at=last_seen_iso or None,
+            license_plate=plate_txt or None,
+        )
+        self._refresh_violation_snapshot(snap_entry, final_dwell)
+        snap_entry["last_rendered_dwell"] = final_dwell
+        with self._lock:
+            if (
+                self._last_violation is not None
+                and self._last_violation.get("id") == snap_entry["violation_id"]
+            ):
+                self._last_violation["dwell_seconds"] = final_dwell
+                if last_seen_iso:
+                    self._last_violation["flagged_at"] = last_seen_iso
+                if plate_txt:
+                    self._last_violation["license_plate"] = plate_txt
+        if snap_entry.get("webhook_pending"):
+            snap_entry["webhook_pending"] = False
+            wh_url = (
+                self.config.webhook_url.strip()
+                or str(snap_entry.get("webhook_url") or "").strip()
+            )
+            if wh_url:
+                rec_payload = dict(snap_entry.get("record") or {})
+                rec_payload["dwell_seconds"] = final_dwell
+                if last_seen_iso:
+                    rec_payload["flagged_at"] = last_seen_iso
+                if plate_txt:
+                    rec_payload["license_plate"] = plate_txt
+                self._dispatch_webhook(
+                    wh_url,
+                    rec_payload,
+                    snap_entry["snap_path"],
+                    synchronous=synchronous_webhook,
+                )
+
+    def _flush_pending_violation_webhooks(self, *, synchronous: bool = False) -> None:
+        with self._lock:
+            pending_entries = list(self._active_violation_snaps.values())
+            self._active_violation_snaps.clear()
+        for entry in pending_entries:
+            self._finalize_violation_snap_entry(entry, synchronous_webhook=synchronous)
 
     def _render_preview_jpeg(
         self,
@@ -1186,6 +1258,9 @@ class StreamWorker:
         counting_lines: list[Any],
         cfg: RuntimeConfig,
         speeding_events: list[dict[str, Any]],
+        *,
+        now_ts: float | None = None,
+        inferred_this_step: bool = True,
     ) -> None:
         if step.new_violations or speeding_events:
             snap_base = self._get_highres_violation_frame(frame, cfg)
@@ -1211,6 +1286,7 @@ class StreamWorker:
                             }
 
             clean_jpeg = b""
+            clean_source = snap_base
             if step.new_violations:
                 clean_source = (
                     self.hotspot.render_overlay(snap_base, alpha=0.45)
@@ -1235,6 +1311,7 @@ class StreamWorker:
                 annotation_scale=cfg.annotation_scale,
                 person_dwell_threshold=cfg.person_zone_dwell_seconds,
             )
+            evicted_entries: list[dict[str, Any]] = []
             for v in step.new_violations:
                 is_person_alert = v.vehicle_class == "person" or str(v.zone_id).startswith(
                     "person_zone"
@@ -1256,6 +1333,7 @@ class StreamWorker:
                     snapshot_filename=fname,
                     license_plate=plate_text,
                 )
+                rec_dict = rec.model_dump()
                 if clean_jpeg:
                     now_mono = time.monotonic()
                     snap_entry: dict[str, Any] = {
@@ -1265,6 +1343,8 @@ class StreamWorker:
                         "is_person": is_person_alert,
                         "snap_path": snap_path,
                         "clean_jpeg": clean_jpeg,
+                        "latest_clean_frame": clean_source.copy(),
+                        "clean_w": int(sw),
                         "tracks": copy.deepcopy(snap_tracks),
                         "track_statuses": copy.deepcopy(step.track_statuses),
                         "zones": copy.deepcopy(zones),
@@ -1274,7 +1354,12 @@ class StreamWorker:
                         "annotation_scale": float(cfg.annotation_scale),
                         "created_ts": now_mono,
                         "last_update_ts": now_mono,
+                        "last_highres_ts": now_mono,
                         "last_rendered_dwell": round(float(v.dwell_seconds), 1),
+                        "last_seen_iso": v.flagged_at,
+                        "record": dict(rec_dict),
+                        "webhook_url": cfg.webhook_url.strip(),
+                        "webhook_pending": not is_person_alert,
                     }
                     with self._lock:
                         expired_keys = [
@@ -1283,27 +1368,34 @@ class StreamWorker:
                             if (now_mono - float(val["created_ts"])) > 14400.0
                         ]
                         for ek in expired_keys:
-                            self._active_violation_snaps.pop(ek, None)
+                            popped = self._active_violation_snaps.pop(ek, None)
+                            if popped is not None:
+                                evicted_entries.append(popped)
                         while len(self._active_violation_snaps) >= 16:
                             oldest_key = min(
                                 self._active_violation_snaps,
                                 key=lambda k: float(self._active_violation_snaps[k]["created_ts"]),
                             )
-                            self._active_violation_snaps.pop(oldest_key, None)
+                            popped = self._active_violation_snaps.pop(oldest_key, None)
+                            if popped is not None:
+                                evicted_entries.append(popped)
                         self._active_violation_snaps[(int(v.track_id), v.zone_id)] = snap_entry
                 with self._lock:
-                    self._last_violation = rec.model_dump()
-                if cfg.webhook_url.strip():
-                    self._dispatch_webhook(cfg.webhook_url.strip(), rec.model_dump(), snap_path)
+                    self._last_violation = rec_dict
+                if cfg.webhook_url.strip() and (is_person_alert or not clean_jpeg):
+                    self._dispatch_webhook(cfg.webhook_url.strip(), rec_dict, snap_path)
                 if cfg.ha_enabled:
                     ha_event_type = (
                         "car_tracker_person_alert" if is_person_alert else "car_tracker_violation"
                     )
                     threading.Thread(
                         target=self.ha_publisher.fire_event,
-                        args=(ha_event_type, rec.model_dump(), cfg.ha_url, cfg.ha_token),
+                        args=(ha_event_type, rec_dict, cfg.ha_url, cfg.ha_token),
                         daemon=True,
                     ).start()
+
+            for ev in evicted_entries:
+                self._finalize_violation_snap_entry(ev)
 
             for sp in speeding_events:
                 now_iso = datetime.now(timezone.utc).isoformat()
@@ -1339,19 +1431,108 @@ class StreamWorker:
 
         if step.dwell_updates:
             now_mono = time.monotonic()
+            eff_now_ts = float(now_ts) if now_ts is not None else time.time()
             any_completed = False
+            track_ids_present = {t.track_id for t in tracks}
             for upd in step.dwell_updates:
                 with self._lock:
                     snap_entry = self._active_violation_snaps.get(upd.violation_key)
                 if snap_entry is None:
                     continue
                 rounded_dwell = round(float(upd.dwell_seconds), 1)
-                should_refresh = upd.completed or (
-                    (now_mono - float(snap_entry["last_update_ts"])) >= 5.0
-                    and int(round(rounded_dwell)) != int(round(float(snap_entry["last_rendered_dwell"])))
+                if upd.completed:
+                    with self._lock:
+                        popped_entry = self._active_violation_snaps.pop(upd.violation_key, None)
+                    if popped_entry is not None:
+                        self._finalize_violation_snap_entry(popped_entry, rounded_dwell)
+                    any_completed = True
+                    continue
+
+                should_refresh = (now_mono - float(snap_entry["last_update_ts"])) >= 5.0 and int(
+                    round(rounded_dwell)
+                ) != int(round(float(snap_entry["last_rendered_dwell"])))
+
+                orig_tid = int(snap_entry["orig_track_id"])
+                zone_flag_key = "in_person_zone" if snap_entry.get("is_person") else "in_red_zone"
+                in_zone_active = (
+                    inferred_this_step
+                    and orig_tid in track_ids_present
+                    and bool((step.track_statuses.get(orig_tid) or {}).get(zone_flag_key))
                 )
+                if in_zone_active:
+                    snap_entry["last_seen_iso"] = (
+                        datetime.fromtimestamp(eff_now_ts, tz=timezone.utc).astimezone().isoformat()
+                    )
+                    fresh_base: np.ndarray | None = None
+                    if w >= int(snap_entry.get("clean_w", 0)):
+                        fresh_base = frame
+                    elif (
+                        should_refresh
+                        and (now_mono - float(snap_entry.get("last_highres_ts", 0.0))) >= 15.0
+                    ):
+                        cand = self._get_highres_violation_frame(frame, cfg)
+                        snap_entry["last_highres_ts"] = now_mono
+                        if cand.shape[1] >= int(snap_entry.get("clean_w", 0)):
+                            fresh_base = cand
+
+                    if fresh_base is not None:
+                        fh, fw = fresh_base.shape[:2]
+                        clean_src = (
+                            self.hotspot.render_overlay(fresh_base, alpha=0.45)
+                            if cfg.heatmap_enabled and self.hotspot is not None
+                            else fresh_base
+                        )
+                        snap_entry["latest_clean_frame"] = clean_src.copy()
+                        snap_entry["clean_w"] = int(fw)
+                        scaled_t = (
+                            tracks
+                            if (fw == w and fh == h)
+                            else self._scale_tracks(tracks, w, h, fw, fh)
+                        )
+                        snap_entry["tracks"] = copy.deepcopy(scaled_t)
+                        existing_plate = str(
+                            (snap_entry.get("record") or {}).get("license_plate")
+                            or (snap_entry.get("track_statuses", {}).get(orig_tid) or {}).get(
+                                "license_plate"
+                            )
+                            or ""
+                        )
+                        if (
+                            not existing_plate
+                            and should_refresh
+                            and cfg.alpr_enabled
+                            and not snap_entry.get("is_person")
+                        ):
+                            t_bbox = next(
+                                (t.bbox_xyxy for t in scaled_t if t.track_id == orig_tid), None
+                            )
+                            plate, plate_conf = self.alpr.read_plate(fresh_base, t_bbox)
+                            if plate:
+                                existing_plate = plate
+                                snap_entry.setdefault("record", {})["license_plate"] = plate
+                                with self._lock:
+                                    self._last_plate = {
+                                        "plate": plate,
+                                        "confidence": plate_conf,
+                                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                                    }
+                        merged_st = copy.deepcopy(step.track_statuses)
+                        if existing_plate:
+                            merged_st.setdefault(orig_tid, {})["license_plate"] = existing_plate
+                        snap_entry["track_statuses"] = merged_st
+                        snap_entry["zones"] = copy.deepcopy(zones)
+                        snap_entry["counting_lines"] = copy.deepcopy(counting_lines)
+                        snap_entry["annotation_scale"] = float(cfg.annotation_scale)
+
                 if should_refresh:
-                    self.db.update_violation_dwell(snap_entry["violation_id"], rounded_dwell)
+                    last_seen_iso = str(snap_entry.get("last_seen_iso") or "")
+                    plate_txt = str((snap_entry.get("record") or {}).get("license_plate") or "")
+                    self.db.update_violation_dwell(
+                        snap_entry["violation_id"],
+                        rounded_dwell,
+                        flagged_at=last_seen_iso or None,
+                        license_plate=plate_txt or None,
+                    )
                     self._refresh_violation_snapshot(snap_entry, rounded_dwell)
                     snap_entry["last_update_ts"] = now_mono
                     snap_entry["last_rendered_dwell"] = rounded_dwell
@@ -1361,10 +1542,10 @@ class StreamWorker:
                             and self._last_violation.get("id") == snap_entry["violation_id"]
                         ):
                             self._last_violation["dwell_seconds"] = rounded_dwell
-                if upd.completed:
-                    with self._lock:
-                        self._active_violation_snaps.pop(upd.violation_key, None)
-                    any_completed = True
+                            if last_seen_iso:
+                                self._last_violation["flagged_at"] = last_seen_iso
+                            if plate_txt:
+                                self._last_violation["license_plate"] = plate_txt
             if any_completed:
                 self._ha_wake_event.set()
 
@@ -1489,6 +1670,8 @@ class StreamWorker:
                     counting_lines=counting_lines,
                     cfg=cfg,
                     speeding_events=speeding_events,
+                    now_ts=now_ts,
+                    inferred_this_step=True,
                 )
                 track_statuses = step.track_statuses
                 active_cars = step.active_cars
@@ -1535,6 +1718,8 @@ class StreamWorker:
                         counting_lines=counting_lines,
                         cfg=cfg,
                         speeding_events=[],
+                        now_ts=now_ts,
+                        inferred_this_step=False,
                     )
                     track_statuses = step.track_statuses
                     active_cars = step.active_cars
@@ -1650,11 +1835,26 @@ class StreamWorker:
             self._stream_status = status
             self._last_error = error
 
-    def _dispatch_webhook(self, url: str, record: dict[str, Any], snap_path: Path) -> None:
+    def _dispatch_webhook(
+        self,
+        url: str,
+        record: dict[str, Any],
+        snap_path: Path,
+        *,
+        synchronous: bool = False,
+    ) -> None:
+        jpg_bytes: bytes | None = None
+        if "discord.com/api/webhooks" in url and snap_path.exists():
+            try:
+                jpg_bytes = snap_path.read_bytes()
+            except OSError:
+                jpg_bytes = None
+
         def _send() -> None:
             try:
                 import requests
 
+                dwell_txt = format_dwell_duration(float(record.get("dwell_seconds", 0.0)))
                 if record.get("zone_id") == "speeding":
                     msg = (
                         f"🚨 Speeding Alert: {record['vehicle_class'].upper()} #{record['track_id']} "
@@ -1665,29 +1865,31 @@ class StreamWorker:
                 ).startswith("person_zone"):
                     msg = (
                         f"🚶 After-Hours Person Alert: PERSON #{record['track_id']} "
-                        f"in {record['zone_name']} (dwell: {record['dwell_seconds']:.0f}s)"
+                        f"in {record['zone_name']} (dwell: {dwell_txt})"
                     )
                 else:
                     msg = (
                         f"🚨 Red-Zone Violation: {record['vehicle_class'].upper()} #{record['track_id']} "
-                        f"in {record['zone_name']} (dwell: {record['dwell_seconds']:.0f}s)"
+                        f"in {record['zone_name']} (dwell: {dwell_txt})"
                     )
                 if record.get("license_plate"):
                     msg = f"{msg} • 🪪 Plate: **{record['license_plate']}**"
-                if "discord.com/api/webhooks" in url:
-                    with open(snap_path, "rb") as f:
-                        requests.post(
-                            url,
-                            data={"content": msg},
-                            files={"file": (snap_path.name, f, "image/jpeg")},
-                            timeout=8,
-                        )
+                if "discord.com/api/webhooks" in url and jpg_bytes is not None:
+                    requests.post(
+                        url,
+                        data={"content": msg},
+                        files={"file": (snap_path.name, jpg_bytes, "image/jpeg")},
+                        timeout=8,
+                    )
                 else:
                     requests.post(url, json={"text": msg, "content": msg, "violation": record}, timeout=8)
             except Exception:
                 pass
 
-        threading.Thread(target=_send, daemon=True).start()
+        if synchronous:
+            _send()
+        else:
+            threading.Thread(target=_send, daemon=True).start()
 
     @staticmethod
     def build_daily_report_message(summary: dict[str, Any]) -> str:
@@ -1726,8 +1928,7 @@ class StreamWorker:
         self.monitor.reset()
         self.line_monitor.reset()
         self.hotspot.reset(preserve_stationary=True)
-        with self._lock:
-            self._active_violation_snaps.clear()
+        self._flush_pending_violation_webhooks(synchronous=False)
         self._rerender_latest_preview()
         self._ha_wake_event.set()
 
@@ -1991,6 +2192,7 @@ class StreamWorker:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                         if self._detector is not None:
                             self._detector.reset()
+                        self._flush_pending_violation_webhooks(synchronous=False)
                         self.hotspot.clear_tracks()
                         self.motion_gate.reset()
                         self._has_inferred_frame = False

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.33
+- **Final-Timestamped Red-Zone Discord / Webhook Alerts**: Deferred Red-Zone vehicle violation webhooks until the violation completes (or is flushed on shutdown, reset, source switch, or the 4-hour eviction cap), updating both the database record (`flagged_at`, `dwell_seconds`, `license_plate`) and the snapshot image from the vehicle's **last in-zone frame** before dispatching so Discord receives the end-of-violation camera timestamp and final `ILLEGAL PARK` dwell badge instead of the initial trigger frame.
+- **Live In-Zone Snapshot Tracking & Human-Readable Webhook Durations**: Kept live Web UI cards, Home Assistant events, Speeding alerts, and after-hours Person security alerts immediate while tracking the latest in-zone base frame without overwriting higher-resolution 4K HTTP Snap stills or capturing empty-street frames after departure, and formatted Discord/webhook dwell durations with `format_dwell_duration` (`e.g. 2m 30s`) reading finalized JPEG bytes synchronously before background upload.
+
 ## 1.0.32
 - **Persistent Cumulative Traffic Heatmap (Since Last Reset)**: Removed the exponential time decay (`decay = 1.0`) and added atomic disk persistence (`/data/heatmap.npy` + `/data/heatmap.meta.json`) saved every 30 seconds and on clean shutdown so accumulated traffic survives add-on restarts and updates.
 - **Motion-Weighted Path Trails & Parked-Car Filtering**: Draws smooth frame-to-frame path segments along moving trajectories while capping stationary parked-car heat (and inheriting dwell state across ByteTrack ID flicker or immediately after a live reset) so parked vehicles never wash out moving street or sidewalk traffic.

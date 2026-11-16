@@ -321,12 +321,28 @@ class Database:
             license_plate=license_plate,
         )
 
-    def update_violation_dwell(self, violation_id: int, dwell_seconds: float) -> None:
-        """Update the recorded parked duration (dwell_seconds) for an existing violation."""
+    def update_violation_dwell(
+        self,
+        violation_id: int,
+        dwell_seconds: float,
+        *,
+        flagged_at: str | None = None,
+        license_plate: str | None = None,
+    ) -> None:
+        """Update the recorded parked duration (and optional latest timestamp/plate) for an existing violation."""
+        sets = ["dwell_seconds = ?"]
+        params: list[Any] = [round(float(dwell_seconds), 1)]
+        if flagged_at is not None and flagged_at.strip():
+            sets.append("flagged_at = ?")
+            params.append(flagged_at.strip())
+        if license_plate is not None and license_plate.strip():
+            sets.append("license_plate = ?")
+            params.append(license_plate.strip())
+        params.append(int(violation_id))
         with self._lock:
             self._conn.execute(
-                "UPDATE violations SET dwell_seconds = ? WHERE id = ?",
-                (round(float(dwell_seconds), 1), int(violation_id)),
+                f"UPDATE violations SET {', '.join(sets)} WHERE id = ?",
+                tuple(params),
             )
             self._conn.commit()
 

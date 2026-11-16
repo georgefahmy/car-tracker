@@ -1148,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.32"
+    assert expected_ver == "1.0.33"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1799,9 +1799,9 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         assert "role" not in attrs
         assert "aria-modal" not in attrs
 
-    assert "static/icon.png?v=28" in collector.links
-    assert "static/styles.css?v=28" in collector.links
-    assert "static/app.js?v=28" in collector.scripts
+    assert "static/icon.png?v=29" in collector.links
+    assert "static/styles.css?v=29" in collector.links
+    assert "static/app.js?v=29" in collector.scripts
     for tip_id, btn_id in (
         ("tip-heatmap_toggle", "btnHeatmapToggle"),
         ("tip-heatmap_reset", "btnHeatmapReset"),
@@ -3001,6 +3001,240 @@ def test_cumulative_heatmap_persistence_motion_trails_and_reset_sync(
         assert rep["ok"] is True
         assert client.get("/api/stats").json()["unique_cars"] == 0
         assert float(worker.hotspot.grid.max()) == 0.0
+
+
+def test_red_zone_webhook_sent_after_final_timestamped_snapshot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import threading
+    from types import SimpleNamespace
+
+    import cv2
+    import requests
+
+    from app.database import Database
+    from app.stream import StreamWorker
+
+    posts: list[tuple[str, dict]] = []
+    post_event = threading.Event()
+
+    def _fake_post(url: str, **kwargs):
+        data = dict(kwargs.get("data") or {})
+        files_in = kwargs.get("files") or {}
+        files_copy = {}
+        for k, v in files_in.items():
+            fname, payload_bytes, ctype = v
+            raw = payload_bytes.read() if hasattr(payload_bytes, "read") else bytes(payload_bytes)
+            files_copy[k] = (fname, raw, ctype)
+        posts.append((url, {"data": data, "files": files_copy, "json": kwargs.get("json")}))
+        post_event.set()
+        return SimpleNamespace(status_code=204, text="")
+
+    monkeypatch.setattr(requests, "post", _fake_post)
+
+    settings = Settings(
+        data_dir=str(tmp_path / "data"),
+        webhook_url="https://discord.com/api/webhooks/123/abc",
+        dwell_seconds=15.0,
+        min_track_frames=1,
+        alpr_enabled=False,
+        ha_enabled=False,
+    )
+    db = Database(settings.db_path)
+    worker = StreamWorker(settings=settings, db=db)
+    zone = ZoneModel(
+        id="z1",
+        name="Fire Lane",
+        points=[[0.3, 0.3], [0.7, 0.3], [0.7, 0.7], [0.3, 0.7]],
+        enabled=True,
+    )
+    db.replace_zones([zone])
+
+    w, h = 640, 360
+    frame_trigger = np.full((h, w, 3), (20, 30, 40), dtype=np.uint8)
+    frame_last_in_zone = np.full((h, w, 3), (180, 190, 200), dtype=np.uint8)
+    frame_after_exit = np.full((h, w, 3), (0, 250, 0), dtype=np.uint8)
+
+    # Step A: car #1 enters at t=1000.0 and crosses dwell threshold at t=1015.0 -> immediate DB record, NO webhook yet
+    worker.monitor.process_tracks(
+        [_make_car(1, 0.5, 0.5, w=w, h=h)],
+        w,
+        h,
+        [zone],
+        now_ts=1000.0,
+        dwell_seconds=15.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+    )
+    step_trigger = worker.monitor.process_tracks(
+        [_make_car(1, 0.5, 0.5, w=w, h=h)],
+        w,
+        h,
+        [zone],
+        now_ts=1015.0,
+        dwell_seconds=15.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+    )
+    assert len(step_trigger.new_violations) == 1
+    initial_flagged_at = step_trigger.new_violations[0].flagged_at
+    worker._handle_step_events(
+        frame=frame_trigger,
+        w=w,
+        h=h,
+        tracks=[_make_car(1, 0.5, 0.5, w=w, h=h)],
+        step=step_trigger,
+        zones=[zone],
+        counting_lines=[],
+        cfg=worker.config,
+        speeding_events=[],
+        now_ts=1015.0,
+        inferred_this_step=True,
+    )
+    viols_a = db.get_violations(limit=10)
+    assert len(viols_a) == 1
+    assert viols_a[0].dwell_seconds == 15.0
+    snap_path = worker.snapshots_dir / viols_a[0].snapshot_filename
+    assert snap_path.exists()
+    initial_bytes = snap_path.read_bytes()
+    assert len(posts) == 0
+
+    # Step B: car #1 remains parked at t=1150.0 (150s = 2m 30s) -> captures latest in-zone frame, still NO webhook
+    step_mid = worker.monitor.process_tracks(
+        [_make_car(1, 0.5, 0.5, w=w, h=h)],
+        w,
+        h,
+        [zone],
+        now_ts=1150.0,
+        dwell_seconds=15.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+    )
+    worker._handle_step_events(
+        frame=frame_last_in_zone,
+        w=w,
+        h=h,
+        tracks=[_make_car(1, 0.5, 0.5, w=w, h=h)],
+        step=step_mid,
+        zones=[zone],
+        counting_lines=[],
+        cfg=worker.config,
+        speeding_events=[],
+        now_ts=1150.0,
+        inferred_this_step=True,
+    )
+    assert len(posts) == 0
+
+    # Step C: car #1 moves outside zone on post-exit frames -> finalizes snapshot with t=1150.0 image & 2m 30s dwell, then sends Discord webhook
+    step_exit1 = worker.monitor.process_tracks(
+        [_make_car(1, 0.1, 0.1, w=w, h=h)],
+        w,
+        h,
+        [zone],
+        now_ts=1151.0,
+        dwell_seconds=15.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+        dwell_grace_seconds=5.0,
+    )
+    worker._handle_step_events(
+        frame=frame_after_exit,
+        w=w,
+        h=h,
+        tracks=[_make_car(1, 0.1, 0.1, w=w, h=h)],
+        step=step_exit1,
+        zones=[zone],
+        counting_lines=[],
+        cfg=worker.config,
+        speeding_events=[],
+        now_ts=1151.0,
+        inferred_this_step=True,
+    )
+    step_exit2 = worker.monitor.process_tracks(
+        [_make_car(1, 0.1, 0.1, w=w, h=h)],
+        w,
+        h,
+        [zone],
+        now_ts=1154.0,
+        dwell_seconds=15.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+        dwell_grace_seconds=5.0,
+    )
+    worker._handle_step_events(
+        frame=frame_after_exit,
+        w=w,
+        h=h,
+        tracks=[_make_car(1, 0.1, 0.1, w=w, h=h)],
+        step=step_exit2,
+        zones=[zone],
+        counting_lines=[],
+        cfg=worker.config,
+        speeding_events=[],
+        now_ts=1154.0,
+        inferred_this_step=True,
+    )
+
+    assert post_event.wait(timeout=2.0)
+    assert len(posts) == 1
+    post_url, post_kw = posts[0]
+    assert post_url == "https://discord.com/api/webhooks/123/abc"
+    assert "dwell: 2m 30s" in post_kw["data"]["content"]
+    uploaded_bytes = post_kw["files"]["file"][1]
+    assert uploaded_bytes == snap_path.read_bytes()
+    assert uploaded_bytes != initial_bytes
+
+    decoded = cv2.imdecode(np.frombuffer(uploaded_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert decoded is not None
+    corner_px = [int(c) for c in decoded[10, 10]]
+    assert all(abs(px - exp) <= 10 for px, exp in zip(corner_px, (180, 190, 200)))
+
+    viols_final = db.get_violations(limit=10)
+    assert viols_final[0].dwell_seconds == 150.0
+    assert viols_final[0].flagged_at != initial_flagged_at
+
+    # Step D: active parked violation flushes cleanly once on stop(), without double-sending on subsequent reset
+    post_event.clear()
+    worker.monitor.process_tracks(
+        [_make_car(2, 0.5, 0.5, w=w, h=h)],
+        w,
+        h,
+        [zone],
+        now_ts=2000.0,
+        dwell_seconds=15.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+    )
+    step_car2 = worker.monitor.process_tracks(
+        [_make_car(2, 0.5, 0.5, w=w, h=h)],
+        w,
+        h,
+        [zone],
+        now_ts=2020.0,
+        dwell_seconds=15.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+    )
+    worker._handle_step_events(
+        frame=frame_last_in_zone,
+        w=w,
+        h=h,
+        tracks=[_make_car(2, 0.5, 0.5, w=w, h=h)],
+        step=step_car2,
+        zones=[zone],
+        counting_lines=[],
+        cfg=worker.config,
+        speeding_events=[],
+        now_ts=2020.0,
+        inferred_this_step=True,
+    )
+    assert len(posts) == 1
+    worker.stop()
+    assert len(posts) == 2
+    assert "CAR #2" in posts[1][1]["data"]["content"]
+    worker.reset_all_counts()
+    assert len(posts) == 2
+
 
 
 

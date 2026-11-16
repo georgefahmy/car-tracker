@@ -3,6 +3,10 @@ from __future__ import annotations
 import copy
 import inspect
 import os
+import re
+import shutil
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -35,6 +39,7 @@ from app.detector import (
     ObjectDetector,
     RedZoneMonitor,
     TrackedDetection,
+    _has_openvino_gpu,
     annotate_frame,
     collect_hardware_diagnostics,
     compute_optimal_input_hw,
@@ -128,6 +133,221 @@ def resize_for_preview(frame: np.ndarray, max_width: int) -> np.ndarray:
     return cv2.resize(frame, (max_width, new_h), interpolation=cv2.INTER_LINEAR)
 
 
+class _FFmpegVAAPICapture:
+    """Hardware-decoded VA-API FFmpeg pipe capture implementing OpenCV VideoCapture semantics."""
+
+    _STREAM_DIMS_RE = re.compile(
+        r"Stream #\d+:\d+.*Video:.*?\b([1-9]\d{1,3})x([1-9]\d{1,3})\b"
+    )
+
+    def __init__(
+        self,
+        source: str,
+        render_node: str = "/dev/dri/renderD128",
+        ffmpeg_cmd: list[str] | None = None,
+    ) -> None:
+        self.source = source
+        self.render_node = render_node
+        self._custom_cmd = ffmpeg_cmd
+        self._release_lock = threading.Lock()
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self._dims_event = threading.Event()
+        self._closed = False
+        self._opened = False
+        self._width = 0
+        self._height = 0
+        self._bufs: list[bytearray] = []
+        self._buf_idx = 0
+        self._has_prefetched = False
+        self._stderr_tail: list[str] = []
+
+    def _build_cmd(self) -> tuple[list[str], dict[str, str]]:
+        env = os.environ.copy()
+        env.setdefault("LIBVA_DRIVER_NAME", "iHD")
+        if self._custom_cmd is not None:
+            return list(self._custom_cmd), env
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "info",
+            "-nostats",
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
+        ]
+        if self.source.lower().startswith("rtsp://"):
+            cmd.extend(["-rtsp_transport", "tcp"])
+        cmd.extend(
+            [
+                "-hwaccel",
+                "vaapi",
+                "-hwaccel_device",
+                self.render_node,
+                "-i",
+                self.source,
+                "-an",
+                "-sn",
+                "-dn",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "bgr24",
+                "pipe:1",
+            ]
+        )
+        return cmd, env
+
+    def _drain_stderr(self, stderr: Any) -> None:
+        try:
+            for raw_line in iter(stderr.readline, b""):
+                line = raw_line.decode("utf-8", errors="ignore").strip()
+                if not line:
+                    continue
+                if len(self._stderr_tail) < 30:
+                    self._stderr_tail.append(line)
+                if not self._dims_event.is_set():
+                    m = self._STREAM_DIMS_RE.search(line)
+                    if m:
+                        w, h = int(m.group(1)), int(m.group(2))
+                        if 16 <= w <= 8192 and 16 <= h <= 8192:
+                            self._width = w
+                            self._height = h
+                            self._dims_event.set()
+        except Exception:
+            pass
+        finally:
+            self._dims_event.set()
+
+    @staticmethod
+    def _read_exact_into(pipe: Any, target: bytearray) -> bool:
+        view = memoryview(target)
+        total = len(target)
+        pos = 0
+        while pos < total:
+            try:
+                n = pipe.readinto(view[pos:])
+            except (OSError, ValueError):
+                return False
+            if not n:
+                return False
+            pos += n
+        return True
+
+    def open(self, timeout: float = 8.0) -> bool:
+        cmd, env = self._build_cmd()
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+                env=env,
+            )
+        except OSError:
+            self.release()
+            return False
+
+        if self._proc.stderr is not None:
+            self._stderr_thread = threading.Thread(
+                target=self._drain_stderr,
+                args=(self._proc.stderr,),
+                name="ffmpeg-vaapi-stderr",
+                daemon=True,
+            )
+            self._stderr_thread.start()
+        else:
+            self._dims_event.set()
+
+        self._dims_event.wait(timeout=max(0.5, float(timeout)))
+        if self._width <= 0 or self._height <= 0 or self._proc.stdout is None:
+            self.release()
+            return False
+
+        nbytes = self._width * self._height * 3
+        if nbytes <= 0 or nbytes > 128_000_000:
+            self.release()
+            return False
+
+        self._bufs = [bytearray(nbytes), bytearray(nbytes)]
+        self._buf_idx = 0
+        if not self._read_exact_into(self._proc.stdout, self._bufs[0]):
+            self.release()
+            return False
+
+        self._has_prefetched = True
+        self._opened = True
+        return True
+
+    def isOpened(self) -> bool:
+        return bool(
+            self._opened
+            and not self._closed
+            and self._proc is not None
+            and self._proc.poll() is None
+        )
+
+    def grab(self) -> bool:
+        if self._closed or not self._opened or self._proc is None or self._proc.stdout is None:
+            return False
+        if self._has_prefetched:
+            self._has_prefetched = False
+            return True
+        next_idx = 1 - self._buf_idx
+        if not self._read_exact_into(self._proc.stdout, self._bufs[next_idx]):
+            return False
+        self._buf_idx = next_idx
+        return True
+
+    def retrieve(self) -> tuple[bool, np.ndarray | None]:
+        if self._closed or not self._opened or self._width <= 0 or self._height <= 0:
+            return (False, None)
+        arr = np.frombuffer(self._bufs[self._buf_idx], dtype=np.uint8)
+        expected = self._height * self._width * 3
+        if arr.size != expected:
+            return (False, None)
+        frame = arr.reshape((self._height, self._width, 3)).copy()
+        return (True, frame)
+
+    def read(self) -> tuple[bool, np.ndarray | None]:
+        if not self.grab():
+            return (False, None)
+        return self.retrieve()
+
+    def release(self) -> None:
+        with self._release_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._opened = False
+            proc = self._proc
+            self._proc = None
+        if proc is not None:
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=1.0)
+                    except OSError:
+                        pass
+                except OSError:
+                    pass
+        if self._stderr_thread is not None and self._stderr_thread.is_alive():
+            self._stderr_thread.join(timeout=1.0)
+
+
 def test_stream_connection(source: str, timeout_sec: float = 25.0) -> dict[str, Any]:
     """Open a stream or video file briefly to verify connectivity and resolution."""
     cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
@@ -218,6 +438,7 @@ class StreamWorker:
         self._snap_client: ReolinkHTTPSnapClient | None = None
         self._active_violation_snaps: dict[tuple[int, str], dict[str, Any]] = {}
         self._hw_diag_cache: tuple[float, dict[str, Any]] | None = None
+        self._video_decode_backend: str = "software"
 
     def get_source_url(self, cfg: RuntimeConfig | None = None) -> str:
         c = cfg or self.config
@@ -300,12 +521,45 @@ class StreamWorker:
         backend = (cfg.inference_backend or "auto").strip().lower()
         if is_dfine_model(cfg.yolo_model):
             hw_key = (640, 640)
-        elif backend in ("onnx", "openvino", "openvino_gpu"):
+        elif backend in ("onnx", "openvino", "openvino_gpu") or (
+            backend == "auto" and _has_openvino_gpu()
+        ):
             w, h = frame_wh if frame_wh is not None else (0, 0)
             hw_key = compute_optimal_input_hw(w, h, cfg.yolo_imgsz)
         else:
             hw_key = (0, 0)
         return (cfg.yolo_model, hw_key, backend)
+
+    @staticmethod
+    def _find_vaapi_render_node(
+        dri_dir: Path = Path("/dev/dri"),
+        driver_dirs: tuple[Path, ...] = (
+            Path("/usr/lib/x86_64-linux-gnu/dri"),
+            Path("/usr/lib/aarch64-linux-gnu/dri"),
+            Path("/usr/lib/dri"),
+        ),
+        ffmpeg_bin: str | None = None,
+        platform_name: str | None = None,
+    ) -> str | None:
+        if (platform_name or sys.platform) != "linux":
+            return None
+        has_ffmpeg = bool(shutil.which("ffmpeg") if ffmpeg_bin is None else ffmpeg_bin)
+        if not has_ffmpeg:
+            return None
+        has_driver = any(
+            (d / drv).is_file()
+            for d in driver_dirs
+            for drv in ("iHD_drv_video.so", "i965_drv_video.so")
+        )
+        if not has_driver or not dri_dir.exists():
+            return None
+        try:
+            for entry in sorted(dri_dir.iterdir()):
+                if entry.name.startswith("renderD") and os.access(entry, os.R_OK | os.W_OK):
+                    return str(entry)
+        except OSError:
+            pass
+        return None
 
     @staticmethod
     def _format_detector_target(
@@ -588,6 +842,7 @@ class StreamWorker:
                 ),
                 "motion_gate_enabled": self.config.motion_gate_enabled,
                 "motion_state": self._motion_state if self.config.motion_gate_enabled else "off",
+                "video_decode": self._video_decode_backend,
                 "model_loading": self._model_loading,
                 "model_loading_target": self._model_loading_target,
                 "model_error": self._model_error,
@@ -626,6 +881,7 @@ class StreamWorker:
                 "input_resolution": (
                     getattr(det, "input_resolution_label", "") if det is not None else ""
                 ),
+                "video_decode": self._video_decode_backend,
             }
         base["detector_runtime"] = detector_runtime
         base["cpu_temp_c"] = self._read_cpu_temp_c()
@@ -861,7 +1117,7 @@ class StreamWorker:
     ) -> bytes | None:
         """Scale frame to target preview resolution first, then annotate for crisp boxes/labels."""
         h, w = frame.shape[:2]
-        target_w = min(max(cfg.preview_max_width, 1280), 1920) if cfg.preview_max_width > 0 else w
+        target_w = min(max(cfg.preview_max_width, 960), 1920) if cfg.preview_max_width > 0 else w
         if w > cfg.preview_max_width > 0:
             preview = resize_for_preview(frame, cfg.preview_max_width)
         elif 0 < w < target_w:
@@ -1509,11 +1765,68 @@ class StreamWorker:
         ok, buf = cv2.imencode(".jpg", canvas, [cv2.IMWRITE_JPEG_QUALITY, 80])
         return buf.tobytes() if ok else b""
 
+    def _consume_live_capture_loop(
+        self,
+        cap: Any,
+        rtsp_state: dict[str, Any],
+        rtsp_lock: threading.Lock,
+        reader_stop: threading.Event,
+    ) -> None:
+        """Drain live capture via grab() and decode pixels only when inference or an active viewer needs them."""
+        last_retrieve_ts = 0.0
+        has_grab = hasattr(cap, "grab") and hasattr(cap, "retrieve")
+        try:
+            while (
+                not reader_stop.is_set()
+                and not self._stop_event.is_set()
+                and not self._reconnect_event.is_set()
+            ):
+                if not has_grab:
+                    ok_r, frm = cap.read()
+                    if not ok_r or frm is None:
+                        rtsp_state["alive"] = False
+                        break
+                    last_retrieve_ts = time.monotonic()
+                    with rtsp_lock:
+                        rtsp_state["frame"] = frm
+                        rtsp_state["seq"] += 1
+                    continue
+
+                if not cap.grab():
+                    rtsp_state["alive"] = False
+                    break
+                now_r = time.monotonic()
+                viewer_active = (now_r - getattr(self, "_last_viewer_ts", 0.0)) <= 5.0
+                motion_idle = bool(
+                    self.config.motion_gate_enabled
+                    and self._motion_state == "idle"
+                    and not self._active_dwells
+                )
+                infer_period = 1.0 / max(self.config.target_fps, 0.5)
+                min_period = (
+                    min(infer_period, 0.40 if motion_idle else 0.08)
+                    if viewer_active
+                    else infer_period
+                )
+                if last_retrieve_ts > 0.0 and (now_r - last_retrieve_ts) < (min_period * 0.85):
+                    continue
+                ok_r, frm = cap.retrieve()
+                if not ok_r or frm is None:
+                    rtsp_state["alive"] = False
+                    break
+                last_retrieve_ts = now_r
+                with rtsp_lock:
+                    rtsp_state["frame"] = frm
+                    rtsp_state["seq"] += 1
+        finally:
+            cap.release()
+
     def _run_loop(self) -> None:
         with self._lock:
             self._latest_jpeg = self._render_placeholder("Loading YOLO model...")
 
         backoff = 1.0
+        vaapi_failed_source = ""
         while not self._stop_event.is_set():
             self._reconnect_event.clear()
             self._config_wake_event.clear()
@@ -1523,6 +1836,7 @@ class StreamWorker:
             is_file = bool(cfg.test_video_path.strip())
 
             if not is_file and not cfg.nvr_pass and not cfg.nvr_user:
+                self._video_decode_backend = "software"
                 self._set_status("waiting_for_credentials", "Enter NVR username/password in Settings.")
                 with self._lock:
                     self._latest_jpeg = self._render_placeholder("Configure NVR credentials or Test Video in Settings")
@@ -1530,6 +1844,7 @@ class StreamWorker:
                 continue
 
             if not is_file and cfg.stream_mode == "http_snap":
+                self._video_decode_backend = "software"
                 if self._run_http_snap_fallback():
                     backoff = 1.0
                     continue
@@ -1543,9 +1858,25 @@ class StreamWorker:
             self._set_status("connecting", "")
             with self._lock:
                 self._latest_jpeg = self._render_placeholder(f"Connecting to {mask_rtsp_url(source)}...")
-            cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+
+            cap: Any = None
+            self._video_decode_backend = "software"
+            if not is_file and source != vaapi_failed_source:
+                render_node = self._find_vaapi_render_node()
+                if render_node is not None:
+                    va_cap = _FFmpegVAAPICapture(source, render_node=render_node)
+                    if va_cap.open():
+                        cap = va_cap
+                        self._video_decode_backend = "vaapi"
+                    else:
+                        va_cap.release()
+                        vaapi_failed_source = source
+
+            if cap is None:
+                cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
             if not cap.isOpened():
                 cap.release()
+                self._video_decode_backend = "software"
                 # Fall back to Reolink HTTP Snap API when RTSP cannot open
                 if not is_file and cfg.stream_mode == "auto" and self._run_http_snap_fallback():
                     backoff = 1.0
@@ -1557,12 +1888,13 @@ class StreamWorker:
                 backoff = min(backoff * 2.0, 15.0)
                 continue
 
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if hasattr(cap, "set"):
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             backoff = 1.0
             last_infer_ts = 0.0
             first_frame_seen = False
 
-            # Dedicated RTSP/RTMP reader thread drains cap.read() at full speed so FFmpeg never buffers.
+            # Dedicated RTSP/RTMP reader thread drains cap.grab() at stream rate and skips unneeded retrieve().
             # A separate preview thread encodes only the newest frame strictly forward in time (no rubber-banding).
             rtsp_lock = threading.Lock()
             rtsp_state: dict[str, Any] = {"frame": None, "seq": 0, "alive": True}
@@ -1571,21 +1903,7 @@ class StreamWorker:
             preview_thread: threading.Thread | None = None
             if not is_file:
                 def _rtsp_reader() -> None:
-                    try:
-                        while (
-                            not reader_stop.is_set()
-                            and not self._stop_event.is_set()
-                            and not self._reconnect_event.is_set()
-                        ):
-                            ok_r, frm = cap.read()
-                            if not ok_r or frm is None:
-                                rtsp_state["alive"] = False
-                                break
-                            with rtsp_lock:
-                                rtsp_state["frame"] = frm
-                                rtsp_state["seq"] += 1
-                    finally:
-                        cap.release()
+                    self._consume_live_capture_loop(cap, rtsp_state, rtsp_lock, reader_stop)
 
                 def _preview_publisher() -> None:
                     last_p_seq = 0
@@ -1607,11 +1925,28 @@ class StreamWorker:
                         with self._lock:
                             tracks, statuses, zones, lines = self._latest_overlay
                             pcfg = self.config
+                            motion_idle = bool(
+                                pcfg.motion_gate_enabled
+                                and self._motion_state == "idle"
+                                and not self._active_dwells
+                            )
                         jpg = self._render_preview_jpeg(frm, tracks, statuses, zones, lines, pcfg)
                         if jpg is not None:
                             with self._lock:
                                 self._latest_jpeg = jpg
-                        time.sleep(0.08)
+                        if motion_idle:
+                            for _ in range(8):
+                                if (
+                                    reader_stop.is_set()
+                                    or self._stop_event.is_set()
+                                    or self._reconnect_event.is_set()
+                                    or self._motion_state != "idle"
+                                    or self._active_dwells
+                                ):
+                                    break
+                                time.sleep(0.05)
+                        else:
+                            time.sleep(0.08)
 
                 reader_thread = threading.Thread(target=_rtsp_reader, name="rtsp-reader", daemon=True)
                 reader_thread.start()
@@ -1672,6 +2007,8 @@ class StreamWorker:
                 self._process_single_frame(frame, detector, cfg, dt, publish_preview=is_file)
 
             reader_stop.set()
+            if isinstance(cap, _FFmpegVAAPICapture):
+                cap.release()
             if preview_thread is not None:
                 preview_thread.join(timeout=1.5)
             if reader_thread is not None:

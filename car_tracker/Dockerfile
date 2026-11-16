@@ -36,6 +36,21 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev && rm -rf /root/.cache/uv
 
+# Hardware video decode layer (Intel QuickSync VA-API + FFmpeg), cached ahead of app code
+RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends \
+            ffmpeg \
+            intel-media-va-driver-non-free \
+            libva-drm2 \
+            libva2 \
+            vainfo \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+ENV LIBVA_DRIVER_NAME=iHD \
+    NEO_CACHE_PERSISTENT=1
+
 # Fast code layer: refreshes app & static assets on version bump without rebuilding .venv
 COPY config.yaml /tmp/addon_config.yaml
 RUN git clone --depth 1 --branch main https://github.com/georgefahmy/car-tracker.git /tmp/repo \

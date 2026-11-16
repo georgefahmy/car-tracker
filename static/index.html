@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Car Tracker & Red-Zone Monitor</title>
-  <link rel="icon" type="image/png" href="static/icon.png?v=23" />
-  <link rel="stylesheet" href="static/styles.css?v=23" />
+  <link rel="icon" type="image/png" href="static/icon.png?v=24" />
+  <link rel="stylesheet" href="static/styles.css?v=24" />
 </head>
 <body>
   <header class="topbar">
@@ -275,24 +275,24 @@
                   <div id="tip-yolo_model" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Object detector weights. YOLO26n and YOLO11n are fastest on CPU; Small (s) and D-FINE transformer models trade higher CPU usage for better accuracy on small or occluded vehicles.</div></div>
                 </div>
                 <select id="cfg-yolo_model" name="yolo_model">
-                  <option value="yolov8n.pt">YOLOv8n (Fast baseline)</option>
-                  <option value="yolo11n.pt">YOLO11n (Fast + accurate)</option>
-                  <option value="yolo26n.pt">YOLO26n (NMS-free CPU optimized)</option>
-                  <option value="yolo26s.pt">YOLO26s (NMS-free high accuracy)</option>
+                  <option value="yolo26s.pt">YOLO26s (NMS-free high accuracy — Recommended)</option>
+                  <option value="yolo26n.pt">YOLO26n (NMS-free fastest)</option>
                   <option value="yolo11s.pt">YOLO11s (High accuracy — x86 ONNX/iGPU)</option>
+                  <option value="yolo11n.pt">YOLO11n (Fast + accurate)</option>
                   <option value="yolov8s.pt">YOLOv8s (High accuracy)</option>
+                  <option value="yolov8n.pt">YOLOv8n (Fast baseline)</option>
+                  <option value="dfine_s.onnx">D-FINE Small (Transformer max accuracy — iGPU/ONNX)</option>
                   <option value="dfine_n.onnx">D-FINE Nano (Transformer NMS-free — ONNX)</option>
-                  <option value="dfine_s.onnx">D-FINE Small (Transformer high accuracy — ONNX)</option>
                 </select>
               </div>
               <div class="field">
                 <div class="field-label-row">
                   <label for="cfg-inference_backend">Inference Backend</label>
                   <button type="button" class="help-tip-btn" interestfor="tip-inference_backend" popovertarget="tip-inference_backend" popovertargetaction="show" aria-label="More about Inference Backend">?</button>
-                  <div id="tip-inference_backend" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Execution runtime for inference. ONNX Runtime and OpenVINO Intel iGPU (/dev/dri) reduce x86 CPU usage; Auto uses PyTorch CPU (or Apple MPS / CUDA when available).</div></div>
+                  <div id="tip-inference_backend" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Execution runtime for inference. OpenVINO Intel iGPU (/dev/dri) runs native FP16 with a persistent GPU shader cache; Auto prefers Intel iGPU / MPS / CUDA when present, then falls back to CPU.</div></div>
                 </div>
-                <select id="cfg-inference_backend" name="inference_backend">
-                  <option value="auto">Auto (PyTorch CPU — Safe Default)</option>
+                <select id="cfg-inference_backend" name="inference_backend" aria-describedby="hwDiagnosticHint">
+                  <option value="auto">Auto (iGPU / MPS / CUDA / CPU)</option>
                   <option value="onnx">ONNX Runtime (Fast x86 CPU — Low Idle)</option>
                   <option value="openvino_gpu">OpenVINO Intel iGPU (/dev/dri Hardware)</option>
                   <option value="openvino">OpenVINO CPU (High CPU Spin)</option>
@@ -630,6 +630,6 @@
     </div>
   </dialog>
 
-  <script src="static/app.js?v=23"></script>
+  <script src="static/app.js?v=24"></script>
 </body>
 </html>

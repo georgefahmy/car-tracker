@@ -1431,6 +1431,52 @@ def _parse_tracker_yaml_args(tracker_yaml: str) -> types.SimpleNamespace:
     return types.SimpleNamespace(**parsed)
 
 
+_OV_GPU_PROBE_CACHE: tuple[Any, bool] | None = None
+
+
+def _has_openvino_gpu() -> bool:
+    """Return True if OpenVINO detects an Intel GPU device, cached per Core class."""
+    global _OV_GPU_PROBE_CACHE
+    try:
+        import openvino as ov
+    except ImportError:
+        return False
+
+    core_cls = getattr(ov, "Core", None)
+    if core_cls is None:
+        return False
+    if _OV_GPU_PROBE_CACHE is not None and _OV_GPU_PROBE_CACHE[0] is core_cls:
+        return _OV_GPU_PROBE_CACHE[1]
+
+    has_gpu = False
+    try:
+        devs = list(core_cls().available_devices)
+        has_gpu = any(d == "GPU" or d.startswith("GPU.") for d in devs)
+    except Exception:
+        has_gpu = False
+    _OV_GPU_PROBE_CACHE = (core_cls, has_gpu)
+    return has_gpu
+
+
+def _configure_openvino_cache(core: Any, cache_root: Path) -> Path:
+    """Enable persistent OpenCL (NEO) and OpenVINO GPU shader caches on disk."""
+    neo_dir = cache_root / "neo_cache"
+    ov_cache_dir = cache_root / "ov_cache"
+    for d in (neo_dir, ov_cache_dir):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+    os.environ.setdefault("NEO_CACHE_PERSISTENT", "1")
+    os.environ.setdefault("NEO_CACHE_DIR", str(neo_dir))
+    if core is not None and hasattr(core, "set_property"):
+        try:
+            core.set_property({"CACHE_DIR": str(ov_cache_dir)})
+        except Exception:
+            pass
+    return ov_cache_dir
+
+
 class _DFineRunner:
     """NMS-free D-FINE ONNX/OpenVINO runner paired with Ultralytics BYTETracker."""
 
@@ -1451,17 +1497,31 @@ class _DFineRunner:
         self._ort_session: Any = None
         self._ov_compiled: Any = None
         self._input_specs: list[tuple[str, tuple[Any, ...], str]] = []
+        cache_root = Path(models_dir) if models_dir is not None else Path("data/models")
 
         compiled = False
-        if req_backend in ("openvino", "openvino_gpu"):
+        if req_backend in ("openvino", "openvino_gpu") or (
+            req_backend == "auto" and _has_openvino_gpu()
+        ):
             try:
                 import openvino as ov
 
                 core = ov.Core()
-                if req_backend == "openvino_gpu":
+                _configure_openvino_cache(core, cache_root)
+                if req_backend in ("openvino_gpu", "auto"):
                     devices = list(core.available_devices)
                     if any(d == "GPU" or d.startswith("GPU.") for d in devices):
-                        self._ov_compiled = core.compile_model(str(self.onnx_path), "GPU")
+                        try:
+                            self._ov_compiled = core.compile_model(
+                                str(self.onnx_path),
+                                "GPU",
+                                {
+                                    "PERFORMANCE_HINT": "LATENCY",
+                                    "INFERENCE_PRECISION_HINT": "f16",
+                                },
+                            )
+                        except TypeError:
+                            self._ov_compiled = core.compile_model(str(self.onnx_path), "GPU")
                         self.backend = "openvino_gpu"
                         self.device = "intel:gpu"
                         for inp in self._ov_compiled.inputs:
@@ -1473,7 +1533,7 @@ class _DFineRunner:
                                 (inp.any_name, pshape, str(inp.get_element_type()))
                             )
                         compiled = True
-                    else:
+                    elif req_backend == "openvino_gpu":
                         diag = collect_hardware_diagnostics(run_clinfo=False)
                         self.fallback_note = (
                             diag["short_fallback_reason"]
@@ -1499,7 +1559,7 @@ class _DFineRunner:
                         diag["short_fallback_reason"]
                         or "Intel GPU unavailable; fell back to ONNX"
                     )
-                else:
+                elif req_backend == "openvino":
                     self.fallback_note = f"OpenVINO unavailable ({exc}); fell back to ONNX"
 
         if not compiled:
@@ -1874,6 +1934,12 @@ def collect_hardware_diagnostics(
     dri_dir: Path = Path("/dev/dri"),
     opencl_vendors_dir: Path = Path("/etc/OpenCL/vendors"),
     os_release_path: Path = Path("/etc/os-release"),
+    vaapi_driver_dirs: tuple[Path, ...] = (
+        Path("/usr/lib/x86_64-linux-gnu/dri"),
+        Path("/usr/lib/aarch64-linux-gnu/dri"),
+        Path("/usr/lib/dri"),
+    ),
+    ffmpeg_bin: str | None = None,
     run_clinfo: bool = True,
 ) -> dict[str, Any]:
     """Inspect host CPU, virtualization, PCI GPUs, /dev/dri nodes, OpenCL ICDs, and ML runtimes."""
@@ -2104,6 +2170,24 @@ def collect_hardware_diagnostics(
     except Exception:
         pass
 
+    render_nodes = [d for d in dri_devices if d["name"].startswith("renderD")]
+    render_rw = any(d["readable"] and d["writable"] for d in render_nodes)
+    va_driver = ""
+    for drv_dir in vaapi_driver_dirs:
+        for drv_name in ("iHD_drv_video.so", "i965_drv_video.so"):
+            if (drv_dir / drv_name).is_file():
+                va_driver = drv_name
+                break
+        if va_driver:
+            break
+    resolved_ffmpeg = shutil.which("ffmpeg") if ffmpeg_bin is None else ffmpeg_bin
+    vaapi_info: dict[str, Any] = {
+        "driver_installed": bool(va_driver),
+        "driver": va_driver,
+        "ffmpeg_installed": bool(resolved_ffmpeg),
+        "ready": bool(va_driver and resolved_ffmpeg and render_rw),
+    }
+
     has_linux_probe = any(
         p.exists() for p in (cpuinfo_path, pci_devices_dir, dri_dir, opencl_vendors_dir)
     )
@@ -2120,6 +2204,8 @@ def collect_hardware_diagnostics(
         gpu_name = ov_info["device_names"].get(gpu_dev) or "Intel GPU"
         gpu_available = True
         diagnosis = f"Intel GPU ready via OpenVINO ({gpu_name})"
+        if vaapi_info["ready"]:
+            diagnosis += " • QuickSync VA-API decode ready"
     elif torch_info["cuda_available"]:
         gpu_available = True
         gpu_name = "NVIDIA CUDA GPU"
@@ -2132,8 +2218,6 @@ def collect_hardware_diagnostics(
         short_fallback_reason = "Intel GPU unavailable on macOS; fell back to ONNX"
     else:
         vendors = {g["vendor"] for g in pci_gpus}
-        render_nodes = [d for d in dri_devices if d["name"].startswith("renderD")]
-        render_rw = any(d["readable"] and d["writable"] for d in render_nodes)
         if pci_gpus:
             gpu_name = pci_gpus[0]["description"]
         if "AMD" in vendors and "Intel" not in vendors:
@@ -2189,6 +2273,7 @@ def collect_hardware_diagnostics(
         "openvino": ov_info,
         "onnxruntime": ort_info,
         "pytorch": torch_info,
+        "vaapi": vaapi_info,
         "gpu_available": gpu_available,
         "gpu_name": gpu_name,
         "diagnosis": diagnosis,
@@ -2309,6 +2394,18 @@ class ObjectDetector:
         elif torch.cuda.is_available():
             self.device = "cuda"
             self.backend = "cuda"
+        elif req_backend == "auto" and _has_openvino_gpu():
+            _configure_cpu_threads()
+            ov_auto_model = self._try_load_openvino(
+                YOLO, model_name, target_size, models_dir, require_gpu=True
+            )
+            if ov_auto_model is not None:
+                self.model = ov_auto_model
+                self.device = "intel:gpu"
+                self.backend = "openvino_gpu"
+                return
+            self.device = "cpu"
+            self.backend = "pytorch"
         else:
             self.device = "cpu"
             self.backend = "pytorch"
@@ -2407,9 +2504,13 @@ class ObjectDetector:
         except ImportError:
             return None
 
+        cache_root = Path(models_dir) if models_dir is not None else Path("data/models")
+        cache_root.mkdir(parents=True, exist_ok=True)
+
         if require_gpu:
             try:
                 core = ov.Core()
+                _configure_openvino_cache(core, cache_root)
                 devices = list(core.available_devices)
                 if not any(d == "GPU" or d.startswith("GPU.") for d in devices):
                     print(
@@ -2420,19 +2521,26 @@ class ObjectDetector:
             except Exception as exc:
                 print(f"[detector] OpenVINO device probe failed: {exc}", flush=True)
                 return None
+        else:
+            try:
+                _configure_openvino_cache(ov.Core(), cache_root)
+            except Exception:
+                _configure_openvino_cache(None, cache_root)
 
         in_h, in_w = (int(imgsz), int(imgsz)) if isinstance(imgsz, int) else (int(imgsz[0]), int(imgsz[1]))
         export_imgsz: int | tuple[int, int] = in_h if in_h == in_w else (in_h, in_w)
         size_tag = f"imgsz{in_h}" if in_h == in_w else f"{in_h}x{in_w}"
+        use_fp16 = bool(require_gpu)
+        prec_tag = "_fp16" if use_fp16 else ""
 
-        cache_root = Path(models_dir) if models_dir is not None else Path("data/models")
-        cache_root.mkdir(parents=True, exist_ok=True)
-        ov_dir = cache_root / f"{Path(model_name).stem}_{size_tag}_openvino_model"
+        ov_dir = cache_root / f"{Path(model_name).stem}_{size_tag}{prec_tag}_openvino_model"
 
         try:
             if not (ov_dir.exists() and any(ov_dir.glob("*.xml"))):
                 pt_model = yolo_cls(_resolve_model_source(model_name, models_dir))
-                exported_path = Path(str(pt_model.export(format="openvino", imgsz=export_imgsz, half=False)))
+                exported_path = Path(
+                    str(pt_model.export(format="openvino", imgsz=export_imgsz, half=use_fp16))
+                )
                 if exported_path.exists() and exported_path.resolve() != ov_dir.resolve():
                     if ov_dir.exists():
                         shutil.rmtree(ov_dir)

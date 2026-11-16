@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import threading
 from typing import Any
@@ -91,7 +92,12 @@ class LicensePlateReader:
             try:
                 from rapidocr_onnxruntime import RapidOCR
 
-                self._ocr = RapidOCR()
+                ocr_threads = min(2, max(1, os.cpu_count() or 2))
+                self._ocr = RapidOCR(
+                    intra_op_num_threads=ocr_threads,
+                    inter_op_num_threads=1,
+                    use_cls=False,
+                )
             except Exception as exc:
                 self._init_failed = True
                 print(f"[alpr] RapidOCR initialization unavailable: {exc}", flush=True)
@@ -112,7 +118,8 @@ class LicensePlateReader:
             bh = max(y2 - y1, 0.0)
             if bw >= 12.0 and bh >= 12.0:
                 cx1 = max(0, int(round(x1 - 0.08 * bw)))
-                cy1 = max(0, int(round(y1)))
+                # Trim the top 15% (roof rack / cabin roof / windshield decals) when tall enough
+                cy1 = max(0, int(round(y1 + (0.15 * bh if bh >= 32.0 else 0.0))))
                 cx2 = min(w, int(round(x2 + 0.08 * bw)))
                 cy2 = min(h, int(round(y2 + 0.10 * bh)))
                 if cx2 > cx1 and cy2 > cy1:
@@ -131,6 +138,13 @@ class LicensePlateReader:
                 crop,
                 (360, max(1, int(round(ch * scale)))),
                 interpolation=cv2.INTER_CUBIC,
+            )
+        elif cw > 960:
+            scale = 960.0 / float(cw)
+            crop = cv2.resize(
+                crop,
+                (960, max(1, int(round(ch * scale)))),
+                interpolation=cv2.INTER_AREA,
             )
         return crop
 
@@ -202,9 +216,9 @@ class LicensePlateReader:
             if plate:
                 return (plate, conf)
 
-            # Single contrast-enhanced fallback on lower 75% (where front/rear bumpers sit)
+            # Single contrast-enhanced fallback on lower 80% (where front/rear bumpers sit)
             ch = crop.shape[0]
-            lower = crop[int(ch * 0.25) :, :] if ch >= 40 else crop
+            lower = crop[int(ch * 0.20) :, :] if ch >= 40 else crop
             enhanced = self._enhance_contrast(lower)
             res2, _ = ocr(enhanced)
             return self._select_best_candidate(res2, enhanced.shape[0])

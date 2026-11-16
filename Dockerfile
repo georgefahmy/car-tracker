@@ -33,6 +33,20 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev && rm -rf /root/.cache/uv
 
+RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends \
+            ffmpeg \
+            intel-media-va-driver-non-free \
+            libva-drm2 \
+            libva2 \
+            vainfo \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+ENV LIBVA_DRIVER_NAME=iHD \
+    NEO_CACHE_PERSISTENT=1
+
 COPY app ./app
 COPY static ./static
 

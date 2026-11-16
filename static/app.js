@@ -1337,6 +1337,9 @@ function updateCvRuntimeHint() {
     ? ` @ ${latestLiveStats.input_resolution}`
     : (latestLiveStats.yolo_imgsz ? ` @ ${latestLiveStats.yolo_imgsz}px` : "");
   const parts = [`Active: ${activeModel} (${activeBackend}${activeSize})`];
+  if (latestLiveStats.video_decode === "vaapi") {
+    parts.push("Decode: VA-API");
+  }
   if (latestLiveStats.motion_gate_enabled) {
     parts.push(
       latestLiveStats.motion_state === "idle"
@@ -1730,18 +1733,22 @@ async function refreshHardwareDiagnostics(force = false) {
       : "";
     const summaryParts = [cpuLabel, driLabel];
     if (pciLabel) summaryParts.push(pciLabel);
+    if (data.detector_runtime?.video_decode === "vaapi") summaryParts.push("Decode: VA-API");
     if (data.diagnosis) summaryParts.push(data.diagnosis);
-    hwEl.textContent = summaryParts.join(" • ");
+    const summaryText = summaryParts.join(" • ");
     if (data.gpu_available) {
+      hwEl.textContent = `✓ ${summaryText}`;
       hwEl.style.color = "#22c55e";
     } else if (settingsForm.elements["inference_backend"]?.value === "openvino_gpu") {
+      hwEl.textContent = `! ${summaryText}`;
       hwEl.style.color = "#f59e0b";
     } else {
+      hwEl.textContent = summaryText;
       hwEl.style.color = "";
     }
   } catch (err) {
     if (isModalOpen(settingsModal)) {
-      hwEl.textContent = `Hardware check failed: ${err.message || err}`;
+      hwEl.textContent = `! Hardware check failed: ${err.message || err}`;
       hwEl.style.color = "#ef4444";
     }
   } finally {
@@ -1927,7 +1934,7 @@ function formToPayload() {
     nvr_user: fd.get("nvr_user"),
     nvr_pass: fd.get("nvr_pass"),
     test_video_path: fd.get("test_video_path"),
-    yolo_model: fd.get("yolo_model") || "yolov8n.pt",
+    yolo_model: fd.get("yolo_model") || "yolo26s.pt",
     inference_backend: fd.get("inference_backend") || "auto",
     target_fps: Number(fd.get("target_fps")),
     yolo_imgsz: Number(fd.get("yolo_imgsz")),

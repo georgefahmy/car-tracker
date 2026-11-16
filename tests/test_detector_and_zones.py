@@ -1148,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.27"
+    assert expected_ver == "1.0.28"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1777,9 +1777,10 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         assert "role" not in attrs
         assert "aria-modal" not in attrs
 
-    assert "static/icon.png?v=23" in collector.links
-    assert "static/styles.css?v=23" in collector.links
-    assert "static/app.js?v=23" in collector.scripts
+    assert "static/icon.png?v=24" in collector.links
+    assert "static/styles.css?v=24" in collector.links
+    assert "static/app.js?v=24" in collector.scripts
+    assert collector.controls_by_name["inference_backend"].get("aria-describedby") == "hwDiagnosticHint"
     assert 'class="settings-bento"' in html
     assert "telemetry-strip" in html
     assert "tabular-nums" in Path("static/styles.css").read_text(encoding="utf-8")
@@ -2152,13 +2153,19 @@ def test_hardware_diagnostics_dockerfile_and_thermal_priority(tmp_path: Path) ->
         assert "libglib2.0-0t64" in txt
         assert "libgomp1" in txt
         assert "ca-certificates" in txt
+        assert "intel-media-va-driver-non-free" in txt
+        assert "ffmpeg" in txt
+        assert "libva-drm2" in txt
+        assert "LIBVA_DRIVER_NAME=iHD" in txt
+        assert "NEO_CACHE_PERSISTENT=1" in txt
         assert "yolov8n.pt" not in txt
         for line in txt.splitlines():
             if "intel-opencl-icd" in line:
                 assert "|| true" not in line
 
     addon_df = Path("car_tracker/Dockerfile").read_text(encoding="utf-8")
-    assert addon_df.index("COPY pyproject.toml uv.lock") < addon_df.index("COPY config.yaml")
+    assert addon_df.index("COPY pyproject.toml uv.lock") < addon_df.index("intel-media-va-driver-non-free")
+    assert addon_df.index("intel-media-va-driver-non-free") < addon_df.index("COPY config.yaml")
 
     # (a) Working Intel Alder Lake-N / Twin Lake (0x8086 / 0x46d1, x86 `model : 190` before `model name`)
     root_a = tmp_path / "host_a"
@@ -2322,14 +2329,290 @@ def test_hardware_diagnostics_dockerfile_and_thermal_priority(tmp_path: Path) ->
             "opencl_icds",
             "openvino",
             "onnxruntime",
+            "vaapi",
             "gpu_available",
             "diagnosis",
             "detector_runtime",
         ):
             assert key in body
+        assert "video_decode" in body["detector_runtime"]
         r2 = client.get("/api/system/hardware?refresh=true")
         assert r2.status_code == 200
         assert "diagnosis" in r2.json()
+
+
+def test_gpu_fp16_cache_vaapi_grab_and_alpr(tmp_path: Path, monkeypatch) -> None:
+    import os
+    import sys
+    import threading
+    import types
+
+    import rapidocr_onnxruntime
+    import torch
+    import ultralytics
+
+    import app.detector as detector_mod
+    from app.alpr import LicensePlateReader
+    from app.config import RuntimeConfig, Settings
+    from app.database import Database
+    from app.detector import (
+        ObjectDetector,
+        _configure_openvino_cache,
+        _has_openvino_gpu,
+        collect_hardware_diagnostics,
+    )
+    from app.stream import StreamWorker, _FFmpegVAAPICapture
+
+    # 1. Default model is yolo26s.pt
+    assert Settings().yolo_model == "yolo26s.pt"
+    assert RuntimeConfig().yolo_model == "yolo26s.pt"
+
+    # 2. OpenVINO GPU FP16 export + persistent cache + auto iGPU backend selection
+    export_calls: list[dict[str, object]] = []
+    loaded_dirs: list[str] = []
+
+    class _FakeYOLO:
+        def __init__(self, model_ref: str, task: str | None = None) -> None:
+            self.model_ref = model_ref
+            self.task = task
+
+        def export(self, **kwargs):
+            export_calls.append(dict(kwargs))
+            out_dir = tmp_path / "ov_exported"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "model.xml").write_text("<net/>", encoding="utf-8")
+            (out_dir / "model.bin").write_bytes(b"\x00")
+            return str(out_dir)
+
+    set_props: list[dict[str, str]] = []
+
+    class _FakeOvGpuCore:
+        available_devices = ["CPU", "GPU"]
+
+        def set_property(self, cfg: dict[str, str]) -> None:
+            set_props.append(dict(cfg))
+
+        @staticmethod
+        def compile_model(model_path: str, device_name: str, config: dict | None = None):
+            return types.SimpleNamespace(
+                inputs=[
+                    types.SimpleNamespace(
+                        any_name="images",
+                        get_partial_shape=lambda: [],
+                        get_element_type=lambda: "f32",
+                    )
+                ]
+            )
+
+    fake_ov = types.ModuleType("openvino")
+    fake_ov.Core = _FakeOvGpuCore  # type: ignore[attr-defined]
+    prev_ov = sys.modules.get("openvino")
+    monkeypatch.setattr(detector_mod, "_OV_GPU_PROBE_CACHE", None)
+    monkeypatch.setattr(ultralytics, "YOLO", _FakeYOLO)
+    monkeypatch.setattr(detector_mod, "_ensure_tracker_yaml", lambda *_a, **_kw: "bytetrack.yaml")
+    monkeypatch.setattr(detector_mod, "_resolve_model_source", lambda m, *_a: m)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    try:
+        sys.modules["openvino"] = fake_ov
+        assert _has_openvino_gpu() is True
+
+        monkeypatch.delenv("NEO_CACHE_DIR", raising=False)
+        monkeypatch.delenv("NEO_CACHE_PERSISTENT", raising=False)
+        models_dir = tmp_path / "models"
+        ov_cache_dir = _configure_openvino_cache(_FakeOvGpuCore(), models_dir)
+        assert os.environ.get("NEO_CACHE_PERSISTENT") == "1"
+        assert os.environ.get("NEO_CACHE_DIR") == str(models_dir / "neo_cache")
+        assert set_props[-1] == {"CACHE_DIR": str(ov_cache_dir)}
+
+        # D-FINE with backend='auto' uses OpenVINO GPU with FP16 precision hint
+        dfine_onnx = tmp_path / "dfine_s.onnx"
+        dfine_onnx.write_bytes(b"fake-onnx")
+        compile_cfgs: list[dict | None] = []
+
+        class _FakeOvDFineCore(_FakeOvGpuCore):
+            @staticmethod
+            def compile_model(model_path: str, device_name: str, config: dict | None = None):
+                compile_cfgs.append(config)
+                return _FakeOvGpuCore.compile_model(model_path, device_name, config)
+
+        fake_ov.Core = _FakeOvDFineCore  # type: ignore[attr-defined]
+        monkeypatch.setattr(
+            detector_mod,
+            "_ensure_dfine_onnx",
+            lambda _m, _d: (dfine_onnx, {"size": {"height": 640, "width": 640}}),
+        )
+        det_dfine_auto = ObjectDetector(
+            model_name="dfine_s.onnx",
+            imgsz=960,
+            inference_backend="auto",
+            models_dir=models_dir,
+        )
+        assert det_dfine_auto.backend == "openvino_gpu"
+        assert det_dfine_auto.device == "intel:gpu"
+        assert compile_cfgs[-1] == {"PERFORMANCE_HINT": "LATENCY", "INFERENCE_PRECISION_HINT": "f16"}
+        fake_ov.Core = _FakeOvGpuCore  # type: ignore[attr-defined]
+
+        def _fake_yolo_factory(ref: str, task: str | None = None):
+            if task == "detect":
+                loaded_dirs.append(ref)
+            return _FakeYOLO(ref, task=task)
+
+        monkeypatch.setattr(ultralytics, "YOLO", _fake_yolo_factory)
+        det_gpu_auto = ObjectDetector(
+            model_name="yolo26s.pt",
+            imgsz=960,
+            inference_backend="auto",
+            models_dir=models_dir,
+            input_hw=(384, 640),
+        )
+        assert det_gpu_auto.backend == "openvino_gpu"
+        assert det_gpu_auto.device == "intel:gpu"
+        assert export_calls[-1]["half"] is True
+        assert loaded_dirs[-1].endswith("yolo26s_384x640_fp16_openvino_model")
+
+        # CPU OpenVINO keeps half=False and omits _fp16 suffix
+        det_cpu_ov = ObjectDetector(
+            model_name="yolo26s.pt",
+            imgsz=960,
+            inference_backend="openvino",
+            models_dir=models_dir,
+            input_hw=(384, 640),
+        )
+        assert det_cpu_ov.backend == "openvino"
+        assert export_calls[-1]["half"] is False
+        assert loaded_dirs[-1].endswith("yolo26s_384x640_openvino_model")
+
+        # _desired_detector_key with auto backend + Intel GPU uses stream-matched rectangular sizing
+        key = StreamWorker._desired_detector_key(
+            RuntimeConfig(yolo_model="yolo26s.pt", inference_backend="auto", yolo_imgsz=960),
+            frame_wh=(640, 360),
+        )
+        assert key == ("yolo26s.pt", (384, 640), "auto")
+    finally:
+        monkeypatch.setattr(detector_mod, "_OV_GPU_PROBE_CACHE", None)
+        if prev_ov is None:
+            sys.modules.pop("openvino", None)
+        else:
+            sys.modules["openvino"] = prev_ov
+
+    # 3. _FFmpegVAAPICapture synthetic pipe stream: dims parse, grab/retrieve, EOF, release & failure fallback
+    synth_script = (
+        "import sys, time; "
+        "sys.stderr.write('Input #0, rtsp:\\n  Stream #0:0: Video: h264, vaapi_vld, 64x48, 15 fps\\n'); "
+        "sys.stderr.flush(); "
+        "[sys.stdout.buffer.write(bytes([v]) * (64 * 48 * 3)) for v in (11, 22, 33)]; "
+        "sys.stdout.buffer.flush(); "
+        "time.sleep(0.15)"
+    )
+    cap = _FFmpegVAAPICapture(
+        "rtsp://example/stream",
+        ffmpeg_cmd=[sys.executable, "-c", synth_script],
+    )
+    assert cap.open(timeout=4.0) is True
+    assert cap.isOpened() is True
+    read_vals: list[int] = []
+    for _ in range(3):
+        assert cap.grab() is True
+        ok_ret, frm = cap.retrieve()
+        assert ok_ret is True
+        assert frm is not None and frm.shape == (48, 64, 3)
+        read_vals.append(int(frm[0, 0, 0]))
+    assert read_vals == [11, 22, 33]
+    assert cap.grab() is False
+    cap.release()
+
+    fail_cap = _FFmpegVAAPICapture(
+        "rtsp://example/fail",
+        ffmpeg_cmd=[sys.executable, "-c", "import sys; sys.stderr.write('No VA-API\\n'); sys.exit(1)"],
+    )
+    assert fail_cap.open(timeout=2.0) is False
+    fail_cap.release()
+
+    # 4. VA-API node discovery & diagnostics check
+    va_root = tmp_path / "va_sys"
+    dri_va = va_root / "dri"
+    drv_dir = va_root / "drv"
+    dri_va.mkdir(parents=True)
+    drv_dir.mkdir(parents=True)
+    render_file = dri_va / "renderD128"
+    render_file.write_bytes(b"")
+    (drv_dir / "iHD_drv_video.so").write_bytes(b"")
+    assert (
+        StreamWorker._find_vaapi_render_node(
+            dri_dir=dri_va,
+            driver_dirs=(drv_dir,),
+            ffmpeg_bin="/usr/bin/ffmpeg",
+            platform_name="linux",
+        )
+        == str(render_file)
+    )
+    diag_va = collect_hardware_diagnostics(
+        dri_dir=dri_va,
+        vaapi_driver_dirs=(drv_dir,),
+        ffmpeg_bin="/usr/bin/ffmpeg",
+        run_clinfo=False,
+    )
+    assert diag_va["vaapi"]["driver"] == "iHD_drv_video.so"
+    assert diag_va["vaapi"]["ready"] is True
+
+    # 5. Demand-driven _consume_live_capture_loop: grab() on every packet, retrieve() throttled when not needed
+    db = Database(tmp_path / "grab.db")
+    worker = StreamWorker(settings=Settings(data_dir=str(tmp_path / "grab_data"), ha_enabled=False), db=db)
+    worker.update_config(RuntimeConfig(target_fps=2.0, motion_gate_enabled=True))
+    worker._last_viewer_ts = 0.0
+
+    class _CountingGrabCap:
+        def __init__(self, total: int) -> None:
+            self.total = total
+            self.idx = 0
+            self.grabs = 0
+            self.retrieves = 0
+            self.released = False
+
+        def grab(self) -> bool:
+            if self.idx >= self.total:
+                return False
+            self.grabs += 1
+            self.idx += 1
+            return True
+
+        def retrieve(self) -> tuple[bool, np.ndarray]:
+            self.retrieves += 1
+            return (True, np.full((32, 32, 3), self.idx, dtype=np.uint8))
+
+        def release(self) -> None:
+            self.released = True
+
+    counting_cap = _CountingGrabCap(total=8)
+    rtsp_state: dict[str, object] = {"frame": None, "seq": 0, "alive": True}
+    rtsp_lock = threading.Lock()
+    stop_ev = threading.Event()
+    worker._consume_live_capture_loop(counting_cap, rtsp_state, rtsp_lock, stop_ev)
+    assert counting_cap.grabs == 8
+    assert counting_cap.retrieves == 1
+    assert counting_cap.released is True
+    assert rtsp_state["seq"] == 1
+
+    # 6. LicensePlateReader thread caps, roof trim, and 4K crop cap
+    rapid_kwargs: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        rapidocr_onnxruntime,
+        "RapidOCR",
+        lambda **kw: rapid_kwargs.append(dict(kw)) or "fake_ocr",
+    )
+    lpr = LicensePlateReader()
+    assert lpr._ensure_ocr() == "fake_ocr"
+    assert rapid_kwargs == [{"intra_op_num_threads": min(2, max(1, os.cpu_count() or 2)), "inter_op_num_threads": 1, "use_cls": False}]
+
+    # Tall 4K vehicle crop: top 15% (1000..1150) trimmed out, width > 960 downscaled to 960
+    uhd_frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
+    uhd_frame[1000:1140, :] = 255  # roof area (white)
+    crop_4k = LicensePlateReader.crop_vehicle_region(uhd_frame, (200, 1000, 2200, 2000))
+    assert crop_4k.shape[1] == 960
+    assert int(crop_4k[0].mean()) == 0
+
 
 
 

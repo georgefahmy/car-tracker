@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.28
+- **Intel QuickSync VA-API Hardware Decode & Demand-Driven Frame Skipping**: Added `_FFmpegVAAPICapture` (`ffmpeg -hwaccel vaapi -hwaccel_device /dev/dri/renderD*` with `intel-media-va-driver-non-free`, `ffmpeg`, and `libva-drm2` cached cleanly after the `.venv` Docker layer) plus demand-driven `cap.grab()` / `cap.retrieve()` skipping so unneeded YUV→BGR decodes are bypassed when idle or between inference intervals.
+- **OpenVINO Native FP16 & Persistent GPU Shader Cache**: GPU OpenVINO exports (`yolo` and `D-FINE`) now compile in native Intel Xe-LP **FP16** (`half=True` / `INFERENCE_PRECISION_HINT=f16`) with persistent OpenCL (`NEO_CACHE_DIR=/data/models/neo_cache`) and OpenVINO (`CACHE_DIR=/data/models/ov_cache`) caches for faster startup and lower GPU heat.
+- **YOLO26s Default, Auto iGPU Selection & Lower Preview Load**: Updated default detection model to `yolo26s.pt` (NMS-free high accuracy), made `inference_backend="auto"` automatically pick `openvino_gpu` when an Intel iGPU is present, throttled browser preview JPEG rendering during `Gate: Idle` (~2.5 FPS with immediate motion wakeup), and respected `960px` preview width.
+- **Thread-Capped ALPR (`RapidOCR`)**: Capped RapidOCR CPU threads (`intra_op_num_threads<=2`, `inter_op_num_threads=1`, `use_cls=False`), trimmed the top 15% roof/sky region, and downscaled oversized >960px 4K vehicle crops to prevent CPU spikes during violation snapshots.
+
 ## 1.0.27
 - **Fixed-Position Header Telemetry Strip**: Replaced the free-flowing `#streamInfo` header string with fixed-slot flex spans (`.telemetry-strip` / `.t-slot`) and `font-variant-numeric: tabular-nums` + fixed decimal formatting (`.toFixed(2)` FPS, `.toFixed(1)` CPU/RAM/temp/mph) and separated Motion Gate (`Gate: Idle` / `Gate: Active`) into its own reserved slot so values stay aligned instead of shifting left and right on updates.
 

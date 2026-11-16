@@ -18,7 +18,7 @@ class ZoneModel(BaseModel):
     points: list[list[float]] = Field(min_length=3)
     enabled: bool = True
     color: str = "#ef4444"
-    zone_type: Literal["red_zone", "exclusion"] = "red_zone"
+    zone_type: Literal["red_zone", "exclusion", "person_zone"] = "red_zone"
 
 
 class CountingLineModel(BaseModel):
@@ -145,6 +145,10 @@ class Database:
             vcols = {row[1] for row in cur.fetchall()}
             if "license_plate" not in vcols:
                 cur.execute("ALTER TABLE violations ADD COLUMN license_plate TEXT NOT NULL DEFAULT ''")
+            cur.execute("PRAGMA table_info(stats_state)")
+            scols = {row[1] for row in cur.fetchall()}
+            if "person_alerts" not in scols:
+                cur.execute("ALTER TABLE stats_state ADD COLUMN person_alerts INTEGER NOT NULL DEFAULT 0")
             self._conn.commit()
 
     def close(self) -> None:
@@ -165,7 +169,7 @@ class Database:
                 points=json.loads(r["points_json"]),
                 enabled=bool(r["enabled"]),
                 color=r["color"],
-                zone_type=r["zone_type"] if r["zone_type"] in ("red_zone", "exclusion") else "red_zone",
+                zone_type=r["zone_type"] if r["zone_type"] in ("red_zone", "exclusion", "person_zone") else "red_zone",
             )
             for r in rows
         ]
@@ -350,10 +354,16 @@ class Database:
     def get_stats_state(self) -> dict[str, int]:
         with self._lock:
             row = self._conn.execute(
-                "SELECT unique_cars, total_cars, unique_people, total_people FROM stats_state WHERE id = 1"
+                "SELECT unique_cars, total_cars, unique_people, total_people, person_alerts FROM stats_state WHERE id = 1"
             ).fetchone()
         if not row:
-            return {"unique_cars": 0, "total_cars": 0, "unique_people": 0, "total_people": 0}
+            return {
+                "unique_cars": 0,
+                "total_cars": 0,
+                "unique_people": 0,
+                "total_people": 0,
+                "person_alerts": 0,
+            }
         return dict(row)
 
     def increment_stats(
@@ -362,6 +372,7 @@ class Database:
         total_cars: int = 0,
         unique_people: int = 0,
         total_people: int = 0,
+        person_alerts: int = 0,
         now: datetime | None = None,
     ) -> dict[str, int]:
         ts = now or datetime.now(timezone.utc)
@@ -373,10 +384,11 @@ class Database:
                 SET unique_cars = unique_cars + ?,
                     total_cars = total_cars + ?,
                     unique_people = unique_people + ?,
-                    total_people = total_people + ?
+                    total_people = total_people + ?,
+                    person_alerts = person_alerts + ?
                 WHERE id = 1
                 """,
-                (unique_cars, total_cars, unique_people, total_people),
+                (unique_cars, total_cars, unique_people, total_people, person_alerts),
             )
             if total_cars or total_people:
                 self._conn.execute(
@@ -391,14 +403,14 @@ class Database:
                 )
             self._conn.commit()
             row = self._conn.execute(
-                "SELECT unique_cars, total_cars, unique_people, total_people FROM stats_state WHERE id = 1"
+                "SELECT unique_cars, total_cars, unique_people, total_people, person_alerts FROM stats_state WHERE id = 1"
             ).fetchone()
         return dict(row)
 
     def reset_stats(self) -> None:
         with self._lock:
             self._conn.execute(
-                "UPDATE stats_state SET unique_cars = 0, total_cars = 0, unique_people = 0, total_people = 0 WHERE id = 1"
+                "UPDATE stats_state SET unique_cars = 0, total_cars = 0, unique_people = 0, total_people = 0, person_alerts = 0 WHERE id = 1"
             )
             self._conn.execute("DELETE FROM hourly_traffic")
             self._conn.commit()
@@ -514,6 +526,9 @@ class Database:
             "people_today": people_today,
             "peak_hour": peak_hour,
             "violations_today": len(violations_today),
+            "person_alerts_today": sum(
+                1 for v in violations_today if v.get("vehicle_class") == "person"
+            ),
             "violations_list": violations_today[:10],
             "counting_lines": lines,
             "cumulative_stats": stats,

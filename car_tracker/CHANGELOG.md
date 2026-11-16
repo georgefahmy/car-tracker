@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.23
+- **Scheduled After-Hours Person Watch**: Added configurable time-window person monitoring (`person_zone_enabled`, `person_zone_start_time`, `person_zone_end_time`, `person_zone_dwell_seconds`, `person_zone_scope`) supporting both same-day and cross-midnight schedules (default `00:00`–`05:00`), drawable `person_zone` polygons (`+ Draw Person Zone` in purple), and four watch scopes (`person_zones_or_frame`, `person_zones`, `red_zones`, `full_frame`).
+- **Person Alerts Counter, Snapshots & Home Assistant Entity**: Added persistent `person_alerts` counter in `stats_state`, 7th KPI card (`Person Zone Alerts`) with active/scheduled badge, high-resolution annotated `person_*.jpg` snapshots (skipping vehicle ALPR OCR) with live dwell updates, webhook alerts, daily summary totals (`person_alerts_today`), `car_tracker_person_alert` HA events, and `sensor.car_tracker_person_alerts`.
+- **Symmetric 3 × 2 Desktop Bento Settings**: Added the Scheduled Person Watch card (with `?` tooltips on all 5 new settings) and aligned all 6 Settings cards into an even `3 × 2` desktop / `2 × 3` tablet grid with `?v=21` static asset cache-busting.
+
 ## 1.0.22
 - **Custom Home Assistant Add-on Icon, Detail Logo & Web Favicon**: Added Retina-crisp transparent squircle icon (`car_tracker/icon.png`, `256x256`) and detail-page banner (`car_tracker/logo.png`, `500x200`) for Home Assistant's Add-ons store and installed-apps grid, plus matching browser favicon (`static/icon.png`).
 

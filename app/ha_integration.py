@@ -214,6 +214,20 @@ class HomeAssistantPublisher:
                     "max_dwell_seconds": round(float(payload.get("max_dwell_seconds", 0.0)), 1),
                 },
             },
+            {
+                "type": "sensor",
+                "unique_id": "person_alerts",
+                "name": "Person Alerts",
+                "state": int(payload.get("person_alerts", 0)),
+                "unit_of_measurement": "alerts",
+                "state_class": "total_increasing",
+                "icon": "mdi:account-alert",
+                "attributes": {
+                    "window_enabled": bool(payload.get("person_zone_enabled", False)),
+                    "window_active": bool(payload.get("person_zone_active", False)),
+                    "schedule": str(payload.get("person_zone_schedule") or "00:00 - 05:00"),
+                },
+            },
         ]
 
     @staticmethod
@@ -328,6 +342,21 @@ class HomeAssistantPublisher:
                         "icon": "mdi:parking",
                         "dwelling_vehicles": int(payload.get("dwelling_vehicles", 0)),
                         "max_dwell_seconds": round(float(payload.get("max_dwell_seconds", 0.0)), 1),
+                    },
+                },
+            ),
+            (
+                "sensor.car_tracker_person_alerts",
+                {
+                    "state": int(payload.get("person_alerts", 0)),
+                    "attributes": {
+                        "friendly_name": "Car Tracker Person Alerts",
+                        "unit_of_measurement": "alerts",
+                        "state_class": "total_increasing",
+                        "icon": "mdi:account-alert",
+                        "window_enabled": bool(payload.get("person_zone_enabled", False)),
+                        "window_active": bool(payload.get("person_zone_active", False)),
+                        "schedule": str(payload.get("person_zone_schedule") or "00:00 - 05:00"),
                     },
                 },
             ),

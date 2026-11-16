@@ -609,7 +609,7 @@ def test_home_assistant_publisher_and_api(tmp_path: Path, monkeypatch) -> None:
         body = ha_r.json()
         assert body["ok"] is True
         assert body["mode"] == "supervisor"
-        assert body["entities"] == 8
+        assert body["entities"] == 9
         assert body["device_name"] == "Car Tracker"
         assert body["device_registered"] is True
 
@@ -626,12 +626,13 @@ def test_home_assistant_publisher_and_api(tmp_path: Path, monkeypatch) -> None:
         assert "http://supervisor/core/api/states/binary_sensor.car_tracker_red_zone_occupied" in del_urls
         assert len(del_urls) == 8
 
-        # All 8 sensors were registered and then updated in a single batch webhook call
+        # All 9 sensors were registered and then updated in a single batch webhook call
         reg_sensor_calls = [b["data"] for u, _, b in posted if "/webhook/wh_car_tracker_1" in u and b.get("type") == "register_sensor"]
-        assert len(reg_sensor_calls) == 8
+        assert len(reg_sensor_calls) == 9
+        assert any(s.get("unique_id") == "person_alerts" for s in reg_sensor_calls)
         update_calls = [b["data"] for u, _, b in posted if "/webhook/wh_car_tracker_1" in u and b.get("type") == "update_sensor_states"]
         assert len(update_calls) == 1
-        assert len(update_calls[0]) == 8
+        assert len(update_calls[0]) == 9
 
         # Subsequent sync reuses saved registration without registering another device
         posted.clear()
@@ -784,8 +785,9 @@ def test_home_assistant_device_persistence_reregistration_and_fallback(tmp_path:
             )
         assert r_fb["ok"] is True
         assert r_fb["device_registered"] is False
-        assert r_fb["entities"] == 8
+        assert r_fb["entities"] == 9
         assert any("/api/states/sensor.car_tracker_vehicles_today" in u for u in fallback_calls)
+        assert any("/api/states/sensor.car_tracker_person_alerts" in u for u in fallback_calls)
     finally:
         db.close()
 
@@ -1146,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.22"
+    assert expected_ver == "1.0.23"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1775,10 +1777,13 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         assert "role" not in attrs
         assert "aria-modal" not in attrs
 
-    assert "static/icon.png?v=20" in collector.links
-    assert "static/styles.css?v=20" in collector.links
-    assert "static/app.js?v=20" in collector.scripts
+    assert "static/icon.png?v=21" in collector.links
+    assert "static/styles.css?v=21" in collector.links
+    assert "static/app.js?v=21" in collector.scripts
     assert 'class="settings-bento"' in html
+    assert 'id="kpiPersonAlerts"' in html
+    assert 'id="btnDrawPersonZone"' in html
+    assert "Scheduled Person Watch" in html
     assert 'class="toggle-sub"' not in html
     assert collector.buttons_inside_label == []
 
@@ -1827,6 +1832,11 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         "emergency_min_value",
         "emergency_strobe_swing",
         "emergency_fire_red_ratio",
+        "person_zone_enabled",
+        "person_zone_start_time",
+        "person_zone_end_time",
+        "person_zone_dwell_seconds",
+        "person_zone_scope",
         "webhook_url",
         "daily_report_enabled",
         "daily_report_time",
@@ -1847,6 +1857,267 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         assert tip_btn.get("popovertargetaction") == "show"
         assert tip_btn.get("aria-label")
         assert len(collector.tooltips.get(tip_id, "")) >= 30
+
+
+def test_scheduled_person_zone_counter_time_windows_and_snapshots(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.detector import ViolationEvent, is_within_time_window, parse_hhmm_minutes
+
+    assert parse_hhmm_minutes("00:00") == 0
+    assert parse_hhmm_minutes("05:00") == 300
+    assert parse_hhmm_minutes("23:55") == 23 * 60 + 55
+    assert parse_hhmm_minutes("invalid", default_minutes=120) == 120
+
+    def utc_ts(hour: int, minute: int, second: int = 0) -> float:
+        return datetime(2026, 11, 15, hour, minute, second, tzinfo=timezone.utc).timestamp()
+
+    # Standard 00:00 -> 05:00 window
+    assert is_within_time_window(utc_ts(0, 0), "00:00", "05:00", local_tz=timezone.utc) is True
+    assert is_within_time_window(utc_ts(2, 30), "00:00", "05:00", local_tz=timezone.utc) is True
+    assert is_within_time_window(utc_ts(4, 59), "00:00", "05:00", local_tz=timezone.utc) is True
+    assert is_within_time_window(utc_ts(5, 0), "00:00", "05:00", local_tz=timezone.utc) is False
+    assert is_within_time_window(utc_ts(14, 0), "00:00", "05:00", local_tz=timezone.utc) is False
+
+    # Overnight cross-midnight window 23:00 -> 05:00
+    assert is_within_time_window(utc_ts(23, 0), "23:00", "05:00", local_tz=timezone.utc) is True
+    assert is_within_time_window(utc_ts(23, 59), "23:00", "05:00", local_tz=timezone.utc) is True
+    assert is_within_time_window(utc_ts(3, 15), "23:00", "05:00", local_tz=timezone.utc) is True
+    assert is_within_time_window(utc_ts(22, 59), "23:00", "05:00", local_tz=timezone.utc) is False
+    assert is_within_time_window(utc_ts(5, 0), "23:00", "05:00", local_tz=timezone.utc) is False
+
+    # Equal boundaries monitor 24/7
+    assert is_within_time_window(utc_ts(15, 20), "00:00", "00:00", local_tz=timezone.utc) is True
+
+    # Monitor test: person walking inside a drawn person_zone triggers counter without resetting dwell on motion
+    monitor = RedZoneMonitor()
+    pzone = ZoneModel(
+        id="pz_front",
+        name="Front Porch",
+        points=[[0.1, 0.1], [0.45, 0.1], [0.45, 0.9], [0.1, 0.9]],
+        enabled=True,
+        color="#a855f7",
+        zone_type="person_zone",
+    )
+
+    # Daytime: person inside person_zone should NOT alert or increment person_alerts
+    day_res = monitor.process_tracks(
+        [_make_person(1, cx=0.25, y2=0.5)],
+        1000,
+        1000,
+        [pzone],
+        now_ts=utc_ts(14, 0, 0),
+        dwell_seconds=30.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+        person_zone_enabled=True,
+        person_zone_start_time="00:00",
+        person_zone_end_time="05:00",
+        person_zone_dwell_seconds=0.0,
+        person_zone_scope="person_zones_or_frame",
+        local_tz=timezone.utc,
+    )
+    assert day_res.new_person_alerts == 0
+    assert day_res.new_violations == []
+
+    # After hours, outside polygon: does not trigger when person_zone exists
+    out_res = monitor.process_tracks(
+        [_make_person(2, cx=0.75, y2=0.5)],
+        1000,
+        1000,
+        [pzone],
+        now_ts=utc_ts(2, 0, 0),
+        dwell_seconds=30.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+        person_zone_enabled=True,
+        person_zone_start_time="00:00",
+        person_zone_end_time="05:00",
+        person_zone_dwell_seconds=2.0,
+        person_zone_scope="person_zones_or_frame",
+        local_tz=timezone.utc,
+    )
+    assert out_res.new_person_alerts == 0
+    assert out_res.track_statuses[2]["in_person_zone"] is False
+
+    # Walking inside person_zone across t=0s, t=1s (moves > movement_threshold), t=2.5s
+    r0 = monitor.process_tracks(
+        [_make_person(3, cx=0.20, y2=0.50)],
+        1000,
+        1000,
+        [pzone],
+        now_ts=utc_ts(2, 1, 0),
+        dwell_seconds=30.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+        person_zone_enabled=True,
+        person_zone_start_time="00:00",
+        person_zone_end_time="05:00",
+        person_zone_dwell_seconds=2.0,
+        person_zone_scope="person_zones_or_frame",
+        local_tz=timezone.utc,
+    )
+    assert r0.new_person_alerts == 0
+    assert r0.track_statuses[3]["in_person_zone"] is True
+    assert r0.track_statuses[3]["person_violation"] is False
+
+    r1 = monitor.process_tracks(
+        [_make_person(3, cx=0.28, y2=0.55)],
+        1000,
+        1000,
+        [pzone],
+        now_ts=utc_ts(2, 1, 1),
+        dwell_seconds=30.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+        person_zone_enabled=True,
+        person_zone_start_time="00:00",
+        person_zone_end_time="05:00",
+        person_zone_dwell_seconds=2.0,
+        person_zone_scope="person_zones_or_frame",
+        local_tz=timezone.utc,
+    )
+    assert r1.new_person_alerts == 0
+    assert r1.track_statuses[3]["person_dwell_seconds"] == 1.0
+
+    r2 = monitor.process_tracks(
+        [_make_person(3, cx=0.36, y2=0.60)],
+        1000,
+        1000,
+        [pzone],
+        now_ts=utc_ts(2, 1, 3),
+        dwell_seconds=30.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+        person_zone_enabled=True,
+        person_zone_start_time="00:00",
+        person_zone_end_time="05:00",
+        person_zone_dwell_seconds=2.0,
+        person_zone_scope="person_zones_or_frame",
+        local_tz=timezone.utc,
+    )
+    assert r2.new_person_alerts == 1
+    assert len(r2.new_violations) == 1
+    v_ev = r2.new_violations[0]
+    assert v_ev.vehicle_class == "person"
+    assert v_ev.zone_id == "person_zone:pz_front"
+    assert v_ev.zone_name == "Front Porch"
+    assert r2.track_statuses[3]["person_violation"] is True
+
+    # Full-frame fallback when no person_zone exists
+    frame_mon = RedZoneMonitor()
+    full_r = frame_mon.process_tracks(
+        [_make_person(7, cx=0.80, y2=0.80)],
+        1000,
+        1000,
+        [],
+        now_ts=utc_ts(1, 0, 0),
+        dwell_seconds=30.0,
+        movement_threshold=0.015,
+        min_track_frames=1,
+        person_zone_enabled=True,
+        person_zone_start_time="00:00",
+        person_zone_end_time="05:00",
+        person_zone_dwell_seconds=0.0,
+        person_zone_scope="person_zones_or_frame",
+        local_tz=timezone.utc,
+    )
+    assert full_r.new_person_alerts == 1
+    assert full_r.new_violations[0].zone_id == "person_zone:after_hours"
+
+    # End-to-end API, snapshot generation, ALPR skip, HA payload, daily summary & stats reset
+    settings = Settings(data_dir=str(tmp_path / "data"), ha_enabled=False, alpr_enabled=True)
+    app = create_app(settings=settings, start_worker=False)
+    with TestClient(app) as client:
+        zr = client.put("/api/zones", json=[pzone.model_dump()])
+        assert zr.status_code == 200
+        assert zr.json()[0]["zone_type"] == "person_zone"
+
+        cfg_get = client.get("/api/config").json()
+        cfg_get.update(
+            {
+                "person_zone_enabled": True,
+                "person_zone_start_time": "00:00",
+                "person_zone_end_time": "05:00",
+                "person_zone_dwell_seconds": 0.0,
+                "person_zone_scope": "person_zones_or_frame",
+            }
+        )
+        cfg_put = client.put("/api/config", json=cfg_get)
+        assert cfg_put.status_code == 200
+        assert cfg_put.json()["person_zone_dwell_seconds"] == 0.0
+        assert cfg_put.json()["person_zone_scope"] == "person_zones_or_frame"
+
+        worker = app.state.worker
+        frame = np.zeros((360, 640, 3), dtype=np.uint8)
+        p_det = _make_person(11, cx=0.25, y2=0.5, w=640, h=360)
+        now_iso = datetime.now(timezone.utc).astimezone().isoformat()
+        step = SimpleNamespace(
+            new_person_alerts=1,
+            new_violations=[
+                ViolationEvent(
+                    track_id=11,
+                    zone_id="person_zone:pz_front",
+                    zone_name="Front Porch",
+                    vehicle_class="person",
+                    started_at=now_iso,
+                    flagged_at=now_iso,
+                    dwell_seconds=2.5,
+                )
+            ],
+            dwell_updates=[],
+            track_statuses={
+                11: {
+                    "in_red_zone": False,
+                    "dwell_seconds": 0.0,
+                    "violation": False,
+                    "zone_name": "Front Porch",
+                    "emergency": False,
+                    "in_person_zone": True,
+                    "person_dwell_seconds": 2.5,
+                    "person_violation": True,
+                }
+            },
+        )
+        with patch.object(worker.alpr, "read_plate", side_effect=AssertionError("ALPR should skip people")):
+            worker._handle_step_events(
+                frame=frame,
+                w=640,
+                h=360,
+                tracks=[p_det],
+                step=step,
+                zones=[pzone],
+                counting_lines=[],
+                cfg=worker.config,
+                speeding_events=[],
+            )
+        app.state.db.increment_stats(person_alerts=1, unique_people=1, total_people=1)
+
+        viols = client.get("/api/violations").json()
+        assert len(viols) == 1
+        assert viols[0]["vehicle_class"] == "person"
+        assert viols[0]["snapshot_filename"].startswith("person_")
+        assert (worker.snapshots_dir / viols[0]["snapshot_filename"]).exists()
+
+        stats = client.get("/api/stats").json()
+        assert stats["person_alerts"] == 1
+        assert stats["person_zone_enabled"] is True
+        assert stats["person_zone_window"] == "00:00–05:00"
+
+        ha_payload = worker.build_ha_payload()
+        assert ha_payload["person_alerts"] == 1
+        assert ha_payload["red_zone_occupied"] is False
+
+        summary = app.state.db.get_daily_summary()
+        assert summary["person_alerts_today"] == 1
+        assert "Person Zone Alerts Today:** 1" in worker.build_daily_report_message(summary)
+
+        reset_r = client.post("/api/stats/reset")
+        assert reset_r.status_code == 200
+        assert client.get("/api/stats").json()["person_alerts"] == 0
+
 
 
 

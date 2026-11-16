@@ -39,6 +39,7 @@ from app.detector import (
     compute_optimal_input_hw,
     filter_excluded_tracks,
     is_dfine_model,
+    is_within_time_window,
 )
 from app.ha_integration import HomeAssistantPublisher
 
@@ -393,9 +394,16 @@ class StreamWorker:
         }
 
     def build_ha_payload(self) -> dict[str, Any]:
+        cfg = self.config
         stats = self.db.get_stats_state()
         speed = self.line_monitor.get_speed_summary()
         violations_total = self.db.count_violations()
+        person_window_active = bool(
+            cfg.person_zone_enabled
+            and is_within_time_window(
+                time.time(), cfg.person_zone_start_time, cfg.person_zone_end_time
+            )
+        )
         with self._lock:
             dwells = list(self._active_dwells)
             last_plate = dict(self._last_plate)
@@ -407,6 +415,10 @@ class StreamWorker:
             "people_today": stats["total_people"],
             "unique_cars": stats["unique_cars"],
             "unique_people": stats["unique_people"],
+            "person_alerts": int(stats.get("person_alerts", 0)),
+            "person_zone_enabled": bool(cfg.person_zone_enabled),
+            "person_zone_active": person_window_active,
+            "person_zone_schedule": f"{cfg.person_zone_start_time} - {cfg.person_zone_end_time}",
             "active_cars": active_cars,
             "active_people": active_people,
             "last_speed_mph": speed.get("last_speed_mph"),
@@ -443,9 +455,16 @@ class StreamWorker:
             self._ha_wake_event.clear()
 
     def get_live_state(self) -> dict[str, Any]:
+        cfg = self.config
         stats = self.db.get_stats_state()
         system_metrics = self._get_system_metrics()
         ha_status = self.ha_publisher.get_status()
+        person_window_active = bool(
+            cfg.person_zone_enabled
+            and is_within_time_window(
+                time.time(), cfg.person_zone_start_time, cfg.person_zone_end_time
+            )
+        )
         with self._lock:
             source_summary = self.get_source_summary(self.config, self._stream_status)
             return {
@@ -464,6 +483,10 @@ class StreamWorker:
                 "total_cars": stats["total_cars"],
                 "unique_people": stats["unique_people"],
                 "total_people": stats["total_people"],
+                "person_alerts": int(stats.get("person_alerts", 0)),
+                "person_zone_enabled": bool(cfg.person_zone_enabled),
+                "person_zone_active": person_window_active,
+                "person_zone_window": f"{cfg.person_zone_start_time}–{cfg.person_zone_end_time}",
                 "violations_total": self.db.count_violations(),
                 "counting_lines": [ln.model_dump() for ln in self.db.get_counting_lines()],
                 "active_dwells": list(self._active_dwells),
@@ -682,19 +705,36 @@ class StreamWorker:
 
         orig_tid = int(entry["orig_track_id"])
         statuses = {k: dict(val) for k, val in entry["track_statuses"].items()}
-        target_status = statuses.setdefault(
-            orig_tid,
+        is_person = bool(entry.get("is_person")) or str(entry.get("zone_id", "")).startswith("person_zone")
+        default_st = (
             {
+                "in_red_zone": False,
+                "dwell_seconds": 0.0,
+                "violation": False,
+                "zone_name": None,
+                "emergency": False,
+                "in_person_zone": True,
+                "person_dwell_seconds": round(float(dwell_seconds), 1),
+                "person_violation": True,
+            }
+            if is_person
+            else {
                 "in_red_zone": True,
                 "dwell_seconds": round(float(dwell_seconds), 1),
                 "violation": True,
                 "zone_name": None,
                 "emergency": False,
-            },
+            }
         )
-        target_status["in_red_zone"] = True
-        target_status["violation"] = True
-        target_status["dwell_seconds"] = round(float(dwell_seconds), 1)
+        target_status = statuses.setdefault(orig_tid, default_st)
+        if is_person:
+            target_status["in_person_zone"] = True
+            target_status["person_violation"] = True
+            target_status["person_dwell_seconds"] = round(float(dwell_seconds), 1)
+        else:
+            target_status["in_red_zone"] = True
+            target_status["violation"] = True
+            target_status["dwell_seconds"] = round(float(dwell_seconds), 1)
 
         updated_img = annotate_frame(
             frame=base_img,
@@ -706,6 +746,7 @@ class StreamWorker:
             show_heatmap=False,
             counting_lines=entry["counting_lines"],
             annotation_scale=float(entry["annotation_scale"]),
+            person_dwell_threshold=float(entry.get("person_dwell_threshold", 2.0)),
         )
         return self._write_jpeg_atomic(entry["snap_path"], updated_img, quality=92)
 
@@ -743,6 +784,7 @@ class StreamWorker:
             show_heatmap=cfg.heatmap_enabled,
             counting_lines=counting_lines,
             annotation_scale=cfg.annotation_scale,
+            person_dwell_threshold=cfg.person_zone_dwell_seconds,
         )
         ok_jpg, jpg_buf = cv2.imencode(".jpg", annotated_preview, [cv2.IMWRITE_JPEG_QUALITY, 80])
         return jpg_buf.tobytes() if ok_jpg else None
@@ -781,9 +823,9 @@ class StreamWorker:
             plates_by_tid: dict[int, tuple[str, float]] = {}
 
             if cfg.alpr_enabled:
-                event_tids = {v.track_id for v in step.new_violations} | {
-                    int(sp["track_id"]) for sp in speeding_events
-                }
+                event_tids = {
+                    v.track_id for v in step.new_violations if v.vehicle_class != "person"
+                } | {int(sp["track_id"]) for sp in speeding_events}
                 for tid in event_tids:
                     plate, plate_conf = self.alpr.read_plate(snap_base, track_bbox_map.get(tid))
                     if plate:
@@ -819,10 +861,15 @@ class StreamWorker:
                 show_heatmap=cfg.heatmap_enabled,
                 counting_lines=counting_lines,
                 annotation_scale=cfg.annotation_scale,
+                person_dwell_threshold=cfg.person_zone_dwell_seconds,
             )
             for v in step.new_violations:
+                is_person_alert = v.vehicle_class == "person" or str(v.zone_id).startswith(
+                    "person_zone"
+                )
                 ts_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                fname = f"violation_{ts_slug}_t{v.track_id}.jpg"
+                fname_prefix = "person" if is_person_alert else "violation"
+                fname = f"{fname_prefix}_{ts_slug}_t{v.track_id}.jpg"
                 snap_path = self.snapshots_dir / fname
                 self._write_jpeg_atomic(snap_path, annotated_full, quality=92)
                 plate_text = plates_by_tid.get(v.track_id, ("", 0.0))[0]
@@ -843,6 +890,7 @@ class StreamWorker:
                         "violation_id": rec.id,
                         "orig_track_id": int(v.track_id),
                         "zone_id": v.zone_id,
+                        "is_person": is_person_alert,
                         "snap_path": snap_path,
                         "clean_jpeg": clean_jpeg,
                         "tracks": copy.deepcopy(snap_tracks),
@@ -850,6 +898,7 @@ class StreamWorker:
                         "zones": copy.deepcopy(zones),
                         "counting_lines": copy.deepcopy(counting_lines),
                         "dwell_threshold": float(cfg.dwell_seconds),
+                        "person_dwell_threshold": float(cfg.person_zone_dwell_seconds),
                         "annotation_scale": float(cfg.annotation_scale),
                         "created_ts": now_mono,
                         "last_update_ts": now_mono,
@@ -875,9 +924,12 @@ class StreamWorker:
                 if cfg.webhook_url.strip():
                     self._dispatch_webhook(cfg.webhook_url.strip(), rec.model_dump(), snap_path)
                 if cfg.ha_enabled:
+                    ha_event_type = (
+                        "car_tracker_person_alert" if is_person_alert else "car_tracker_violation"
+                    )
                     threading.Thread(
                         target=self.ha_publisher.fire_event,
-                        args=("car_tracker_violation", rec.model_dump(), cfg.ha_url, cfg.ha_token),
+                        args=(ha_event_type, rec.model_dump(), cfg.ha_url, cfg.ha_token),
                         daemon=True,
                     ).start()
 
@@ -1004,6 +1056,11 @@ class StreamWorker:
                     movement_threshold=cfg.movement_threshold,
                     min_track_frames=cfg.min_track_frames,
                     exempt_emergency_vehicles=cfg.exempt_emergency_vehicles,
+                    person_zone_enabled=cfg.person_zone_enabled,
+                    person_zone_start_time=cfg.person_zone_start_time,
+                    person_zone_end_time=cfg.person_zone_end_time,
+                    person_zone_dwell_seconds=cfg.person_zone_dwell_seconds,
+                    person_zone_scope=cfg.person_zone_scope,
                 )
                 calib = self.db.get_ground_calibration()
                 line_incs = self.line_monitor.process_tracks(
@@ -1028,12 +1085,14 @@ class StreamWorker:
                     or step.new_total_cars
                     or step.new_unique_people
                     or step.new_total_people
+                    or step.new_person_alerts
                 ):
                     self.db.increment_stats(
                         unique_cars=step.new_unique_cars,
                         total_cars=step.new_total_cars,
                         unique_people=step.new_unique_people,
                         total_people=step.new_total_people,
+                        person_alerts=step.new_person_alerts,
                     )
 
                 new_speeds = self.line_monitor.consume_new_speeds()
@@ -1065,7 +1124,7 @@ class StreamWorker:
                 has_red_zones = any(
                     z.enabled and getattr(z, "zone_type", "red_zone") == "red_zone" for z in zones
                 )
-                if tracks and (has_active_dwells or has_red_zones):
+                if tracks and (has_active_dwells or has_red_zones or cfg.person_zone_enabled):
                     step = self.monitor.process_tracks(
                         tracks=tracks,
                         frame_w=w,
@@ -1076,7 +1135,14 @@ class StreamWorker:
                         movement_threshold=cfg.movement_threshold,
                         min_track_frames=cfg.min_track_frames,
                         exempt_emergency_vehicles=cfg.exempt_emergency_vehicles,
+                        person_zone_enabled=cfg.person_zone_enabled,
+                        person_zone_start_time=cfg.person_zone_start_time,
+                        person_zone_end_time=cfg.person_zone_end_time,
+                        person_zone_dwell_seconds=cfg.person_zone_dwell_seconds,
+                        person_zone_scope=cfg.person_zone_scope,
                     )
+                    if step.new_person_alerts:
+                        self.db.increment_stats(person_alerts=step.new_person_alerts)
                     track_speeds = self.line_monitor.get_track_speeds()
                     for tid, mph in track_speeds.items():
                         if tid in step.track_statuses:
@@ -1216,6 +1282,13 @@ class StreamWorker:
                         f"🚨 Speeding Alert: {record['vehicle_class'].upper()} #{record['track_id']} "
                         f"— {record['zone_name']}"
                     )
+                elif record.get("vehicle_class") == "person" or str(
+                    record.get("zone_id", "")
+                ).startswith("person_zone"):
+                    msg = (
+                        f"🚶 After-Hours Person Alert: PERSON #{record['track_id']} "
+                        f"in {record['zone_name']} (dwell: {record['dwell_seconds']:.0f}s)"
+                    )
                 else:
                     msg = (
                         f"🚨 Red-Zone Violation: {record['vehicle_class'].upper()} #{record['track_id']} "
@@ -1250,6 +1323,7 @@ class StreamWorker:
             hour_label = str(peak["hour_bucket"]).split("T")[-1]
             lines_out.append(f"• **Peak Hour:** {hour_label}:00 ({peak['vehicles_count']} vehicles)")
         lines_out.append(f"• **Red-Zone Violations Today:** {summary['violations_today']}")
+        lines_out.append(f"• **Person Zone Alerts Today:** {summary.get('person_alerts_today', 0)}")
         counting_lines = summary.get("counting_lines") or []
         if counting_lines:
             lines_out.append("• **Traffic Flow Lines (total A→B / B→A):**")
@@ -1260,7 +1334,8 @@ class StreamWorker:
         cum = summary.get("cumulative_stats") or {}
         lines_out.append(
             f"• **All-Time Totals:** {cum.get('unique_cars', 0)} unique vehicles, "
-            f"{cum.get('unique_people', 0)} unique people"
+            f"{cum.get('unique_people', 0)} unique people, "
+            f"{cum.get('person_alerts', 0)} person alerts"
         )
         return "\n".join(lines_out)
 

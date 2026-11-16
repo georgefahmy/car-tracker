@@ -674,7 +674,15 @@ function renderZoneCanvas() {
       else ctx.lineTo(nx * w, ny * h);
     });
     ctx.closePath();
-    ctx.strokeStyle = z.enabled ? "rgba(239, 68, 68, 0.7)" : "rgba(148, 163, 184, 0.5)";
+    if (!z.enabled) {
+      ctx.strokeStyle = "rgba(148, 163, 184, 0.45)";
+    } else if (z.zone_type === "exclusion") {
+      ctx.strokeStyle = "rgba(148, 163, 184, 0.78)";
+    } else if (z.zone_type === "person_zone") {
+      ctx.strokeStyle = "rgba(168, 85, 247, 0.82)";
+    } else {
+      ctx.strokeStyle = "rgba(239, 68, 68, 0.72)";
+    }
     ctx.lineWidth = 2;
     ctx.stroke();
   }
@@ -716,7 +724,14 @@ function renderZoneCanvas() {
       const py = ny * h;
       ctx.beginPath();
       ctx.arc(px, py, handleRadius, 0, Math.PI * 2);
-      ctx.fillStyle = isLine ? "#38bdf8" : "#ef4444";
+      let handleColor = "#ef4444";
+      if (isLine) handleColor = "#38bdf8";
+      else if (drawingMode === "exclusion" || (drawingMode === "edit" && editingTarget?.zone_type === "exclusion")) {
+        handleColor = "#94a3b8";
+      } else if (drawingMode === "person_zone" || (drawingMode === "edit" && editingTarget?.zone_type === "person_zone")) {
+        handleColor = "#a855f7";
+      }
+      ctx.fillStyle = handleColor;
       ctx.fill();
       ctx.strokeStyle = "#fff";
       ctx.lineWidth = 1.8;
@@ -758,6 +773,8 @@ function setDrawingMode(mode, target = null) {
     hint.textContent = "Click 2 points on the video to place a traffic counting line (start and end).";
   } else if (mode === "exclusion") {
     hint.textContent = 'Click on the video to outline an exclusion mask (e.g. balcony/plants to ignore). Double-click or press "Finish & Save".';
+  } else if (mode === "person_zone") {
+    hint.textContent = 'Click on the video to outline an after-hours Person Zone. Double-click or press "Finish & Save" when done.';
   } else {
     hint.textContent = 'Click on the video to place polygon corners around the red zone. Double-click or press "Finish & Save" when done.';
   }
@@ -766,7 +783,7 @@ function setDrawingMode(mode, target = null) {
   document.getElementById("btnUndoPoint").classList.toggle("hidden", !active || isEdit);
   document.getElementById("btnRenameEdit").classList.toggle("hidden", !isEdit);
   const finishBtn = document.getElementById("btnFinishZone");
-  const showFinish = mode === "zone" || mode === "exclusion" || isEdit;
+  const showFinish = mode === "zone" || mode === "exclusion" || mode === "person_zone" || isEdit;
   finishBtn.classList.toggle("hidden", !showFinish);
   const cancelBtn = document.getElementById("btnCancelDraw");
   cancelBtn.classList.toggle("hidden", !active);
@@ -896,13 +913,14 @@ zoneCanvas.addEventListener("click", (e) => {
 });
 
 zoneCanvas.addEventListener("dblclick", () => {
-  if ((drawingMode === "zone" || drawingMode === "exclusion") && draftPoints.length >= 3) {
+  if ((drawingMode === "zone" || drawingMode === "exclusion" || drawingMode === "person_zone") && draftPoints.length >= 3) {
     finishZone();
   }
 });
 
 document.getElementById("btnDrawZone").addEventListener("click", () => setDrawingMode("zone"));
 document.getElementById("btnAutoRedZone").addEventListener("click", autoDetectRedCurb);
+document.getElementById("btnDrawPersonZone")?.addEventListener("click", () => setDrawingMode("person_zone"));
 document.getElementById("btnDrawExclusion").addEventListener("click", () => setDrawingMode("exclusion"));
 document.getElementById("btnDrawLine").addEventListener("click", () => setDrawingMode("line"));
 document.getElementById("btnCalibrateGround").addEventListener("click", () => setDrawingMode("calibrate"));
@@ -968,7 +986,7 @@ function startEditLine(ln) {
 
 function startEditZone(z) {
   draftPoints = z.points.map((pt) => [...pt]);
-  setDrawingMode("edit", { kind: "zone", id: z.id, name: z.name });
+  setDrawingMode("edit", { kind: "zone", id: z.id, name: z.name, zone_type: z.zone_type || "red_zone" });
 }
 
 function getFocusedRowMeta(containerEl) {
@@ -1075,8 +1093,23 @@ async function finishZone() {
     return;
   }
   const isExclusion = drawingMode === "exclusion";
-  const defaultName = isExclusion ? `Exclusion Mask ${savedZones.length + 1}` : `Red Zone ${savedZones.length + 1}`;
-  const name = prompt(isExclusion ? "Name this exclusion mask:" : "Name this red zone:", defaultName);
+  const isPersonZone = drawingMode === "person_zone";
+  let defaultName = `Red Zone ${savedZones.length + 1}`;
+  let promptLabel = "Name this red zone:";
+  let color = "#ef4444";
+  let zoneType = "red_zone";
+  if (isExclusion) {
+    defaultName = `Exclusion Mask ${savedZones.length + 1}`;
+    promptLabel = "Name this exclusion mask:";
+    color = "#94a3b8";
+    zoneType = "exclusion";
+  } else if (isPersonZone) {
+    defaultName = `Person Zone ${savedZones.length + 1}`;
+    promptLabel = "Name this person watch zone:";
+    color = "#a855f7";
+    zoneType = "person_zone";
+  }
+  const name = prompt(promptLabel, defaultName);
   if (!name) return;
 
   const updated = [
@@ -1086,8 +1119,8 @@ async function finishZone() {
       name: name.trim(),
       points: draftPoints,
       enabled: true,
-      color: isExclusion ? "#94a3b8" : "#ef4444",
-      zone_type: isExclusion ? "exclusion" : "red_zone",
+      color,
+      zone_type: zoneType,
     },
   ];
   await saveZones(updated);
@@ -1148,7 +1181,7 @@ function renderZonesList() {
   const focusMeta = getFocusedRowMeta(el);
   updateZonesMenuBadge();
   if (!savedZones.length) {
-    el.innerHTML = `<span class="muted small">No red zones defined yet.</span>`;
+    el.innerHTML = `<span class="muted small">No zones defined yet.</span>`;
     if (focusMeta) {
       document.getElementById("btnDrawZone")?.focus();
     }
@@ -1158,7 +1191,9 @@ function renderZonesList() {
   for (const z of savedZones) {
     const row = document.createElement("div");
     row.className = "zone-menu-row";
-    const icon = z.zone_type === "exclusion" ? "🩶" : "🔴";
+    let icon = "🔴";
+    if (z.zone_type === "exclusion") icon = "🩶";
+    else if (z.zone_type === "person_zone") icon = "🟣";
     row.innerHTML = `
       <span class="zone-menu-label">${z.enabled ? icon : "⚪"} ${escapeHtml(z.name)}</span>
       <div class="zone-menu-actions">
@@ -1246,6 +1281,23 @@ async function refreshStats() {
     document.getElementById("kpiTotalCars").textContent = data.total_cars;
     document.getElementById("kpiPeople").textContent = `${data.active_people} / ${data.unique_people}`;
     document.getElementById("kpiViolations").textContent = data.violations_total;
+    const personAlertsEl = document.getElementById("kpiPersonAlerts");
+    if (personAlertsEl) {
+      personAlertsEl.textContent = data.person_alerts ?? 0;
+    }
+    const personSchedEl = document.getElementById("kpiPersonSchedule");
+    if (personSchedEl) {
+      if (!data.person_zone_enabled) {
+        personSchedEl.textContent = "Disabled";
+        personSchedEl.style.color = "";
+      } else if (data.person_zone_active) {
+        personSchedEl.textContent = `ACTIVE (${data.person_zone_window || "00:00–05:00"})`;
+        personSchedEl.style.color = "#c084fc";
+      } else {
+        personSchedEl.textContent = `Scheduled ${data.person_zone_window || "00:00–05:00"}`;
+        personSchedEl.style.color = "";
+      }
+    }
     if (Array.isArray(data.counting_lines)) {
       savedLines = data.counting_lines;
       const sig = JSON.stringify(savedLines);
@@ -1487,8 +1539,8 @@ function renderViolationsList() {
 
   if (!filtered.length) {
     list.innerHTML = query
-      ? `<p class="muted">No violations match "${escapeHtml(query)}".</p>`
-      : `<p class="muted">No illegal parking violations recorded yet.</p>`;
+      ? `<p class="muted">No violations or alerts match "${escapeHtml(query)}".</p>`
+      : `<p class="muted">No violations or alerts recorded yet.</p>`;
     return;
   }
 
@@ -1497,9 +1549,15 @@ function renderViolationsList() {
     const card = document.createElement("div");
     card.className = "violation-card";
     const timeStr = new Date(v.flagged_at).toLocaleString();
-    const detailLine = v.zone_id === "speeding"
-      ? `Speed: ${v.dwell_seconds.toFixed(1)} mph`
-      : `Parked: ${escapeHtml(formatDurationSeconds(v.dwell_seconds))}`;
+    const isPersonAlert = v.vehicle_class === "person" || String(v.zone_id || "").startsWith("person_zone");
+    let detailLine;
+    if (v.zone_id === "speeding") {
+      detailLine = `Speed: ${v.dwell_seconds.toFixed(1)} mph`;
+    } else if (isPersonAlert) {
+      detailLine = `Detected dwell: ${escapeHtml(formatDurationSeconds(v.dwell_seconds))}`;
+    } else {
+      detailLine = `Parked: ${escapeHtml(formatDurationSeconds(v.dwell_seconds))}`;
+    }
     const plateBadge = v.license_plate
       ? `<div class="plate-badge">🪪 ${escapeHtml(v.license_plate)}</div>`
       : "";
@@ -1507,7 +1565,7 @@ function renderViolationsList() {
     card.innerHTML = `
       <img src="${imgUrl}" alt="Snapshot" width="96" height="60" loading="lazy" />
       <div class="violation-meta">
-        <div class="violation-title">${escapeHtml(v.vehicle_class.toUpperCase())} #${v.track_id} • ${escapeHtml(v.zone_name)}</div>
+        <div class="violation-title${isPersonAlert ? " is-person" : ""}">${escapeHtml(v.vehicle_class.toUpperCase())} #${v.track_id} • ${escapeHtml(v.zone_name)}</div>
         ${plateBadge}
         <div class="muted">${detailLine}</div>
         <div class="muted">${escapeHtml(timeStr)}</div>
@@ -1767,6 +1825,11 @@ function formToPayload() {
     speed_capture_enabled: Boolean(settingsForm.elements["speed_capture_enabled"]?.checked),
     speed_limit_mph: Number(fd.get("speed_limit_mph")) || 25,
     alpr_enabled: Boolean(settingsForm.elements["alpr_enabled"]?.checked),
+    person_zone_enabled: Boolean(settingsForm.elements["person_zone_enabled"]?.checked),
+    person_zone_start_time: fd.get("person_zone_start_time") || "00:00",
+    person_zone_end_time: fd.get("person_zone_end_time") || "05:00",
+    person_zone_dwell_seconds: Number(fd.get("person_zone_dwell_seconds") ?? 2),
+    person_zone_scope: fd.get("person_zone_scope") || "person_zones_or_frame",
     exempt_emergency_vehicles: Boolean(settingsForm.elements["exempt_emergency_vehicles"]?.checked),
     emergency_min_saturation: Number(fd.get("emergency_min_saturation")),
     emergency_min_value: Number(fd.get("emergency_min_value")),

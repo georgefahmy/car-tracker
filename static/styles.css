@@ -9,6 +9,7 @@
   --green: #22c55e;
   --blue: #38bdf8;
   --amber: #f59e0b;
+  --purple: #a855f7;
   --target-size: 24px;
 }
 
@@ -122,6 +123,7 @@ h1, h2, h3 { text-wrap: balance; }
 .btn:hover { filter: brightness(1.12); }
 .btn-primary { background: var(--primary); }
 .btn-danger { background: var(--danger); }
+.btn-purple { background: #9333ea; }
 .btn-secondary { background: #1f2a3d; border-color: #31415c; }
 .btn-ghost { background: transparent; border-color: var(--panel-border); color: var(--muted); }
 
@@ -152,6 +154,8 @@ h1, h2, h3 { text-wrap: balance; }
 .accent-green { color: var(--green); }
 .accent-blue { color: var(--blue); }
 .accent-red { color: var(--danger); }
+.accent-purple { color: #c084fc; }
+.kpi-sub { font-size: 0.72rem; line-height: 1.2; }
 
 .workspace {
   display: grid;
@@ -413,6 +417,7 @@ h1, h2, h3 { text-wrap: balance; }
 }
 .violation-meta { font-size: 0.82rem; line-height: 1.35; }
 .violation-title { font-weight: 600; color: #fca5a5; }
+.violation-title.is-person { color: #d8b4fe; }
 .plate-badge {
   display: inline-block;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -509,11 +514,9 @@ dialog.modal-settings {
   gap: 12px;
   align-items: stretch;
 }
-.settings-bento > .bento-top {
-  grid-column: span 2;
-}
+.settings-bento > .bento-top,
 .settings-bento > .bento-bottom {
-  grid-column: span 3;
+  grid-column: span 2;
 }
 .settings-card {
   background: #0e1420;
@@ -575,12 +578,16 @@ dialog.modal-settings {
   align-items: end;
 }
 .alerts-inline-grid {
-  grid-template-columns: minmax(0, 1.75fr) minmax(185px, 1.05fr) minmax(126px, 0.75fr);
+  grid-template-columns: minmax(0, 1.35fr) minmax(110px, 0.85fr);
   align-items: end;
 }
 .ha-inline-grid {
-  grid-template-columns: minmax(195px, 1.05fr) minmax(0, 1.15fr) minmax(0, 1.05fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: end;
+}
+.alerts-inline-grid > .field:first-child,
+.ha-inline-grid > .toggle-tile:first-child {
+  grid-column: 1 / -1;
 }
 .field {
   display: flex;
@@ -675,6 +682,27 @@ dialog.modal-settings {
   background: rgba(11, 15, 23, 0.55);
   border: 1px dashed #28354b;
   opacity: var(--subgrid-opacity);
+  transition: opacity 0.15s ease;
+}
+.person-group {
+  --person-subgrid-opacity: 0.55;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.person-group:has(input[name="person_zone_enabled"]:checked),
+.person-group:focus-within {
+  --person-subgrid-opacity: 1;
+}
+.person-subgrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  background: rgba(11, 15, 23, 0.55);
+  border: 1px dashed #3b2d54;
+  opacity: var(--person-subgrid-opacity);
   transition: opacity 0.15s ease;
 }
 label { display: flex; flex-direction: column; gap: 5px; font-size: 0.82rem; color: var(--muted); }
@@ -816,17 +844,6 @@ input, select {
   .settings-bento > .bento-top,
   .settings-bento > .bento-bottom {
     grid-column: span 1;
-  }
-  .settings-bento > .settings-card:last-child {
-    grid-column: 1 / -1;
-  }
-  .alerts-inline-grid,
-  .ha-inline-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .alerts-inline-grid > .field:first-child,
-  .ha-inline-grid > .toggle-tile:first-child {
-    grid-column: 1 / -1;
   }
 }
 @media (max-width: 720px) {

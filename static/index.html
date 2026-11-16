@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Car Tracker & Red-Zone Monitor</title>
-  <link rel="icon" type="image/png" href="static/icon.png?v=20" />
-  <link rel="stylesheet" href="static/styles.css?v=20" />
+  <link rel="icon" type="image/png" href="static/icon.png?v=21" />
+  <link rel="stylesheet" href="static/styles.css?v=21" />
 </head>
 <body>
   <header class="topbar">
@@ -51,6 +51,11 @@
         <span class="kpi-value accent-red" id="kpiViolations">0</span>
       </div>
       <div class="kpi-card">
+        <span class="kpi-label">Person Zone Alerts</span>
+        <span class="kpi-value accent-purple" id="kpiPersonAlerts">0</span>
+        <span class="kpi-sub muted" id="kpiPersonSchedule">00:00–05:00</span>
+      </div>
+      <div class="kpi-card">
         <span class="kpi-label">Line Crossings (Flow)</span>
         <span class="kpi-value accent-blue" id="kpiLineCrossings">0</span>
       </div>
@@ -85,6 +90,7 @@
                 <div class="dropdown-actions-grid">
                   <button type="button" class="btn btn-danger" id="btnDrawZone">+ Draw Red Zone</button>
                   <button type="button" class="btn btn-secondary" id="btnAutoRedZone">Auto-Detect Red Curb</button>
+                  <button type="button" class="btn btn-purple" id="btnDrawPersonZone">+ Draw Person Zone</button>
                   <button type="button" class="btn btn-secondary" id="btnDrawExclusion">+ Exclusion Mask</button>
                   <button type="button" class="btn btn-secondary" id="btnDrawLine">+ Draw Traffic Line</button>
                   <button type="button" class="btn btn-secondary" id="btnCalibrateGround">3D Ground Grid</button>
@@ -94,9 +100,9 @@
               </div>
               <hr class="dropdown-divider" />
               <div class="dropdown-section">
-                <h3>Configured Red Zones</h3>
+                <h3>Configured Zones</h3>
                 <div id="zonesList" class="zones-list">
-                  <span class="muted small">No red zones defined yet.</span>
+                  <span class="muted small">No zones defined yet.</span>
                 </div>
               </div>
               <hr class="dropdown-divider" />
@@ -139,7 +145,7 @@
 
         <div class="panel violations-panel">
           <div class="panel-header">
-            <h2>Red-Zone Violations</h2>
+            <h2>Violations &amp; Alerts</h2>
             <div style="display:flex;align-items:center;gap:8px;">
               <span class="muted small" id="violationCountLabel">0 logged</span>
               <a class="btn btn-ghost" href="api/violations/export.csv" download="violations.csv" style="text-decoration:none;padding:4px 8px;font-size:0.78rem;">Export CSV</a>
@@ -149,7 +155,7 @@
             <input type="search" id="violationFilter" name="violation_filter" aria-label="Filter violations by plate, zone, or vehicle" placeholder="Filter by plate, zone, or vehicle..." autocorrect="off" autocapitalize="none" spellcheck="false" />
           </search>
           <div id="violationsList" class="violations-list">
-            <p class="muted">No illegal parking violations recorded yet.</p>
+            <p class="muted">No violations or alerts recorded yet.</p>
           </div>
         </div>
       </aside>
@@ -448,6 +454,61 @@
             </div>
           </section>
 
+          <section class="settings-card bento-bottom" aria-labelledby="secPersonTitle">
+            <div class="card-head">
+              <h3 id="secPersonTitle">Scheduled Person Watch</h3>
+            </div>
+            <div class="person-group">
+              <div class="toggle-tile">
+                <div class="toggle-head">
+                  <input id="cfg-person_zone_enabled" type="checkbox" name="person_zone_enabled" />
+                  <label for="cfg-person_zone_enabled">After-Hours Person Watch</label>
+                  <button type="button" class="help-tip-btn" interestfor="tip-person_zone_enabled" popovertarget="tip-person_zone_enabled" popovertargetaction="show" aria-label="More about After-Hours Person Watch">?</button>
+                  <div id="tip-person_zone_enabled" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Triggers a photo snapshot, increments Person Zone Alerts, and sends webhook/HA events whenever a person stays inside watched zones (or full camera view) during the active schedule.</div></div>
+                </div>
+              </div>
+              <div class="person-subgrid">
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-person_zone_start_time">Start Time (24h)</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-person_zone_start_time" popovertarget="tip-person_zone_start_time" popovertargetaction="show" aria-label="More about Person Watch Start Time">?</button>
+                    <div id="tip-person_zone_start_time" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Local 24-hour clock start time when Person Watch activates (e.g. 00:00 or 23:00). Cross-midnight windows such as 23:00–05:00 are supported.</div></div>
+                  </div>
+                  <input id="cfg-person_zone_start_time" type="time" name="person_zone_start_time" />
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-person_zone_end_time">End Time (24h)</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-person_zone_end_time" popovertarget="tip-person_zone_end_time" popovertargetaction="show" aria-label="More about Person Watch End Time">?</button>
+                    <div id="tip-person_zone_end_time" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Local 24-hour clock end time when Person Watch turns off (e.g. 05:00). Equal start and end times monitor 24/7.</div></div>
+                  </div>
+                  <input id="cfg-person_zone_end_time" type="time" name="person_zone_end_time" />
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-person_zone_dwell_seconds">Person Dwell (sec)</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-person_zone_dwell_seconds" popovertarget="tip-person_zone_dwell_seconds" popovertargetaction="show" aria-label="More about Person Dwell Time">?</button>
+                    <div id="tip-person_zone_dwell_seconds" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Minimum seconds a person must remain inside the watched area before triggering a snapshot and alert (0 = immediate; walking does not reset the timer).</div></div>
+                  </div>
+                  <input id="cfg-person_zone_dwell_seconds" type="number" name="person_zone_dwell_seconds" step="0.5" min="0" max="600" required />
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label for="cfg-person_zone_scope">Watch Scope</label>
+                    <button type="button" class="help-tip-btn" interestfor="tip-person_zone_scope" popovertarget="tip-person_zone_scope" popovertargetaction="show" aria-label="More about Person Watch Scope">?</button>
+                    <div id="tip-person_zone_scope" class="setting-tooltip" popover="hint"><div class="setting-tooltip-inner">Area monitored during active hours: drawn Person Zones if present else full view, strictly Person Zones, existing Vehicle Red Zones, or always Full Camera View.</div></div>
+                  </div>
+                  <select id="cfg-person_zone_scope" name="person_zone_scope">
+                    <option value="person_zones_or_frame">Person Zones (else Full View)</option>
+                    <option value="person_zones">Person Zones Only</option>
+                    <option value="red_zones">Vehicle Red Zones</option>
+                    <option value="full_frame">Full Camera View</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </section>
+
           <section class="settings-card bento-bottom" aria-labelledby="secAlertsTitle">
             <div class="card-head">
               <h3 id="secAlertsTitle">Alerts &amp; Daily Summary</h3>
@@ -565,6 +626,6 @@
     </div>
   </dialog>
 
-  <script src="static/app.js?v=20"></script>
+  <script src="static/app.js?v=21"></script>
 </body>
 </html>

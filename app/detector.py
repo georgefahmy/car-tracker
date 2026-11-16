@@ -102,6 +102,7 @@ class MonitorStepResult:
     new_total_cars: int = 0
     new_unique_people: int = 0
     new_total_people: int = 0
+    new_person_alerts: int = 0
     new_violations: list[ViolationEvent] = field(default_factory=list)
     dwell_updates: list[ViolationDwellUpdate] = field(default_factory=list)
     track_statuses: dict[int, dict[str, Any]] = field(default_factory=dict)
@@ -267,6 +268,45 @@ def filter_excluded_tracks(
     return kept
 
 
+def parse_hhmm_minutes(hhmm: str, default_minutes: int = 0) -> int:
+    """Parse an HH:MM string into minutes since midnight [0..1439]."""
+    raw = str(hhmm or "").strip()
+    if ":" not in raw:
+        return default_minutes
+    parts = raw.split(":")
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except (ValueError, IndexError):
+        return default_minutes
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return default_minutes
+    return hour * 60 + minute
+
+
+def is_within_time_window(
+    now_ts: float,
+    start_hhmm: str,
+    end_hhmm: str,
+    local_tz: Any = None,
+) -> bool:
+    """Return True when wall-clock time falls inside [start_hhmm, end_hhmm).
+
+    Supports both same-day windows (e.g. 09:00-17:00) and overnight
+    cross-midnight windows (e.g. 00:00-05:00 or 23:00-05:00). Equal start/end
+    means an active 24-hour window.
+    """
+    start_min = parse_hhmm_minutes(start_hhmm, 0)
+    end_min = parse_hhmm_minutes(end_hhmm, 5 * 60)
+    dt = datetime.fromtimestamp(now_ts, tz=local_tz)
+    cur_min = dt.hour * 60 + dt.minute
+    if start_min == end_min:
+        return True
+    if start_min < end_min:
+        return start_min <= cur_min < end_min
+    return cur_min >= start_min or cur_min < end_min
+
+
 class RedZoneMonitor:
     """Counts unique/total vehicles & people and flags illegal red-zone parking."""
 
@@ -278,6 +318,8 @@ class RedZoneMonitor:
         self._counted_vehicle_pos: dict[int, tuple[float, float]] = {}
         self._dwell_states: dict[tuple[int, str], DwellState] = {}
         self._flagged_pairs: set[tuple[int, str]] = set()
+        self._person_dwell_states: dict[tuple[int, str], DwellState] = {}
+        self._flagged_person_pairs: set[tuple[int, str]] = set()
 
     def reset(self) -> None:
         self._seen_frames.clear()
@@ -287,6 +329,8 @@ class RedZoneMonitor:
         self._counted_vehicle_pos.clear()
         self._dwell_states.clear()
         self._flagged_pairs.clear()
+        self._person_dwell_states.clear()
+        self._flagged_person_pairs.clear()
 
     def process_tracks(
         self,
@@ -300,6 +344,12 @@ class RedZoneMonitor:
         min_track_frames: int,
         exempt_emergency_vehicles: bool = True,
         dwell_grace_seconds: float = 5.0,
+        person_zone_enabled: bool = False,
+        person_zone_start_time: str = "00:00",
+        person_zone_end_time: str = "05:00",
+        person_zone_dwell_seconds: float = 2.0,
+        person_zone_scope: str = "person_zones_or_frame",
+        local_tz: Any = None,
     ) -> MonitorStepResult:
         res = MonitorStepResult()
         enabled_zones = [
@@ -308,11 +358,52 @@ class RedZoneMonitor:
         active_pairs: set[tuple[int, str]] = set()
         active_vehicle_ids = {d.track_id for d in tracks if d.is_vehicle}
 
+        person_window_active = bool(
+            person_zone_enabled
+            and is_within_time_window(
+                now_ts,
+                person_zone_start_time,
+                person_zone_end_time,
+                local_tz=local_tz,
+            )
+        )
+        enabled_person_zones = [
+            z for z in zones if z.enabled and z.zone_type == "person_zone" and len(z.points) >= 3
+        ]
+        person_targets: list[tuple[str, str, str, list[list[float]] | None]] = []
+        if person_window_active:
+            if person_zone_scope == "person_zones":
+                for z in enabled_person_zones:
+                    person_targets.append((f"person_zone:{z.id}", f"person_zone:{z.id}", z.name, z.points))
+            elif person_zone_scope == "red_zones":
+                for z in enabled_zones:
+                    person_targets.append((f"person_zone:{z.id}", f"person_zone:{z.id}", z.name, z.points))
+            elif person_zone_scope == "full_frame":
+                person_targets.append(
+                    ("person_zone:after_hours", "person_zone:after_hours", "After-Hours Watch", None)
+                )
+            else:  # "person_zones_or_frame"
+                if enabled_person_zones:
+                    for z in enabled_person_zones:
+                        person_targets.append(
+                            (f"person_zone:{z.id}", f"person_zone:{z.id}", z.name, z.points)
+                        )
+                else:
+                    person_targets.append(
+                        ("person_zone:after_hours", "person_zone:after_hours", "After-Hours Watch", None)
+                    )
+        active_person_pairs: set[tuple[int, str]] = set()
+        active_person_ids = {d.track_id for d in tracks if d.is_person}
+
         for det in tracks:
             tid = det.track_id
             self._last_seen_ts[tid] = now_ts
             self._seen_frames[tid] = self._seen_frames.get(tid, 0) + 1
-            nx, ny = det.bottom_center_norm(frame_w, frame_h) if det.is_vehicle else (0.0, 0.0)
+            nx, ny = (
+                det.bottom_center_norm(frame_w, frame_h)
+                if (det.is_vehicle or det.is_person)
+                else (0.0, 0.0)
+            )
             if det.is_vehicle:
                 self._initial_pos.setdefault(tid, (nx, ny))
 
@@ -355,6 +446,9 @@ class RedZoneMonitor:
                 "violation": False,
                 "zone_name": None,
                 "emergency": det.is_emergency,
+                "in_person_zone": False,
+                "person_dwell_seconds": 0.0,
+                "person_violation": False,
             }
 
             if det.is_vehicle and enabled_zones and not (exempt_emergency_vehicles and det.is_emergency):
@@ -462,6 +556,113 @@ class RedZoneMonitor:
                     status["dwell_seconds"] = max(status["dwell_seconds"], round(state.stationary_seconds, 1))
                     status["violation"] = status["violation"] or state.flagged
 
+            if det.is_person and person_targets:
+                for target_key, zid, zname, zpoints in person_targets:
+                    if zpoints is not None and not point_in_normalized_polygon(nx, ny, zpoints):
+                        continue
+
+                    ppair = (tid, target_key)
+                    active_person_pairs.add(ppair)
+                    pstate = self._person_dwell_states.get(ppair)
+                    if pstate is None:
+                        transfer_radius = max(movement_threshold * 5.0, 0.08)
+                        transfer_grace = max(dwell_grace_seconds, 15.0)
+                        best_prev_ppair: tuple[int, str] | None = None
+                        best_prev_pdist = transfer_radius
+                        for prev_pair, prev_state in self._person_dwell_states.items():
+                            if (
+                                prev_pair[1] != target_key
+                                or prev_pair in active_person_pairs
+                                or prev_pair[0] in active_person_ids
+                                or not prev_state.flagged
+                                or prev_state.violation_key is None
+                                or (now_ts - prev_state.last_seen_at) > transfer_grace
+                            ):
+                                continue
+                            dist_prev = math.hypot(
+                                nx - prev_state.anchor_pos[0], ny - prev_state.anchor_pos[1]
+                            )
+                            if dist_prev <= best_prev_pdist:
+                                best_prev_pdist = dist_prev
+                                best_prev_ppair = prev_pair
+
+                        if best_prev_ppair is not None:
+                            pstate = self._person_dwell_states.pop(best_prev_ppair)
+                            self._flagged_person_pairs.discard(best_prev_ppair)
+                            self._flagged_person_pairs.add(ppair)
+                            dt = max(0.0, now_ts - pstate.last_seen_at)
+                            pstate.stationary_seconds = max(
+                                pstate.stationary_seconds + dt, now_ts - pstate.entered_at
+                            )
+                            pstate.anchor_pos = (nx, ny)
+                            pstate.last_seen_at = now_ts
+                            self._person_dwell_states[ppair] = pstate
+                        else:
+                            pstate = DwellState(
+                                zone_id=zid,
+                                zone_name=zname,
+                                entered_at=now_ts,
+                                last_seen_at=now_ts,
+                                anchor_pos=(nx, ny),
+                                stationary_seconds=0.0,
+                                flagged=(ppair in self._flagged_person_pairs),
+                            )
+                            self._person_dwell_states[ppair] = pstate
+                    else:
+                        dt = max(0.0, now_ts - pstate.last_seen_at)
+                        # Unlike vehicles, people walk continuously inside watched areas
+                        pstate.stationary_seconds += dt
+                        pstate.anchor_pos = (nx, ny)
+                        pstate.last_seen_at = now_ts
+
+                    newly_flagged_person = False
+                    if pstate.stationary_seconds >= person_zone_dwell_seconds and not pstate.flagged:
+                        pstate.flagged = True
+                        pstate.violation_key = (tid, zid)
+                        self._flagged_person_pairs.add(ppair)
+                        newly_flagged_person = True
+                        res.new_person_alerts += 1
+                        started_iso = (
+                            datetime.fromtimestamp(pstate.entered_at, tz=timezone.utc)
+                            .astimezone()
+                            .isoformat()
+                        )
+                        flagged_iso = (
+                            datetime.fromtimestamp(now_ts, tz=timezone.utc)
+                            .astimezone()
+                            .isoformat()
+                        )
+                        res.new_violations.append(
+                            ViolationEvent(
+                                track_id=tid,
+                                zone_id=zid,
+                                zone_name=zname,
+                                vehicle_class="person",
+                                started_at=started_iso,
+                                flagged_at=flagged_iso,
+                                dwell_seconds=round(pstate.stationary_seconds, 1),
+                            )
+                        )
+
+                    if pstate.flagged and not newly_flagged_person and pstate.violation_key is not None:
+                        res.dwell_updates.append(
+                            ViolationDwellUpdate(
+                                violation_key=pstate.violation_key,
+                                track_id=tid,
+                                zone_id=zid,
+                                dwell_seconds=round(pstate.stationary_seconds, 1),
+                                completed=False,
+                            )
+                        )
+
+                    status["in_person_zone"] = True
+                    if not status["zone_name"]:
+                        status["zone_name"] = zname
+                    status["person_dwell_seconds"] = max(
+                        status["person_dwell_seconds"], round(pstate.stationary_seconds, 1)
+                    )
+                    status["person_violation"] = status["person_violation"] or pstate.flagged
+
             res.track_statuses[tid] = status
 
         # Clear dwell states only after exceeding the dropout grace period; finalize flagged duration on departure
@@ -490,6 +691,32 @@ class RedZoneMonitor:
                     )
                 self._flagged_pairs.discard(pair)
                 del self._dwell_states[pair]
+
+        for ppair in list(self._person_dwell_states.keys()):
+            if ppair in active_person_pairs:
+                continue
+            pst = self._person_dwell_states[ppair]
+            if pst.flagged:
+                p_grace = (
+                    min(dwell_grace_seconds, 2.0)
+                    if ppair[0] in active_person_ids
+                    else max(dwell_grace_seconds, 15.0)
+                )
+            else:
+                p_grace = dwell_grace_seconds
+            if not person_window_active or (now_ts - pst.last_seen_at) > p_grace:
+                if pst.flagged and pst.violation_key is not None:
+                    res.dwell_updates.append(
+                        ViolationDwellUpdate(
+                            violation_key=pst.violation_key,
+                            track_id=ppair[0],
+                            zone_id=ppair[1],
+                            dwell_seconds=round(pst.stationary_seconds, 1),
+                            completed=True,
+                        )
+                    )
+                self._flagged_person_pairs.discard(ppair)
+                del self._person_dwell_states[ppair]
 
         # Retain track metadata for 15 minutes so brief dropouts never inflate unique vehicle counts
         stale_tids = [tid for tid, ts in self._last_seen_ts.items() if (now_ts - ts) > 900.0]
@@ -1998,6 +2225,7 @@ def annotate_frame(
     show_heatmap: bool = False,
     counting_lines: list[CountingLineModel] | None = None,
     annotation_scale: float = 1.0,
+    person_dwell_threshold: float = 2.0,
 ) -> np.ndarray:
     """Render red zones, optional heatmap overlay, counting lines, and tracked bounding boxes."""
     out = frame.copy()
@@ -2023,7 +2251,12 @@ def annotate_frame(
         cv2.fillPoly(overlay, [pts], bgr)
         cv2.polylines(out, [pts], isClosed=True, color=bgr, thickness=box_thick)
         label_pt = (int(pts[0][0]), max(int(24 * scale), int(pts[0][1]) - pad_y))
-        z_label = f"MASK: {zone.name}" if zone.zone_type == "exclusion" else zone.name
+        if zone.zone_type == "exclusion":
+            z_label = f"MASK: {zone.name}"
+        elif zone.zone_type == "person_zone":
+            z_label = f"PERSON: {zone.name}"
+        else:
+            z_label = zone.name
         cv2.putText(out, z_label, label_pt, cv2.FONT_HERSHEY_SIMPLEX, font_scale, bgr, text_thick, cv2.LINE_AA)
 
     out = cv2.addWeighted(overlay, 0.18, out, 0.82, 0)
@@ -2057,6 +2290,13 @@ def annotate_frame(
         elif st.get("in_red_zone"):
             color = (0, 165, 255)  # Orange
             label = f"#{det.track_id} {det.class_name} {st.get('dwell_seconds', 0):.0f}/{dwell_threshold:.0f}s"
+        elif det.is_person and st.get("person_violation"):
+            color = (247, 85, 168)  # Violet/Magenta (#a855f7)
+            dur_label = format_dwell_duration(st.get("person_dwell_seconds", 0.0))
+            label = f"PERSON ALERT #{det.track_id} ({dur_label})"
+        elif det.is_person and st.get("in_person_zone"):
+            color = (250, 165, 192)  # Soft violet/lavender
+            label = f"#{det.track_id} person {st.get('person_dwell_seconds', 0):.0f}/{person_dwell_threshold:.0f}s"
         elif det.is_person:
             color = (235, 206, 135)  # Light cyan/blue
             label = f"#{det.track_id} person"
@@ -2083,8 +2323,8 @@ def annotate_frame(
             cv2.LINE_AA,
         )
 
-        # Draw bottom-center anchor dot for vehicles
-        if det.is_vehicle:
+        # Draw bottom-center anchor dot for vehicles or watched people
+        if det.is_vehicle or st.get("in_person_zone") or st.get("person_violation"):
             cx = int((x1 + x2) * 0.5)
             cv2.circle(out, (cx, y2), dot_r, color, -1)
 

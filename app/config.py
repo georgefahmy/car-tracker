@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     speed_capture_enabled: bool = True
     speed_limit_mph: float = 25.0
     alpr_enabled: bool = True
+    person_zone_enabled: bool = True
+    person_zone_start_time: str = "00:00"
+    person_zone_end_time: str = "05:00"
+    person_zone_dwell_seconds: float = Field(default=2.0, ge=0.0, le=600.0)
+    person_zone_scope: Literal["person_zones_or_frame", "person_zones", "red_zones", "full_frame"] = (
+        "person_zones_or_frame"
+    )
     webhook_url: str = ""
     daily_report_enabled: bool = True
     daily_report_time: str = "23:55"
@@ -105,6 +112,13 @@ class RuntimeConfig(BaseModel):
     speed_capture_enabled: bool = True
     speed_limit_mph: float = Field(default=25.0, ge=1.0, le=150.0)
     alpr_enabled: bool = True
+    person_zone_enabled: bool = True
+    person_zone_start_time: str = "00:00"
+    person_zone_end_time: str = "05:00"
+    person_zone_dwell_seconds: float = Field(default=2.0, ge=0.0, le=600.0)
+    person_zone_scope: Literal["person_zones_or_frame", "person_zones", "red_zones", "full_frame"] = (
+        "person_zones_or_frame"
+    )
     webhook_url: str = ""
     daily_report_enabled: bool = True
     daily_report_time: str = "23:55"
@@ -144,6 +158,11 @@ class RuntimeConfig(BaseModel):
             speed_capture_enabled=s.speed_capture_enabled,
             speed_limit_mph=s.speed_limit_mph,
             alpr_enabled=s.alpr_enabled,
+            person_zone_enabled=s.person_zone_enabled,
+            person_zone_start_time=s.person_zone_start_time,
+            person_zone_end_time=s.person_zone_end_time,
+            person_zone_dwell_seconds=s.person_zone_dwell_seconds,
+            person_zone_scope=s.person_zone_scope,
             webhook_url=s.webhook_url,
             daily_report_enabled=s.daily_report_enabled,
             daily_report_time=s.daily_report_time,

@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.35
+- **Clean Offender-Only Violation, Speeding & Person Snapshots**: Updated saved snapshot rendering (`violation_*.jpg`, `speeding_*.jpg`, `person_*.jpg` for both the Web UI and Discord webhook alerts) to draw **only the offending vehicle/person's bounding box and label** on the clean camera frame — removing Red-Zone/Exclusion/Person-Zone polygon markings & fills, traffic/speed lines, heatmaps, bystander boxes, and anchor dots while keeping full overlays on the Live Camera Feed.
+
 ## 1.0.34
 - **Separate Vehicle & Pedestrian Heatmaps with Distinct Color Ramps**: Split `HotspotTracker` into independent `vehicle_grid` and `person_grid` accumulators with separate `np.log1p` normalization and custom colorblind-safe OpenCV LUTs (**Warm Crimson → Amber → Gold** for vehicles; **Cool Sapphire → Electric Cyan → Ice-Aqua** for people) so heavy street car traffic never washes out pedestrian sidewalks.
 - **1-Click Heatmap Layer Cycling (`All` / `Cars` / `People` / `OFF`)**: Clicking the top-bar `Heatmap` button now cycles cleanly through `OFF → All → Cars → People → OFF` with color-key swatches on the button, live preview/snapshot/Bird's-Eye View updates, and persisted `heatmap_mode` in SQLite.

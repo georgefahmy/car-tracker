@@ -1095,6 +1095,35 @@ class StreamWorker:
         os.replace(tmp_path, snap_path)
         return True
 
+    @staticmethod
+    def _render_subject_snapshot(
+        base_frame: np.ndarray,
+        tracks: list[TrackedDetection],
+        track_statuses: dict[int, dict[str, Any]],
+        subject_tid: int,
+        *,
+        dwell_threshold: float,
+        annotation_scale: float,
+        person_dwell_threshold: float = 2.0,
+    ) -> np.ndarray:
+        """Render a clean snapshot with only the offending subject's bounding box and label."""
+        tid = int(subject_tid)
+        subject_tracks = [t for t in tracks if int(t.track_id) == tid]
+        subject_statuses = {tid: dict(track_statuses[tid])} if tid in track_statuses else {}
+        return annotate_frame(
+            frame=base_frame,
+            tracks=subject_tracks,
+            track_statuses=subject_statuses,
+            zones=[],
+            dwell_threshold=dwell_threshold,
+            hotspot=None,
+            show_heatmap=False,
+            counting_lines=[],
+            annotation_scale=annotation_scale,
+            person_dwell_threshold=person_dwell_threshold,
+            draw_anchor_dots=False,
+        )
+
     def _refresh_violation_snapshot(self, entry: dict[str, Any], dwell_seconds: float) -> bool:
         """Re-render the violation snapshot using the latest in-zone frame and parked dwell duration."""
         latest_clean = entry.get("latest_clean_frame")
@@ -1144,15 +1173,12 @@ class StreamWorker:
         if plate_txt and not target_status.get("license_plate"):
             target_status["license_plate"] = plate_txt
 
-        updated_img = annotate_frame(
-            frame=base_img,
+        updated_img = self._render_subject_snapshot(
+            base_frame=base_img,
             tracks=entry["tracks"],
-            track_statuses=statuses,
-            zones=entry["zones"],
+            track_statuses={orig_tid: target_status},
+            subject_tid=orig_tid,
             dwell_threshold=float(entry["dwell_threshold"]),
-            hotspot=None,
-            show_heatmap=False,
-            counting_lines=entry["counting_lines"],
             annotation_scale=float(entry["annotation_scale"]),
             person_dwell_threshold=float(entry.get("person_dwell_threshold", 2.0)),
         )
@@ -1315,40 +1341,34 @@ class StreamWorker:
             clean_jpeg = b""
             clean_source = snap_base
             if step.new_violations:
-                clean_source = (
-                    self.hotspot.render_overlay(snap_base, alpha=0.45, mode=cfg.heatmap_mode)
-                    if cfg.heatmap_enabled and self.hotspot is not None
-                    else snap_base
-                )
                 ok_clean, clean_buf = cv2.imencode(
                     ".jpg", clean_source, [cv2.IMWRITE_JPEG_QUALITY, 94]
                 )
                 if ok_clean:
                     clean_jpeg = clean_buf.tobytes()
 
-            annotated_full = annotate_frame(
-                frame=snap_base,
-                tracks=snap_tracks,
-                track_statuses=step.track_statuses,
-                zones=zones,
-                dwell_threshold=cfg.dwell_seconds,
-                hotspot=self.hotspot,
-                show_heatmap=cfg.heatmap_enabled,
-                counting_lines=counting_lines,
-                annotation_scale=cfg.annotation_scale,
-                person_dwell_threshold=cfg.person_zone_dwell_seconds,
-                heatmap_mode=cfg.heatmap_mode,
-            )
             evicted_entries: list[dict[str, Any]] = []
             for v in step.new_violations:
                 is_person_alert = v.vehicle_class == "person" or str(v.zone_id).startswith(
                     "person_zone"
                 )
+                v_tid = int(v.track_id)
                 ts_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                 fname_prefix = "person" if is_person_alert else "violation"
                 fname = f"{fname_prefix}_{ts_slug}_t{v.track_id}.jpg"
                 snap_path = self.snapshots_dir / fname
-                self._write_jpeg_atomic(snap_path, annotated_full, quality=92)
+                v_tracks = [copy.deepcopy(t) for t in snap_tracks if int(t.track_id) == v_tid]
+                v_statuses = {v_tid: copy.deepcopy(step.track_statuses.get(v_tid, {}))}
+                v_img = self._render_subject_snapshot(
+                    base_frame=snap_base,
+                    tracks=v_tracks,
+                    track_statuses=v_statuses,
+                    subject_tid=v_tid,
+                    dwell_threshold=cfg.dwell_seconds,
+                    annotation_scale=cfg.annotation_scale,
+                    person_dwell_threshold=cfg.person_zone_dwell_seconds,
+                )
+                self._write_jpeg_atomic(snap_path, v_img, quality=92)
                 plate_text = plates_by_tid.get(v.track_id, ("", 0.0))[0]
                 rec = self.db.add_violation(
                     track_id=v.track_id,
@@ -1366,17 +1386,17 @@ class StreamWorker:
                     now_mono = time.monotonic()
                     snap_entry: dict[str, Any] = {
                         "violation_id": rec.id,
-                        "orig_track_id": int(v.track_id),
+                        "orig_track_id": v_tid,
                         "zone_id": v.zone_id,
                         "is_person": is_person_alert,
                         "snap_path": snap_path,
                         "clean_jpeg": clean_jpeg,
                         "latest_clean_frame": clean_source.copy(),
                         "clean_w": int(sw),
-                        "tracks": copy.deepcopy(snap_tracks),
-                        "track_statuses": copy.deepcopy(step.track_statuses),
-                        "zones": copy.deepcopy(zones),
-                        "counting_lines": copy.deepcopy(counting_lines),
+                        "tracks": v_tracks,
+                        "track_statuses": v_statuses,
+                        "zones": [],
+                        "counting_lines": [],
                         "dwell_threshold": float(cfg.dwell_seconds),
                         "person_dwell_threshold": float(cfg.person_zone_dwell_seconds),
                         "annotation_scale": float(cfg.annotation_scale),
@@ -1407,7 +1427,7 @@ class StreamWorker:
                             popped = self._active_violation_snaps.pop(oldest_key, None)
                             if popped is not None:
                                 evicted_entries.append(popped)
-                        self._active_violation_snaps[(int(v.track_id), v.zone_id)] = snap_entry
+                        self._active_violation_snaps[(v_tid, v.zone_id)] = snap_entry
                 with self._lock:
                     self._last_violation = rec_dict
                 if cfg.webhook_url.strip() and (is_person_alert or not clean_jpeg):
@@ -1426,12 +1446,26 @@ class StreamWorker:
                 self._finalize_violation_snap_entry(ev)
 
             for sp in speeding_events:
+                sp_tid = int(sp["track_id"])
                 now_iso = datetime.now(timezone.utc).isoformat()
                 ts_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                 fname = f"speeding_{ts_slug}_t{sp['track_id']}.jpg"
                 snap_path = self.snapshots_dir / fname
-                self._write_jpeg_atomic(snap_path, annotated_full, quality=92)
-                plate_text = plates_by_tid.get(int(sp["track_id"]), ("", 0.0))[0]
+                plate_text = plates_by_tid.get(sp_tid, ("", 0.0))[0]
+                sp_status = dict(step.track_statuses.get(sp_tid) or {})
+                sp_status["speed_mph"] = float(sp["speed_mph"])
+                if plate_text:
+                    sp_status["license_plate"] = plate_text
+                sp_img = self._render_subject_snapshot(
+                    base_frame=snap_base,
+                    tracks=snap_tracks,
+                    track_statuses={sp_tid: sp_status},
+                    subject_tid=sp_tid,
+                    dwell_threshold=cfg.dwell_seconds,
+                    annotation_scale=cfg.annotation_scale,
+                    person_dwell_threshold=cfg.person_zone_dwell_seconds,
+                )
+                self._write_jpeg_atomic(snap_path, sp_img, quality=92)
                 rec = self.db.add_violation(
                     track_id=sp["track_id"],
                     zone_id="speeding",
@@ -1505,19 +1539,17 @@ class StreamWorker:
 
                     if fresh_base is not None:
                         fh, fw = fresh_base.shape[:2]
-                        clean_src = (
-                            self.hotspot.render_overlay(fresh_base, alpha=0.45, mode=cfg.heatmap_mode)
-                            if cfg.heatmap_enabled and self.hotspot is not None
-                            else fresh_base
-                        )
-                        snap_entry["latest_clean_frame"] = clean_src.copy()
+                        snap_entry["latest_clean_frame"] = fresh_base.copy()
                         snap_entry["clean_w"] = int(fw)
                         scaled_t = (
                             tracks
                             if (fw == w and fh == h)
                             else self._scale_tracks(tracks, w, h, fw, fh)
                         )
-                        snap_entry["tracks"] = copy.deepcopy(scaled_t)
+                        subject_tracks = [
+                            copy.deepcopy(t) for t in scaled_t if int(t.track_id) == orig_tid
+                        ]
+                        snap_entry["tracks"] = subject_tracks
                         existing_plate = str(
                             (snap_entry.get("record") or {}).get("license_plate")
                             or (snap_entry.get("track_statuses", {}).get(orig_tid) or {}).get(
@@ -1532,7 +1564,7 @@ class StreamWorker:
                             and not snap_entry.get("is_person")
                         ):
                             t_bbox = next(
-                                (t.bbox_xyxy for t in scaled_t if t.track_id == orig_tid), None
+                                (t.bbox_xyxy for t in subject_tracks), None
                             )
                             plate, plate_conf = self.alpr.read_plate(fresh_base, t_bbox)
                             if plate:
@@ -1544,12 +1576,12 @@ class StreamWorker:
                                         "confidence": plate_conf,
                                         "updated_at": datetime.now(timezone.utc).isoformat(),
                                     }
-                        merged_st = copy.deepcopy(step.track_statuses)
+                        orig_st = copy.deepcopy(step.track_statuses.get(orig_tid) or {})
                         if existing_plate:
-                            merged_st.setdefault(orig_tid, {})["license_plate"] = existing_plate
-                        snap_entry["track_statuses"] = merged_st
-                        snap_entry["zones"] = copy.deepcopy(zones)
-                        snap_entry["counting_lines"] = copy.deepcopy(counting_lines)
+                            orig_st["license_plate"] = existing_plate
+                        snap_entry["track_statuses"] = {orig_tid: orig_st}
+                        snap_entry["zones"] = []
+                        snap_entry["counting_lines"] = []
                         snap_entry["annotation_scale"] = float(cfg.annotation_scale)
 
                 if should_refresh:

@@ -3238,6 +3238,7 @@ def annotate_frame(
     annotation_scale: float = 1.0,
     person_dwell_threshold: float = 2.0,
     heatmap_mode: str = "all",
+    draw_anchor_dots: bool = True,
 ) -> np.ndarray:
     """Render red zones, optional heatmap overlay, counting lines, and tracked bounding boxes."""
     out = frame.copy()
@@ -3254,24 +3255,24 @@ def annotate_frame(
         out = hotspot.render_overlay(out, alpha=0.45, mode=heatmap_mode)
 
     # Draw red-zone & exclusion-mask polygons
-    overlay = out.copy()
-    for zone in zones:
-        if not zone.enabled or len(zone.points) < 3:
-            continue
-        pts = np.array([[int(p[0] * w), int(p[1] * h)] for p in zone.points], dtype=np.int32)
-        bgr = (180, 163, 148) if zone.zone_type == "exclusion" else _hex_to_bgr(zone.color)
-        cv2.fillPoly(overlay, [pts], bgr)
-        cv2.polylines(out, [pts], isClosed=True, color=bgr, thickness=box_thick)
-        label_pt = (int(pts[0][0]), max(int(24 * scale), int(pts[0][1]) - pad_y))
-        if zone.zone_type == "exclusion":
-            z_label = f"MASK: {zone.name}"
-        elif zone.zone_type == "person_zone":
-            z_label = f"PERSON: {zone.name}"
-        else:
-            z_label = zone.name
-        cv2.putText(out, z_label, label_pt, cv2.FONT_HERSHEY_SIMPLEX, font_scale, bgr, text_thick, cv2.LINE_AA)
+    enabled_zones = [z for z in zones if z.enabled and len(z.points) >= 3]
+    if enabled_zones:
+        overlay = out.copy()
+        for zone in enabled_zones:
+            pts = np.array([[int(p[0] * w), int(p[1] * h)] for p in zone.points], dtype=np.int32)
+            bgr = (180, 163, 148) if zone.zone_type == "exclusion" else _hex_to_bgr(zone.color)
+            cv2.fillPoly(overlay, [pts], bgr)
+            cv2.polylines(out, [pts], isClosed=True, color=bgr, thickness=box_thick)
+            label_pt = (int(pts[0][0]), max(int(24 * scale), int(pts[0][1]) - pad_y))
+            if zone.zone_type == "exclusion":
+                z_label = f"MASK: {zone.name}"
+            elif zone.zone_type == "person_zone":
+                z_label = f"PERSON: {zone.name}"
+            else:
+                z_label = zone.name
+            cv2.putText(out, z_label, label_pt, cv2.FONT_HERSHEY_SIMPLEX, font_scale, bgr, text_thick, cv2.LINE_AA)
 
-    out = cv2.addWeighted(overlay, 0.18, out, 0.82, 0)
+        out = cv2.addWeighted(overlay, 0.18, out, 0.82, 0)
 
     # Draw traffic counting & speed measurement lines
     for ln in counting_lines or []:
@@ -3347,7 +3348,7 @@ def annotate_frame(
         )
 
         # Draw bottom-center anchor dot for vehicles or watched people
-        if det.is_vehicle or st.get("in_person_zone") or st.get("person_violation"):
+        if draw_anchor_dots and (det.is_vehicle or st.get("in_person_zone") or st.get("person_violation")):
             cx = int((x1 + x2) * 0.5)
             cv2.circle(out, (cx, y2), dot_r, color, -1)
 

@@ -1148,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.34"
+    assert expected_ver == "1.0.35"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -3335,6 +3335,211 @@ def test_separate_vehicle_and_person_heatmaps_colors_and_mode_cycle(tmp_path: Pa
         r5 = client.post("/api/heatmap/toggle?mode=people").json()
         assert r5 == {"heatmap_enabled": True, "heatmap_mode": "people"}
         assert client.get("/api/stats").json()["heatmap_mode"] == "people"
+
+
+def test_snapshots_only_draw_offending_subject_box_without_zones_lines_heatmap_or_bystanders(
+    tmp_path: Path,
+) -> None:
+    import cv2
+
+    from app.database import Database
+    from app.detector import MonitorStepResult, ViolationDwellUpdate, ViolationEvent
+    from app.stream import StreamWorker
+
+    settings = Settings(
+        data_dir=str(tmp_path / "data"),
+        alpr_enabled=False,
+        ha_enabled=False,
+        webhook_url="",
+        preview_max_width=960,
+    )
+    db = Database(settings.db_path)
+    worker = StreamWorker(settings=settings, db=db)
+    worker.toggle_heatmap(True, mode="all")
+
+    red_zone = ZoneModel(
+        id="z1",
+        name="Fire Lane",
+        points=[[0.05, 0.40], [0.55, 0.40], [0.55, 0.90], [0.05, 0.90]],
+        enabled=True,
+        color="#ef4444",
+        zone_type="red_zone",
+    )
+    mask_zone = ZoneModel(
+        id="m1",
+        name="Background Street",
+        points=[[0.05, 0.05], [0.95, 0.05], [0.95, 0.22], [0.05, 0.22]],
+        enabled=True,
+        color="#94a3b8",
+        zone_type="exclusion",
+    )
+    count_line = CountingLineModel(
+        id="l1",
+        name="Main Flow",
+        p1=[0.10, 0.65],
+        p2=[0.90, 0.65],
+        enabled=True,
+        color="#38bdf8",
+        line_role="both",
+    )
+    speed_line = CountingLineModel(
+        id="l2",
+        name="Radar Trap",
+        p1=[0.10, 0.80],
+        p2=[0.90, 0.80],
+        enabled=True,
+        color="#38bdf8",
+        line_role="speed",
+    )
+    zones = [red_zone, mask_zone]
+    lines = [count_line, speed_line]
+    db.replace_zones(zones)
+    db.replace_counting_lines(lines)
+
+    w, h = 640, 360
+    worker.hotspot.update([_make_car(99, 0.45, 0.30, w=w, h=h)], w, h, now_ts=100.0)
+    worker.hotspot.update([_make_car(99, 0.55, 0.30, w=w, h=h)], w, h, now_ts=100.2)
+
+    car1 = _make_car(1, 0.25, 0.60, w=w, h=h)
+    car2 = _make_car(2, 0.80, 0.60, w=w, h=h)
+    person3 = TrackedDetection(
+        track_id=3,
+        class_id=PERSON_CLASS_ID,
+        class_name="person",
+        confidence=0.9,
+        bbox_xyxy=(0.63 * w, 0.23 * h, 0.67 * w, 0.35 * h),
+    )
+    tracks = [car1, car2, person3]
+    statuses = {
+        1: {
+            "in_red_zone": True,
+            "dwell_seconds": 16.0,
+            "violation": True,
+            "zone_name": "Fire Lane",
+            "emergency": False,
+        },
+        2: {
+            "in_red_zone": False,
+            "dwell_seconds": 0.0,
+            "violation": False,
+            "zone_name": None,
+            "emergency": False,
+            "speed_mph": 34.0,
+        },
+        3: {
+            "in_red_zone": False,
+            "dwell_seconds": 0.0,
+            "violation": False,
+            "zone_name": None,
+            "emergency": False,
+        },
+    }
+
+    step = MonitorStepResult(
+        new_violations=[
+            ViolationEvent(
+                track_id=1,
+                zone_id="z1",
+                zone_name="Fire Lane",
+                vehicle_class="car",
+                started_at="2026-11-18T18:00:00+00:00",
+                flagged_at="2026-11-18T18:00:16+00:00",
+                dwell_seconds=16.0,
+            )
+        ],
+        track_statuses=statuses,
+    )
+    base_frame = np.full((h, w, 3), (80, 80, 80), dtype=np.uint8)
+    worker._handle_step_events(
+        frame=base_frame,
+        w=w,
+        h=h,
+        tracks=tracks,
+        step=step,
+        zones=zones,
+        counting_lines=lines,
+        cfg=worker.config,
+        speeding_events=[{"track_id": 2, "vehicle_class": "car", "speed_mph": 34.0}],
+        now_ts=1016.0,
+        inferred_this_step=True,
+    )
+
+    # Trigger live in-zone dwell refresh as well to confirm refreshed snapshots remain offender-only
+    with worker._lock:
+        worker._active_violation_snaps[(1, "z1")]["last_update_ts"] -= 10.0
+    step_refresh = MonitorStepResult(
+        dwell_updates=[
+            ViolationDwellUpdate(
+                violation_key=(1, "z1"),
+                track_id=1,
+                zone_id="z1",
+                dwell_seconds=25.0,
+                completed=False,
+            )
+        ],
+        track_statuses={
+            **statuses,
+            1: {**statuses[1], "dwell_seconds": 25.0},
+        },
+    )
+    worker._handle_step_events(
+        frame=base_frame,
+        w=w,
+        h=h,
+        tracks=tracks,
+        step=step_refresh,
+        zones=zones,
+        counting_lines=lines,
+        cfg=worker.config,
+        speeding_events=[],
+        now_ts=1025.0,
+        inferred_this_step=True,
+    )
+
+    viols = db.get_violations(limit=10)
+    viol_rec = next(v for v in viols if v.track_id == 1)
+    speed_rec = next(v for v in viols if v.track_id == 2)
+
+    def _is_bg(img: np.ndarray, px_x: int, px_y: int) -> bool:
+        b, g, r = [int(c) for c in img[px_y, px_x]]
+        return max(abs(b - 80), abs(g - 80), abs(r - 80)) <= 5
+
+    # 1. Red-Zone violation snapshot: only car #1's box; no zones, lines, heatmap, anchor dot, or bystanders
+    viol_img = cv2.imread(str(worker.snapshots_dir / viol_rec.snapshot_filename))
+    assert viol_img is not None
+    vb, _vg, vr = [int(c) for c in viol_img[int(0.55 * h), int(0.20 * w)]]
+    assert vr >= 150 and vr > vb + 60  # Red bounding box on offending car #1 (1px JPEG chroma)
+    assert _is_bg(viol_img, int(0.45 * w), int(0.85 * h))  # No red zone fill
+    assert _is_bg(viol_img, int(0.50 * w), int(0.12 * h))  # No exclusion mask
+    assert _is_bg(viol_img, int(0.60 * w), int(0.65 * h))  # No traffic line
+    assert _is_bg(viol_img, int(0.60 * w), int(0.80 * h))  # No speed line
+    assert _is_bg(viol_img, int(0.10 * w), int(0.80 * h))  # No speed line endpoint
+    assert _is_bg(viol_img, int(0.50 * w), int(0.30 * h))  # No heatmap
+    assert _is_bg(viol_img, int(0.75 * w), int(0.55 * h))  # No bystander car #2
+    assert _is_bg(viol_img, int(0.63 * w), int(0.29 * h))  # No bystander person #3
+
+    # 2. Speeding snapshot: only car #2's box; no car #1, zones, lines, heatmap, or bystander person
+    speed_img = cv2.imread(str(worker.snapshots_dir / speed_rec.snapshot_filename))
+    assert speed_img is not None
+    assert not _is_bg(speed_img, int(0.75 * w), int(0.55 * h))  # Offending speeding car #2 box drawn
+    assert _is_bg(speed_img, int(0.20 * w), int(0.55 * h))  # No car #1
+    assert _is_bg(speed_img, int(0.45 * w), int(0.85 * h))  # No red zone fill
+    assert _is_bg(speed_img, int(0.60 * w), int(0.65 * h))  # No traffic line
+    assert _is_bg(speed_img, int(0.50 * w), int(0.30 * h))  # No heatmap
+    assert _is_bg(speed_img, int(0.63 * w), int(0.29 * h))  # No bystander person #3
+
+    # 3. Live Camera Feed preview still renders full zones, lines, heatmap, and all objects
+    live_jpg = worker._render_preview_jpeg(base_frame, tracks, statuses, zones, lines, worker.config)
+    assert live_jpg is not None
+    live_img = cv2.imdecode(np.frombuffer(live_jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert live_img is not None
+    lh, lw = live_img.shape[:2]
+    assert not _is_bg(live_img, int(0.20 * lw), int(0.55 * lh))  # Car #1 box present
+    assert not _is_bg(live_img, int(0.75 * lw), int(0.55 * lh))  # Car #2 box present
+    assert not _is_bg(live_img, int(0.45 * lw), int(0.85 * lh))  # Red zone tint present
+    assert not _is_bg(live_img, int(0.60 * lw), int(0.65 * lh))  # Traffic line present
+    assert not _is_bg(live_img, int(0.50 * lw), int(0.30 * lh))  # Heatmap present
+
 
 
 

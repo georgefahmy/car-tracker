@@ -1635,9 +1635,8 @@ async function refreshStats() {
     latestLiveStats = data;
 
     document.getElementById("kpiActiveCars").textContent = data.active_cars;
-    document.getElementById("kpiUniqueCars").textContent = data.unique_cars;
     document.getElementById("kpiTotalCars").textContent = data.total_cars;
-    document.getElementById("kpiPeople").textContent = `${data.active_people} / ${data.unique_people}`;
+    document.getElementById("kpiPeople").textContent = `${data.active_people} / ${data.total_people ?? data.unique_people ?? 0}`;
     document.getElementById("kpiViolations").textContent = data.violations_total;
     const personAlertsEl = document.getElementById("kpiPersonAlerts");
     if (personAlertsEl) {
@@ -2027,7 +2026,7 @@ document.getElementById("btnHeatmapReset").addEventListener("click", async () =>
 });
 
 document.getElementById("btnResetStats").addEventListener("click", async () => {
-  if (!confirm("Reset unique/total counters, line crossings, and cumulative heatmap?")) return;
+  if (!confirm("Reset total vehicle & person counters, line crossings, and cumulative heatmap?")) return;
   const res = await fetch("api/stats/reset", { method: "POST" });
   if (res.ok) {
     const data = await res.json();

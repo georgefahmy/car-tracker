@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.36
+- **Streamlined 6-Card KPI Bar**: Removed the duplicate **Unique Vehicles** card (keeping **Vehicles (Live)** and highlighting **Total Vehicles**) and updated **People (Live / Unique)** to **People (Live / Total)** with updated Reset Counts prompt/tooltip text, while preserving backend API and Home Assistant fields for compatibility.
+
 ## 1.0.35
 - **Clean Offender-Only Violation, Speeding & Person Snapshots**: Updated saved snapshot rendering (`violation_*.jpg`, `speeding_*.jpg`, `person_*.jpg` for both the Web UI and Discord webhook alerts) to draw **only the offending vehicle/person's bounding box and label** on the clean camera frame — removing Red-Zone/Exclusion/Person-Zone polygon markings & fills, traffic/speed lines, heatmaps, bystander boxes, and anchor dots while keeping full overlays on the Live Camera Feed.
 

@@ -1148,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.35"
+    assert expected_ver == "1.0.36"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1799,9 +1799,9 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         assert "role" not in attrs
         assert "aria-modal" not in attrs
 
-    assert "static/icon.png?v=30" in collector.links
-    assert "static/styles.css?v=30" in collector.links
-    assert "static/app.js?v=30" in collector.scripts
+    assert "static/icon.png?v=31" in collector.links
+    assert "static/styles.css?v=31" in collector.links
+    assert "static/app.js?v=31" in collector.scripts
     for tip_id, btn_id in (
         ("tip-heatmap_toggle", "btnHeatmapToggle"),
         ("tip-heatmap_reset", "btnHeatmapReset"),
@@ -1840,6 +1840,10 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
     assert ".t-motion" in Path("static/styles.css").read_text(encoding="utf-8")
     assert "renderStreamTelemetryHtml" in Path("static/app.js").read_text(encoding="utf-8")
     assert 'id="kpiPersonAlerts"' in html
+    assert 'id="kpiUniqueCars"' not in html
+    assert 'id="kpiTotalCars"' in html
+    assert "People (Live / Total)" in html
+    assert "kpiUniqueCars" not in app_js_txt
     assert 'id="btnDrawPersonZone"' in html
     assert 'id="btnRefreshHardware"' in html
     assert 'id="hwDiagnosticHint"' in html

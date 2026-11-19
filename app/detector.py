@@ -148,23 +148,27 @@ def _build_bgr_lut(stops: list[tuple[int, tuple[int, int, int]]]) -> np.ndarray:
     return lut
 
 
-# Colorblind-safe dual ramps (OpenCV BGR): Warm Crimson->Amber->Gold for vehicles; Cool Sapphire->Cyan->Ice for people
+# Colorblind-safe high-contrast dual ramps (OpenCV BGR):
+# Quiet Crimson -> Rich Red -> Fiery Orange -> Blazing Solar Yellow for vehicles;
+# Quiet Cobalt -> Deep Sapphire -> Electric Azure -> Radiant Ice Cyan for people.
 _VEHICLE_HEATMAP_LUT = _build_bgr_lut(
     [
         (0, (0, 0, 0)),
-        (32, (12, 18, 150)),
-        (96, (10, 70, 230)),
-        (176, (16, 155, 255)),
-        (255, (90, 240, 255)),
+        (40, (12, 10, 145)),
+        (105, (10, 36, 210)),
+        (165, (12, 118, 252)),
+        (215, (30, 202, 255)),
+        (255, (85, 250, 255)),
     ]
 )
 _PERSON_HEATMAP_LUT = _build_bgr_lut(
     [
         (0, (0, 0, 0)),
-        (32, (165, 55, 0)),
-        (96, (235, 135, 8)),
-        (176, (255, 210, 30)),
-        (255, (255, 250, 145)),
+        (40, (150, 32, 8)),
+        (105, (215, 92, 10)),
+        (165, (252, 172, 20)),
+        (215, (255, 226, 52)),
+        (255, (255, 252, 118)),
     ]
 )
 
@@ -574,18 +578,27 @@ class HotspotTracker:
         if float(layer_grid.max()) <= 0.05:
             return None
         blurred = cv2.GaussianBlur(layer_grid, (15, 15), 0)
-        log_grid = np.log1p(np.maximum(blurred, 0.0) * 10.0)
-        denom = max(float(log_grid.max()), 1.6)
-        norm = np.clip((log_grid / denom) * 255.0, 0.0, 255.0).astype(np.uint8)
+        max_val = float(blurred.max())
+        if max_val <= 1e-4:
+            return None
+        nz = blurred[blurred > max(0.01, max_val * 0.01)]
+        p99 = float(np.percentile(nz, 99.0)) if nz.size >= 20 else max_val
+        # Clip isolated single-pixel crossing spikes while preserving compact high-traffic hotspots
+        peak = max(p99, max_val * 0.75)
+        denom = max(peak, 0.75)
+        ratio = np.clip(blurred / denom, 0.0, 1.0)
+        t_color = np.power(ratio, 0.75)
+        norm = np.clip(np.round(t_color * 255.0), 0.0, 255.0).astype(np.uint8)
         colored = cv2.applyColorMap(norm, lut)
+        w_raw = np.power(ratio, 1.10) * 255.0
         weight = np.where(
-            norm >= 14,
-            np.clip(((norm.astype(np.float32) / 255.0) ** 0.7) * 255.0, 0.0, 255.0),
+            w_raw >= 3.0,
+            np.clip(np.round(w_raw), 0.0, 255.0),
             0.0,
         ).astype(np.uint8)
         return colored, weight
 
-    def render_overlay(self, frame: np.ndarray, alpha: float = 0.45, mode: str = "all") -> np.ndarray:
+    def render_overlay(self, frame: np.ndarray, alpha: float = 0.80, mode: str = "all") -> np.ndarray:
         eff_mode = mode if mode in ("all", "vehicles", "people") else "all"
         with self._lock:
             v_max = float(self.vehicle_grid.max()) if eff_mode in ("all", "vehicles") else 0.0
@@ -640,7 +653,7 @@ class HotspotTracker:
         h, w = frame.shape[:2]
         colored_resized = cv2.resize(colored_small, (w, h), interpolation=cv2.INTER_LINEAR)
         weight_resized = cv2.resize(weight_small, (w, h), interpolation=cv2.INTER_LINEAR)
-        mask = weight_resized >= 14
+        mask = weight_resized >= 3
         if not np.any(mask):
             return frame
 
@@ -3252,7 +3265,7 @@ def annotate_frame(
     dot_r = max(3, int(round(4 * scale)))
 
     if show_heatmap and hotspot is not None:
-        out = hotspot.render_overlay(out, alpha=0.45, mode=heatmap_mode)
+        out = hotspot.render_overlay(out, alpha=0.80, mode=heatmap_mode)
 
     # Draw red-zone & exclusion-mask polygons
     enabled_zones = [z for z in zones if z.enabled and len(z.points) >= 3]
@@ -3416,7 +3429,7 @@ def render_birdseye_jpeg(
 ) -> bytes | None:
     """Warp the camera frame into a top-down bird's-eye view with grid, zones, and lines."""
     src_frame = (
-        hotspot.render_overlay(frame, alpha=0.45, mode=heatmap_mode)
+        hotspot.render_overlay(frame, alpha=0.80, mode=heatmap_mode)
         if hotspot is not None
         else frame
     )

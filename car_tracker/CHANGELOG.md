@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.37
+- **High-Contrast Traffic Heatmap**: Replaced heavy logarithmic compression and concave opacity boosting with 99th-percentile peak scaling (guarded against sprawling low-traffic noise), a `ratio ** 0.75` color curve, and a convex `ratio ** 1.10` opacity curve at up to `80%` peak opacity. Heavy traffic corridors now blaze clearly in glowing amber/solar yellow (vehicles) or electric cyan/ice-aqua (people), while light and occasional paths fade softly into subtle low-opacity crimson/cobalt whispers without bloated halos.
+
 ## 1.0.36
 - **Streamlined 6-Card KPI Bar**: Removed the duplicate **Unique Vehicles** card (keeping **Vehicles (Live)** and highlighting **Total Vehicles**) and updated **People (Live / Unique)** to **People (Live / Total)** with updated Reset Counts prompt/tooltip text, while preserving backend API and Home Assistant fields for compatibility.
 

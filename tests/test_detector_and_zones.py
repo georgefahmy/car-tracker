@@ -1148,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.36"
+    assert expected_ver == "1.0.37"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -3545,15 +3545,86 @@ def test_snapshots_only_draw_offending_subject_box_without_zones_lines_heatmap_o
     assert not _is_bg(live_img, int(0.50 * lw), int(0.30 * lh))  # Heatmap present
 
 
+def test_heatmap_high_vs_low_traffic_visual_contrast() -> None:
+    from app.detector import _PERSON_HEATMAP_LUT, _VEHICLE_HEATMAP_LUT
 
+    def _make_person(
+        track_id: int, cx: float = 0.5, y2: float = 0.5, w: int = 1000, h: int = 1000
+    ) -> TrackedDetection:
+        bw = 0.04 * w
+        bh = 0.12 * h
+        return TrackedDetection(
+            track_id=track_id,
+            class_id=PERSON_CLASS_ID,
+            class_name="person",
+            confidence=0.9,
+            bbox_xyxy=(cx * w - bw * 0.5, y2 * h - bh, cx * w + bw * 0.5, y2 * h),
+        )
 
+    def _max_delta(img: np.ndarray, py: int, px: int, bg: int = 130) -> int:
+        return int(np.abs(img[py, px].astype(int) - bg).max())
 
+    # 1. Vehicle traffic: 1 (rare), 5 (light), 20 (medium), 50 (heavy) passes on daylight canvas
+    ht = HotspotTracker(grid_w=320, grid_h=180)
+    t = 100.0
+    lanes = [("rare", 1, 0.12), ("light", 5, 0.30), ("med", 20, 0.55), ("heavy", 50, 0.80)]
+    for idx, (_lbl, count, y) in enumerate(lanes):
+        for pass_idx in range(count):
+            tid = 1000 * idx + pass_idx + 1
+            for x in (0.15, 0.50, 0.85):
+                ht.update([_make_car(tid, x, y)], 1000, 1000, now_ts=t)
+                t += 0.1
 
+    day = np.full((360, 640, 3), (130, 130, 130), dtype=np.uint8)
+    out = ht.render_overlay(day, mode="vehicles")
+    deltas: dict[str, int] = {}
+    for lbl, _count, y in lanes:
+        deltas[lbl] = _max_delta(out, int(y * 360), int(0.50 * 640))
 
+    heavy_b, heavy_g, heavy_r = [int(c) for c in out[int(0.80 * 360), int(0.50 * 640)]]
+    assert deltas["rare"] < deltas["light"] < deltas["med"] < deltas["heavy"]
+    assert deltas["rare"] <= 4
+    assert deltas["light"] <= 15
+    assert deltas["heavy"] >= 80
+    assert deltas["heavy"] >= 5 * max(deltas["light"], 1)
+    assert heavy_g >= 200 and heavy_r >= 210 and heavy_r > heavy_b + 80
 
+    # 2. Compact 50-pass hotspot surrounded by sprawling 1-pass trails keeps hotspot dominant
+    ht_sprawl = HotspotTracker(grid_w=320, grid_h=180)
+    t2 = 100.0
+    for row_i in range(15):
+        y = 0.08 + row_i * 0.06
+        for x in (0.05, 0.35, 0.65, 0.95):
+            ht_sprawl.update([_make_car(10 + row_i, x, y)], 1000, 1000, now_ts=t2)
+            t2 += 0.1
+    for pass_idx in range(50):
+        for x in (0.45, 0.55):
+            ht_sprawl.update([_make_car(500 + pass_idx, x, 0.50)], 1000, 1000, now_ts=t2)
+            t2 += 0.1
 
+    encoded = ht_sprawl._encode_layer(ht_sprawl.vehicle_grid, _VEHICLE_HEATMAP_LUT)
+    assert encoded is not None
+    _c_sprawl, w_sprawl = encoded
+    assert int(w_sprawl[round(0.50 * 179), round(0.50 * 319)]) >= 240
+    assert int(w_sprawl[round(0.08 * 179), round(0.50 * 319)]) <= 12
 
+    # 3. Pedestrian layer ("people"): 50-pass walkway pops in cyan vs faint 5-pass & 1-pass paths
+    ht_ped = HotspotTracker(grid_w=320, grid_h=180)
+    t3 = 200.0
+    p_lanes = [("rare", 1, 0.80), ("light", 5, 0.55), ("heavy", 50, 0.30)]
+    for idx, (_lbl, count, y) in enumerate(p_lanes):
+        for pass_idx in range(count):
+            tid = 2000 * idx + pass_idx + 1
+            for x in (0.15, 0.50, 0.85):
+                ht_ped.update([_make_person(tid, x, y)], 1000, 1000, now_ts=t3)
+                t3 += 0.1
 
-
-
+    out_ped = ht_ped.render_overlay(day, mode="people")
+    p_deltas = {lbl: _max_delta(out_ped, int(y * 360), int(0.50 * 640)) for lbl, _c, y in p_lanes}
+    hb, hg, hr = [int(c) for c in out_ped[int(0.30 * 360), int(0.50 * 640)]]
+    assert p_deltas["rare"] < p_deltas["light"] < p_deltas["heavy"]
+    assert p_deltas["rare"] <= 4
+    assert p_deltas["light"] <= 15
+    assert p_deltas["heavy"] >= 80
+    assert hb >= 210 and hg >= 200 and hb > hr + 80
 

@@ -1148,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.37"
+    assert expected_ver == "1.0.38"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1799,9 +1799,9 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         assert "role" not in attrs
         assert "aria-modal" not in attrs
 
-    assert "static/icon.png?v=31" in collector.links
-    assert "static/styles.css?v=31" in collector.links
-    assert "static/app.js?v=31" in collector.scripts
+    assert "static/icon.png?v=32" in collector.links
+    assert "static/styles.css?v=32" in collector.links
+    assert "static/app.js?v=32" in collector.scripts
     for tip_id, btn_id in (
         ("tip-heatmap_toggle", "btnHeatmapToggle"),
         ("tip-heatmap_reset", "btnHeatmapReset"),
@@ -3627,4 +3627,207 @@ def test_heatmap_high_vs_low_traffic_visual_contrast() -> None:
     assert p_deltas["light"] <= 15
     assert p_deltas["heavy"] >= 80
     assert hb >= 210 and hg >= 200 and hb > hr + 80
+
+
+def test_reset_counts_and_daily_report_clear_violations_and_snapshots(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import threading
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    import requests
+
+    from app.database import Database
+    from app.detector import MonitorStepResult, ViolationEvent
+
+    # Part A: POST /api/stats/reset flushes pending red-zone webhook first, then clears DB & snapshot files
+    settings_a = Settings(
+        data_dir=str(tmp_path / "data_a"),
+        alpr_enabled=False,
+        ha_enabled=False,
+        webhook_url="https://discord.com/api/webhooks/123/abc",
+        preview_max_width=640,
+    )
+    app_a = create_app(settings=settings_a, start_worker=False)
+    posts_a: list[tuple[str, dict]] = []
+    redzone_sent = threading.Event()
+    immediate_sent = threading.Event()
+
+    def _fake_post_a(url: str, **kwargs):
+        posts_a.append((url, kwargs))
+        content = str((kwargs.get("data") or {}).get("content") or "")
+        if "Red-Zone Violation" in content:
+            redzone_sent.set()
+        if sum(1 for _, kw in posts_a if "Red-Zone Violation" not in str((kw.get("data") or {}).get("content") or "")) >= 2:
+            immediate_sent.set()
+        return SimpleNamespace(status_code=204, text="")
+
+    monkeypatch.setattr(requests, "post", _fake_post_a)
+
+    with TestClient(app_a) as client_a:
+        worker_a = app_a.state.worker
+        w, h = 640, 360
+        frame = np.full((h, w, 3), (90, 95, 100), dtype=np.uint8)
+        car1 = _make_car(1, 0.25, 0.60, w=w, h=h)
+        person2 = TrackedDetection(
+            track_id=2,
+            class_id=PERSON_CLASS_ID,
+            class_name="person",
+            confidence=0.9,
+            bbox_xyxy=(0.45 * w, 0.30 * h, 0.50 * w, 0.45 * h),
+        )
+        car3 = _make_car(3, 0.75, 0.60, w=w, h=h)
+        now_iso = datetime.now().astimezone().isoformat()
+        step_a = MonitorStepResult(
+            new_violations=[
+                ViolationEvent(
+                    track_id=1,
+                    zone_id="z1",
+                    zone_name="Fire Lane",
+                    vehicle_class="car",
+                    started_at=now_iso,
+                    flagged_at=now_iso,
+                    dwell_seconds=16.0,
+                ),
+                ViolationEvent(
+                    track_id=2,
+                    zone_id="person_zone_pz1",
+                    zone_name="Front Porch",
+                    vehicle_class="person",
+                    started_at=now_iso,
+                    flagged_at=now_iso,
+                    dwell_seconds=10.0,
+                ),
+            ],
+            track_statuses={
+                1: {"in_red_zone": True, "dwell_seconds": 16.0, "violation": True, "zone_name": "Fire Lane", "emergency": False},
+                2: {"in_person_zone": True, "person_dwell_seconds": 10.0, "person_violation": True, "emergency": False},
+                3: {"in_red_zone": False, "dwell_seconds": 0.0, "violation": False, "emergency": False, "speed_mph": 36.0},
+            },
+        )
+        worker_a._handle_step_events(
+            frame=frame,
+            w=w,
+            h=h,
+            tracks=[car1, person2, car3],
+            step=step_a,
+            zones=[],
+            counting_lines=[],
+            cfg=worker_a.config,
+            speeding_events=[{"track_id": 3, "vehicle_class": "car", "speed_mph": 36.0}],
+            now_ts=1000.0,
+            inferred_this_step=True,
+        )
+        assert immediate_sent.wait(timeout=2.0)
+
+        before_viols = client_a.get("/api/violations").json()
+        assert len(before_viols) == 3
+        snap_names = [v["snapshot_filename"] for v in before_viols]
+        assert all((worker_a.snapshots_dir / name).exists() for name in snap_names)
+        assert client_a.get("/api/stats").json()["violations_total"] == 3
+        assert worker_a.build_ha_payload()["violations_total"] == 3
+
+        reset_res = client_a.post("/api/stats/reset")
+        assert reset_res.status_code == 200
+        assert redzone_sent.wait(timeout=2.0)
+
+        redzone_posts = [
+            kw for _u, kw in posts_a if "Red-Zone Violation" in str((kw.get("data") or {}).get("content") or "")
+        ]
+        assert len(redzone_posts) == 1
+        assert redzone_posts[0]["files"]["file"][1].startswith(b"\xff\xd8")
+
+        assert client_a.get("/api/violations").json() == []
+        stats_after = client_a.get("/api/stats").json()
+        assert stats_after["violations_total"] == 0
+        assert stats_after["last_violation"] is None
+        ha_after = worker_a.build_ha_payload()
+        assert ha_after["violations_total"] == 0
+        assert ha_after["last_violation"] is None
+        assert list(worker_a.snapshots_dir.glob("*.jpg")) == []
+
+    # Part B: Daily Report preserves violations on failure or reset_after=False, and clears them on success
+    settings_b = Settings(data_dir=str(tmp_path / "data_b"))
+    app_b = create_app(settings=settings_b, start_worker=False)
+    with TestClient(app_b) as client_b:
+        db_b: Database = app_b.state.db
+        worker_b = app_b.state.worker
+        now_local_iso = datetime.now().astimezone().isoformat()
+        rec1 = db_b.add_violation(
+            track_id=10,
+            zone_id="z1",
+            zone_name="Fire Lane",
+            vehicle_class="car",
+            started_at=now_local_iso,
+            flagged_at=now_local_iso,
+            dwell_seconds=25.0,
+            snapshot_filename="violation_rep1.jpg",
+        )
+        rec2 = db_b.add_violation(
+            track_id=11,
+            zone_id="person_zone_pz1",
+            zone_name="Walkway",
+            vehicle_class="person",
+            started_at=now_local_iso,
+            flagged_at=now_local_iso,
+            dwell_seconds=8.0,
+            snapshot_filename="person_rep2.jpg",
+        )
+        (worker_b.snapshots_dir / "violation_rep1.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+        (worker_b.snapshots_dir / "person_rep2.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+        with worker_b._lock:
+            worker_b._last_violation = rec2.model_dump()
+        db_b.increment_stats(unique_cars=3, total_cars=5, person_alerts=1)
+
+        # Failed webhook (HTTP 500) must leave violations & snapshots untouched
+        monkeypatch.setattr(requests, "post", lambda *a, **kw: SimpleNamespace(status_code=500, text="err"))
+        fail_res = client_b.post(
+            "/api/report/daily/send",
+            json={"webhook_url": "https://discord.com/api/webhooks/test/tok"},
+        )
+        assert fail_res.status_code == 200
+        assert fail_res.json()["ok"] is False
+        assert len(client_b.get("/api/violations").json()) == 2
+        assert (worker_b.snapshots_dir / "violation_rep1.jpg").exists()
+        assert (worker_b.snapshots_dir / "person_rep2.jpg").exists()
+
+        # reset_after=False leaves violations & snapshots untouched
+        monkeypatch.setattr(requests, "post", lambda *a, **kw: SimpleNamespace(status_code=204, text=""))
+        keep_res = worker_b.send_daily_report(
+            "https://discord.com/api/webhooks/test/tok",
+            reset_after=False,
+        )
+        assert keep_res["ok"] is True
+        assert keep_res["reset"] is False
+        assert len(client_b.get("/api/violations").json()) == 2
+        assert (worker_b.snapshots_dir / "violation_rep1.jpg").exists()
+        assert (worker_b.snapshots_dir / "person_rep2.jpg").exists()
+
+        # Successful daily report (reset_after=True) reports counts in summary, then clears violations & snapshots
+        ok_res = client_b.post(
+            "/api/report/daily/send",
+            json={"webhook_url": "https://discord.com/api/webhooks/test/tok"},
+        )
+        assert ok_res.status_code == 200
+        body = ok_res.json()
+        assert body["ok"] is True
+        assert body["reset"] is True
+        assert body["summary"]["violations_today"] == 2
+        assert body["summary"]["person_alerts_today"] == 1
+        assert isinstance(body.get("heatmap_started_at"), str) and len(body["heatmap_started_at"]) >= 10
+        assert client_b.get("/api/violations").json() == []
+        stats_b = client_b.get("/api/stats").json()
+        assert stats_b["violations_total"] == 0
+        assert stats_b["last_violation"] is None
+        assert not (worker_b.snapshots_dir / rec1.snapshot_filename).exists()
+        assert not (worker_b.snapshots_dir / rec2.snapshot_filename).exists()
+
+    # Part C: UI handlers refresh the violations window after reset and daily report
+    app_js = Path("static/app.js").read_text(encoding="utf-8")
+    reset_block = app_js.split('document.getElementById("btnResetStats").addEventListener', 1)[1].split("\n});", 1)[0]
+    report_block = app_js.split('document.getElementById("btnSendDailyReport").addEventListener', 1)[1].split("\n});", 1)[0]
+    assert "refreshViolations()" in reset_block
+    assert "refreshViolations()" in report_block
+
 

@@ -1982,13 +1982,22 @@ class StreamWorker:
         return "\n".join(lines_out)
 
     def reset_all_counts(self) -> None:
-        """Reset cumulative vehicle/people counts, hourly traffic, line crossings, speed history, and heatmap."""
+        """Reset cumulative vehicle/people counts, hourly traffic, line crossings, speed history, heatmap, and violations log."""
+        self._flush_pending_violation_webhooks(synchronous=False)
+        removed_snaps = self.db.clear_violations()
+        with self._lock:
+            self._last_violation = None
+        for fname in removed_snaps:
+            snap = self.snapshots_dir / Path(fname).name
+            try:
+                snap.unlink(missing_ok=True)
+            except OSError:
+                pass
         self.db.reset_stats()
         self.db.reset_line_counts()
         self.monitor.reset()
         self.line_monitor.reset()
         self.hotspot.reset(preserve_stationary=True)
-        self._flush_pending_violation_webhooks(synchronous=False)
         self._rerender_latest_preview()
         self._ha_wake_event.set()
 
@@ -2021,6 +2030,7 @@ class StreamWorker:
                     "status_code": resp.status_code,
                     "summary": summary,
                     "reset": reset_after,
+                    "heatmap_started_at": self.hotspot.started_at,
                 }
             return {"ok": False, "error": f"HTTP {resp.status_code}: {resp.text[:160]}"}
         except Exception as exc:

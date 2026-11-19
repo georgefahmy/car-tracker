@@ -371,6 +371,15 @@ class Database:
             self._conn.commit()
             return str(row["snapshot_filename"])
 
+    def clear_violations(self) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT snapshot_filename FROM violations"
+            ).fetchall()
+            self._conn.execute("DELETE FROM violations")
+            self._conn.commit()
+            return [str(r["snapshot_filename"]) for r in rows if r["snapshot_filename"]]
+
     def count_violations(self) -> int:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) AS c FROM violations").fetchone()

@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.0.38
+- **Clear Violations Log on Count Reset & Daily Report**: `Reset Counts` and the End-of-Day Summary Report (both scheduled and manual **Send Report Now**, once delivered successfully) now also clear the **Violations & Alerts** log, delete associated snapshot JPEGs from disk, reset `violations_total` / `last_violation` in live stats & Home Assistant, flush any in-progress Red-Zone violation webhook before cleanup, and refresh the Web UI violations window immediately.
+
 ## 1.0.37
 - **High-Contrast Traffic Heatmap**: Replaced heavy logarithmic compression and concave opacity boosting with 99th-percentile peak scaling (guarded against sprawling low-traffic noise), a `ratio ** 0.75` color curve, and a convex `ratio ** 1.10` opacity curve at up to `80%` peak opacity. Heavy traffic corridors now blaze clearly in glowing amber/solar yellow (vehicles) or electric cyan/ice-aqua (people), while light and occasional paths fade softly into subtle low-opacity crimson/cobalt whispers without bloated halos.
 

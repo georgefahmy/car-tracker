@@ -1884,9 +1884,10 @@ function renderViolationsList() {
     : `${lastViolationItems.length} shown`;
 
   if (!filtered.length) {
-    list.innerHTML = query
-      ? `<p class="muted">No violations or alerts match "${escapeHtml(query)}".</p>`
-      : `<p class="muted">No violations or alerts recorded yet.</p>`;
+    list.innerHTML =
+      query && lastViolationItems.length
+        ? `<p class="muted">No violations or alerts match "${escapeHtml(query)}".</p>`
+        : `<p class="muted">No violations or alerts recorded yet.</p>`;
     return;
   }
 
@@ -1960,6 +1961,9 @@ async function refreshViolations() {
         if (fullImg.getAttribute("src") !== nextUrl) {
           fullImg.src = nextUrl;
         }
+      } else {
+        openSnapshotViolationId = null;
+        closeModalDialog(snapshotModal);
       }
     }
   } catch (err) {
@@ -2026,13 +2030,14 @@ document.getElementById("btnHeatmapReset").addEventListener("click", async () =>
 });
 
 document.getElementById("btnResetStats").addEventListener("click", async () => {
-  if (!confirm("Reset total vehicle & person counters, line crossings, and cumulative heatmap?")) return;
+  if (!confirm("Reset total vehicle & person counters, line crossings, cumulative heatmap, and violations log?")) return;
   const res = await fetch("api/stats/reset", { method: "POST" });
   if (res.ok) {
     const data = await res.json();
     updateHeatmapTooltip(data.heatmap_started_at);
   }
   refreshStats();
+  refreshViolations();
 });
 
 async function refreshHardwareDiagnostics(force = false) {
@@ -2190,6 +2195,11 @@ document.getElementById("btnSendDailyReport").addEventListener("click", async ()
   if (data.ok) {
     out.textContent = `Daily report sent (HTTP ${data.status_code})`;
     out.style.color = "#22c55e";
+    if (data.heatmap_started_at) {
+      updateHeatmapTooltip(data.heatmap_started_at);
+    }
+    refreshStats();
+    refreshViolations();
   } else {
     out.textContent = data.error || "Failed to send daily report";
     out.style.color = "#ef4444";

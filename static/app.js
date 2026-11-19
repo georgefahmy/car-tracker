@@ -9,6 +9,7 @@ const settingsModal = document.getElementById("settingsModal");
 const settingsForm = document.getElementById("settingsForm");
 const snapshotModal = document.getElementById("snapshotModal");
 const birdseyeModal = document.getElementById("birdseyeModal");
+const confirmHeatmapClearModal = document.getElementById("confirmHeatmapClearModal");
 const supportsPopover = Object.hasOwn(HTMLElement.prototype, "popover");
 const supportsAnchorPositioning =
   typeof CSS !== "undefined" &&
@@ -2009,7 +2010,7 @@ function updateHeatmapTooltip(startedAtIso) {
       sincePart = `since ${formatted}`;
     }
   }
-  tipEl.textContent = `Click to cycle Off → All → Cars → People. Warm Amber/Red = Vehicles • Cool Cyan/Blue = People (cumulative ${sincePart}; persists across restarts and resets with Reset Counts or Daily Report).`;
+  tipEl.textContent = `Click to cycle Off → All → Cars → People. Warm Amber/Red = Vehicles • Cool Cyan/Blue = People (cumulative ${sincePart}; persists across restarts and resets daily with the Daily Report or at midnight).`;
 }
 
 // Heatmap & Reset controls
@@ -2021,11 +2022,50 @@ document.getElementById("btnHeatmapToggle").addEventListener("click", async () =
   renderHeatmapButton(heatmapEnabled, heatmapMode);
 });
 
-document.getElementById("btnHeatmapReset").addEventListener("click", async () => {
-  const res = await fetch("api/heatmap/reset", { method: "POST" });
-  if (res.ok) {
-    const data = await res.json();
-    updateHeatmapTooltip(data.heatmap_started_at);
+async function executeClearHeatmap() {
+  const statusEl = document.getElementById("heatmapResetStatus");
+  if (statusEl) {
+    statusEl.textContent = "Clearing heatmap...";
+    statusEl.style.color = "#8b9bb4";
+  }
+  try {
+    const res = await fetch("api/heatmap/reset", { method: "POST" });
+    if (res.ok) {
+      const data = await res.json();
+      updateHeatmapTooltip(data.heatmap_started_at);
+      if (statusEl) {
+        statusEl.textContent = "Heatmap cleared";
+        statusEl.style.color = "#22c55e";
+      }
+    } else if (statusEl) {
+      statusEl.textContent = `Clear failed (HTTP ${res.status})`;
+      statusEl.style.color = "#ef4444";
+    }
+  } catch (err) {
+    if (statusEl) {
+      statusEl.textContent = err.message || "Clear failed";
+      statusEl.style.color = "#ef4444";
+    }
+  }
+}
+
+document.getElementById("btnHeatmapReset")?.addEventListener("click", () => {
+  hideAnyOpenSettingTooltip();
+  if (confirmHeatmapClearModal && typeof confirmHeatmapClearModal.showModal === "function") {
+    confirmHeatmapClearModal.returnValue = "";
+    openModalDialog(confirmHeatmapClearModal);
+    return;
+  }
+  if (confirm("Clear the accumulated traffic heatmap? Counts and violations will not be affected.")) {
+    executeClearHeatmap();
+  }
+});
+
+confirmHeatmapClearModal?.addEventListener("close", () => {
+  const choice = confirmHeatmapClearModal.returnValue;
+  confirmHeatmapClearModal.returnValue = "";
+  if (choice === "confirm") {
+    executeClearHeatmap();
   }
 });
 
@@ -2119,6 +2159,8 @@ document.getElementById("btnSettings").addEventListener("click", async () => {
   document.getElementById("testWebhookResult").textContent = "";
   const haOut = document.getElementById("testHaResult");
   if (haOut) haOut.textContent = "";
+  const hmOut = document.getElementById("heatmapResetStatus");
+  if (hmOut) hmOut.textContent = "";
   syncModelOptionLabels();
   updateCvRuntimeHint();
   openModalDialog(settingsModal);

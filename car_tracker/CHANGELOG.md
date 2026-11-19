@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.39
+- **Settings-Only Clear Heatmap with Confirmation**: Moved **Clear Heatmap** out of the top bar into the **Settings** dialog footer with inline status feedback and a native `<dialog>` confirmation modal (`Cancel` safe-focused by default) to prevent accidental clears.
+- **Automatic Daily Heatmap Reset**: Added guaranteed daily local-midnight heatmap rollover inside the background daily maintenance loop so the cumulative heatmap always resets daily — staying aligned with the End-of-Day Summary Report when enabled and rolling over automatically at midnight (or after a restart) if the report is disabled, lacks a webhook, or fails.
+
 ## 1.0.38
 - **Clear Violations Log on Count Reset & Daily Report**: `Reset Counts` and the End-of-Day Summary Report (both scheduled and manual **Send Report Now**, once delivered successfully) now also clear the **Violations & Alerts** log, delete associated snapshot JPEGs from disk, reset `violations_total` / `last_violation` in live stats & Home Assistant, flush any in-progress Red-Zone violation webhook before cleanup, and refresh the Web UI violations window immediately.
 

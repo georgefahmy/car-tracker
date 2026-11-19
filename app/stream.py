@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -648,8 +648,8 @@ class StreamWorker:
         self._rerender_latest_preview()
         return new_val
 
-    def reset_heatmap(self) -> None:
-        self.hotspot.reset(preserve_stationary=True)
+    def reset_heatmap(self, started_at: str | None = None) -> None:
+        self.hotspot.reset(preserve_stationary=True, started_at=started_at)
         self._rerender_latest_preview()
 
     def get_latest_jpeg(self) -> bytes | None:
@@ -1981,7 +1981,7 @@ class StreamWorker:
         )
         return "\n".join(lines_out)
 
-    def reset_all_counts(self) -> None:
+    def reset_all_counts(self, *, started_at: str | None = None) -> None:
         """Reset cumulative vehicle/people counts, hourly traffic, line crossings, speed history, heatmap, and violations log."""
         self._flush_pending_violation_webhooks(synchronous=False)
         removed_snaps = self.db.clear_violations()
@@ -1997,7 +1997,7 @@ class StreamWorker:
         self.db.reset_line_counts()
         self.monitor.reset()
         self.line_monitor.reset()
-        self.hotspot.reset(preserve_stationary=True)
+        self.hotspot.reset(preserve_stationary=True, started_at=started_at)
         self._rerender_latest_preview()
         self._ha_wake_event.set()
 
@@ -2006,6 +2006,7 @@ class StreamWorker:
         webhook_url: str | None = None,
         date_str: str | None = None,
         reset_after: bool = True,
+        started_at: str | None = None,
     ) -> dict[str, Any]:
         import requests
 
@@ -2024,7 +2025,7 @@ class StreamWorker:
             resp = requests.post(url, json=payload, timeout=10)
             if 200 <= resp.status_code < 300:
                 if reset_after:
-                    self.reset_all_counts()
+                    self.reset_all_counts(started_at=started_at)
                 return {
                     "ok": True,
                     "status_code": resp.status_code,
@@ -2036,20 +2037,63 @@ class StreamWorker:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    @staticmethod
+    def _iso_to_local_date(iso_str: str | None) -> str | None:
+        if not iso_str:
+            return None
+        try:
+            dt = datetime.fromisoformat(str(iso_str))
+            local_dt = dt.astimezone() if dt.tzinfo is not None else dt
+            return local_dt.strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+    def _check_daily_maintenance(self, now_local: datetime | None = None) -> dict[str, bool]:
+        """Run scheduled End-of-Day report (if due) and enforce daily heatmap rollover."""
+        now_dt = now_local if now_local is not None else datetime.now().astimezone()
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.astimezone()
+        today_str = now_dt.strftime("%Y-%m-%d")
+        yesterday_str = (now_dt.date() - timedelta(days=1)).isoformat()
+        now_hhmm = now_dt.strftime("%H:%M")
+        now_utc_iso = now_dt.astimezone(timezone.utc).isoformat()
+
+        cfg = self.config
+        report_sent = False
+        heatmap_rollover = False
+
+        last_sent = self.db.get_meta("last_daily_report_date")
+        if cfg.daily_report_enabled and cfg.webhook_url.strip():
+            target_hhmm = (cfg.daily_report_time or "23:55").strip()
+            if now_hhmm >= target_hhmm and last_sent != today_str:
+                res = self.send_daily_report(
+                    webhook_url=cfg.webhook_url,
+                    date_str=today_str,
+                    started_at=now_utc_iso,
+                )
+                if res.get("ok"):
+                    self.db.set_meta("last_daily_report_date", today_str)
+                    last_sent = today_str
+                    report_sent = True
+
+        # Guaranteed daily heatmap rollover when daily report is disabled, lacks a webhook,
+        # failed, or was missed while offline (skip only if yesterday's daily report already reset it)
+        if not report_sent:
+            hm_date = self._iso_to_local_date(self.hotspot.started_at)
+            if (
+                hm_date is not None
+                and hm_date < today_str
+                and not (hm_date == yesterday_str and last_sent == yesterday_str)
+            ):
+                self.reset_heatmap(started_at=now_utc_iso)
+                heatmap_rollover = True
+
+        return {"report_sent": report_sent, "heatmap_rollover": heatmap_rollover}
+
     def _daily_report_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                cfg = self.config
-                if cfg.daily_report_enabled and cfg.webhook_url.strip():
-                    now_local = datetime.now()
-                    today_str = now_local.strftime("%Y-%m-%d")
-                    now_hhmm = now_local.strftime("%H:%M")
-                    target_hhmm = (cfg.daily_report_time or "23:55").strip()
-                    last_sent = self.db.get_meta("last_daily_report_date")
-                    if now_hhmm >= target_hhmm and last_sent != today_str:
-                        res = self.send_daily_report(webhook_url=cfg.webhook_url, date_str=today_str)
-                        if res.get("ok"):
-                            self.db.set_meta("last_daily_report_date", today_str)
+                self._check_daily_maintenance()
             except Exception:
                 pass
             self._stop_event.wait(timeout=30.0)

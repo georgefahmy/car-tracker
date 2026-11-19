@@ -541,13 +541,13 @@ class HotspotTracker:
         with self._lock:
             self._tracks.clear()
 
-    def reset(self, preserve_stationary: bool = False) -> None:
+    def reset(self, preserve_stationary: bool = False, started_at: str | None = None) -> None:
         save_snap: tuple[np.ndarray, str] | None = None
         with self._lock:
             self.vehicle_grid.fill(0.0)
             self.person_grid.fill(0.0)
             self._version += 1
-            self.started_at = datetime.now(timezone.utc).isoformat()
+            self.started_at = started_at or datetime.now(timezone.utc).isoformat()
             if preserve_stationary:
                 rebuilt_stops: list[_StationarySpot] = []
                 for st in self._tracks.values():

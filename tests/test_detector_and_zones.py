@@ -1148,7 +1148,7 @@ def test_app_version_parsing_and_ui_exposure(tmp_path: Path) -> None:
     assert parse_version_from_config_yaml(tmp_path / "missing.yaml") is None
 
     expected_ver = parse_version_from_config_yaml(Path("car_tracker/config.yaml"))
-    assert expected_ver == "1.0.38"
+    assert expected_ver == "1.0.39"
     get_app_version.cache_clear()
     assert get_app_version() == expected_ver
     assert HomeAssistantPublisher.APP_VERSION == expected_ver
@@ -1791,7 +1791,7 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
     collector.feed(html)
 
     assert collector.has_modal_backdrop is False
-    for dialog_id in ("settingsModal", "snapshotModal", "birdseyeModal"):
+    for dialog_id in ("settingsModal", "snapshotModal", "birdseyeModal", "confirmHeatmapClearModal"):
         assert dialog_id in collector.dialogs
         attrs = collector.dialogs[dialog_id]
         assert attrs.get("closedby") == "any"
@@ -1799,9 +1799,9 @@ def test_ui_dialogs_settings_layout_and_tooltips(tmp_path: Path) -> None:
         assert "role" not in attrs
         assert "aria-modal" not in attrs
 
-    assert "static/icon.png?v=32" in collector.links
-    assert "static/styles.css?v=32" in collector.links
-    assert "static/app.js?v=32" in collector.scripts
+    assert "static/icon.png?v=33" in collector.links
+    assert "static/styles.css?v=33" in collector.links
+    assert "static/app.js?v=33" in collector.scripts
     for tip_id, btn_id in (
         ("tip-heatmap_toggle", "btnHeatmapToggle"),
         ("tip-heatmap_reset", "btnHeatmapReset"),
@@ -3829,5 +3829,111 @@ def test_reset_counts_and_daily_report_clear_violations_and_snapshots(
     report_block = app_js.split('document.getElementById("btnSendDailyReport").addEventListener', 1)[1].split("\n});", 1)[0]
     assert "refreshViolations()" in reset_block
     assert "refreshViolations()" in report_block
+
+
+def test_daily_heatmap_rollover_and_settings_clear_confirmation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import re
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    import requests
+
+    from app.database import Database
+    from app.detector import HotspotTracker
+    from app.stream import StreamWorker
+
+    base_local = datetime.now().astimezone().replace(hour=10, minute=0, second=0, microsecond=0)
+    day1_morning_utc = base_local.astimezone(timezone.utc)
+    day1_afternoon = base_local.replace(hour=15, minute=0)
+    day2_midnight = (base_local + timedelta(days=1)).replace(hour=0, minute=5)
+    day2_morning = (base_local + timedelta(days=1)).replace(hour=9, minute=30)
+
+    # 1. Daily rollover with daily_report_enabled=False (midnight resets cumulative heatmap cleanly)
+    s1 = Settings(data_dir=str(tmp_path / "data_rollover"), daily_report_enabled=False)
+    w1 = StreamWorker(settings=s1, db=Database(s1.db_path))
+    w1.hotspot.reset(started_at=day1_morning_utc.isoformat())
+    w1.hotspot.update([_make_car(1, 0.4, 0.5)], 1000, 1000, now_ts=100.0)
+    w1.hotspot.update([_make_car(1, 0.6, 0.5)], 1000, 1000, now_ts=100.5)
+    assert float(w1.hotspot.grid.max()) > 0.0
+
+    # Same local calendar day -> heatmap preserved
+    res_same = w1._check_daily_maintenance(now_local=day1_afternoon)
+    assert res_same == {"report_sent": False, "heatmap_rollover": False}
+    assert float(w1.hotspot.grid.max()) > 0.0
+
+    # Cross local midnight -> heatmap resets & persists zeroed grid + new started_at
+    res_roll = w1._check_daily_maintenance(now_local=day2_midnight)
+    assert res_roll == {"report_sent": False, "heatmap_rollover": True}
+    assert float(w1.hotspot.grid.max()) == 0.0
+    assert w1._iso_to_local_date(w1.hotspot.started_at) == day2_midnight.strftime("%Y-%m-%d")
+    reloaded = HotspotTracker(storage_path=s1.data_path / "heatmap.npy")
+    assert float(reloaded.grid.max()) == 0.0
+
+    # New day traffic accumulates and is not wiped on another same-day check
+    w1.hotspot.update([_make_car(2, 0.5, 0.5)], 1000, 1000, now_ts=200.0)
+    res_day2 = w1._check_daily_maintenance(now_local=day2_morning)
+    assert res_day2 == {"report_sent": False, "heatmap_rollover": False}
+    assert float(w1.hotspot.grid.max()) > 0.0
+
+    # 2. Scheduled End-of-Day report (23:55) + anti-double-wipe guard across 00:05
+    s2 = Settings(
+        data_dir=str(tmp_path / "data_report_rollover"),
+        daily_report_enabled=True,
+        daily_report_time="23:55",
+        webhook_url="https://discord.com/api/webhooks/123/abc",
+    )
+    w2 = StreamWorker(settings=s2, db=Database(s2.db_path))
+    w2.hotspot.reset(started_at=day1_morning_utc.isoformat())
+    w2.hotspot.update([_make_car(10, 0.4, 0.6)], 1000, 1000, now_ts=100.0)
+    w2.db.increment_stats(unique_cars=2, total_cars=4)
+
+    posts: list[dict] = []
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda url, **kw: (posts.append(kw) or SimpleNamespace(status_code=204, text="")),
+    )
+    day1_eod = base_local.replace(hour=23, minute=56)
+    res_eod = w2._check_daily_maintenance(now_local=day1_eod)
+    assert res_eod == {"report_sent": True, "heatmap_rollover": False}
+    assert len(posts) == 1
+    assert float(w2.hotspot.grid.max()) == 0.0
+    assert w2.db.get_meta("last_daily_report_date") == day1_eod.strftime("%Y-%m-%d")
+
+    # Late-night traffic at 23:58 must NOT be wiped 9 minutes later at 00:05
+    w2.hotspot.update([_make_car(11, 0.5, 0.6)], 1000, 1000, now_ts=110.0)
+    res_after_mid = w2._check_daily_maintenance(now_local=day2_midnight)
+    assert res_after_mid == {"report_sent": False, "heatmap_rollover": False}
+    assert float(w2.hotspot.grid.max()) > 0.0
+
+    # If day 2's daily report fails / is missed, crossing into day 3 forces rollover
+    day3_midnight = (base_local + timedelta(days=2)).replace(hour=0, minute=5)
+    res_day3 = w2._check_daily_maintenance(now_local=day3_midnight)
+    assert res_day3 == {"report_sent": False, "heatmap_rollover": True}
+    assert float(w2.hotspot.grid.max()) == 0.0
+    assert w2._iso_to_local_date(w2.hotspot.started_at) == day3_midnight.strftime("%Y-%m-%d")
+
+    # 3. UI check: Clear Heatmap moved out of top bar into Settings footer + accessible confirm dialog
+    html = Path("static/index.html").read_text(encoding="utf-8")
+    topbar_m = re.search(r'<header class="topbar">.*?</header>', html, re.DOTALL)
+    settings_m = re.search(r'<dialog[^>]*id="settingsModal"[^>]*>.*?</dialog>', html, re.DOTALL)
+    confirm_m = re.search(r'<dialog[^>]*id="confirmHeatmapClearModal"[^>]*>.*?</dialog>', html, re.DOTALL)
+    assert topbar_m is not None and settings_m is not None and confirm_m is not None
+    assert 'id="btnHeatmapReset"' not in topbar_m.group(0)
+    assert 'id="btnHeatmapReset"' in settings_m.group(0)
+
+    confirm_html = confirm_m.group(0)
+    assert 'method="dialog"' in confirm_html
+    assert 'aria-labelledby="confirmHeatmapClearTitle"' in confirm_html
+    assert 'closedby="any"' in confirm_html
+    assert 'value="confirm"' in confirm_html
+    assert re.search(r'<button[^>]*value="cancel"[^>]*autofocus', confirm_html)
+
+    app_js = Path("static/app.js").read_text(encoding="utf-8")
+    assert "confirmHeatmapClearModal.returnValue" in app_js
+    assert 'confirmHeatmapClearModal.returnValue = ""' in app_js
+
 
 

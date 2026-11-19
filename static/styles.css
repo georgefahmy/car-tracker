@@ -835,6 +835,27 @@ input, select {
   border-top: 1px solid var(--panel-border);
   background: #0f1520;
 }
+.modal-footer-split {
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.modal-footer-left,
+.modal-footer-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+dialog.modal-confirm {
+  width: min(440px, calc(100dvw - 32px));
+}
+.confirm-copy {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
 .snapshot-full { width: 100%; border-radius: 8px; display: block; }
 
 /* Setting Tooltips (Toggletips & Action Hints) */

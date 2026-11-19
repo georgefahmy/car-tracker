@@ -1,5 +1,5 @@
 name: Car & Red-Zone Tracker
-version: "1.0.38"
+version: "1.0.39"
 slug: car_tracker
 description: Real-time YOLO vehicle & person tracker, red-zone parking & speeding detector with on-demand ALPR, native Home Assistant entities, and ONNX/iGPU acceleration.
 url: https://github.com/georgefahmy/car-tracker
